@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>yask — yet another simple kanban</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='2' width='4' height='12' rx='1' fill='%237c6cf0'/%3E%3Crect x='6' y='2' width='4' height='8' rx='1' fill='%234f9cf0'/%3E%3Crect x='11' y='2' width='4' height='5' rx='1' fill='%233fbf7f'/%3E%3C/svg%3E">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="brand" title="yet another simple kanban">yask</div>
+      <nav id="project-list" aria-label="Projects"></nav>
+      <form id="new-project-form" class="sidebar-form">
+        <input id="new-project-name" type="text" placeholder="New project…" autocomplete="off">
+        <button type="submit" class="btn" aria-label="Create project">+</button>
+      </form>
+    </aside>
+    <main id="main">
+      <header id="topbar">
+        <h1 id="project-name">yask</h1>
+        <input id="search" type="search" placeholder="Search tasks…" autocomplete="off">
+        <label class="switch" title="Show archived tasks">
+          <input type="checkbox" id="show-archived">
+          <span class="switch-label">Archived</span>
+        </label>
+        <button id="theme-toggle" class="icon-btn" title="Toggle dark / light theme" aria-label="Toggle theme"></button>
+      </header>
+      <div id="board" aria-label="Board"></div>
+      <section id="search-results" hidden aria-label="Search results"></section>
+      <div id="empty-state" hidden>
+        <p id="empty-state-text"></p>
+      </div>
+    </main>
+  </div>
+  <div id="modal-root"></div>
+  <div id="toast-root" aria-live="polite"></div>
+  <script type="module" src="/static/js/main.js"></script>
+</body>
+</html>

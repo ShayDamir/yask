@@ -34,4 +34,68 @@ Tech stack:
 * sqlite backend
 * python3
 
-After MVP, the development of yask will dogfood itself to add more features
+After MVP, the development of yask will dogfood itself to add more features.
+
+## Usage
+
+### Development
+
+Everything is provided by the flake (nixpkgs 26.05). Enter the dev environment
+(Python with all dependencies and pytest):
+
+```
+nix develop
+```
+
+Run the test suite (57 tests covering the domain rules above):
+
+```
+python3 -m pytest tests -q
+```
+
+Full build + tests, hermetically:
+
+```
+nix build
+nix flake check
+```
+
+### Web UI
+
+```
+yask serve                # http://127.0.0.1:4304  (0x10D0)
+yask serve --port 9000    # or: YASK_PORT=9000 yask serve
+yask serve --data DIR     # or: YASK_DATA=DIR yask serve
+```
+
+The UI is vanilla ES modules (no build step). State lives in a SQLite database
+inside the data directory (default `~/.local/share/yask/yask.db`).
+
+### MCP interface
+
+```
+yask mcp
+```
+
+Speaks MCP over stdio. Example client config:
+
+```json
+{ "mcpServers": { "yask": { "command": "nix", "args": ["run", "/path/to/yask", "--", "mcp"] } } }
+```
+
+Tools: list/create projects and tasks, set prerequisites, move/archive/
+restore/delete/reorder tasks, task history, task types, attachments (list,
+read — images come back as viewable image blocks, markdown as text). Actions
+that would touch several tasks return `requires_confirmation` plus the list of
+affected tasks; re-invoke with `confirm: true` to apply.
+
+## Project layout
+
+- `yask/store.py` — all domain logic (projects, numbering, epic trees,
+  prerequisite cascade, archiving, ordering, history, attachments)
+- `yask/api.py` — REST API; also serves the web UI
+- `yask/web/` — web UI (vanilla JS modules, no build step)
+- `yask/mcp_server.py` — MCP tool surface
+- `yask/cli.py` — `yask serve` / `yask mcp`
+- `tests/` — pytest suite
+- `flake.nix` / `package.nix` — packaging and dev environment
