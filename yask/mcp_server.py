@@ -9,13 +9,14 @@ list of affected tasks; the agent should re-invoke the same tool with
 from __future__ import annotations
 
 import functools
+import inspect
 
 import json
 
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.types import TextContent
 
-from .store import Store, YaskError
+from .store import NotFound, ValidationError, Store, YaskError
 
 
 def _wrap(fn):
@@ -39,6 +40,59 @@ def _wrap(fn):
     return runner
 
 
+def _resolve_project(store: Store, project) -> int:
+    """Resolve a project identity (name or numeric id) to its project id.
+
+    Accepts a project name (case-insensitive) or a numeric id; a numeric
+    string is also accepted. Raises a domain error when it cannot resolve.
+    """
+    if isinstance(project, bool):
+        raise ValidationError(f"invalid project '{project}': expected a name or id")
+    if isinstance(project, int):
+        return store._get_project(project)["id"]
+    text = str(project).strip()
+    if text.isdigit():
+        try:
+            return store._get_project(int(text))["id"]
+        except NotFound:
+            pass  # not a numeric id; fall through to case-insensitive name match
+    key = text.lower()
+    for p in store.list_projects():
+        if p["name"].lower() == key:
+            return p["id"]
+    raise NotFound(f"project '{project}' not found")
+
+
+def _project_arg(store: Store):
+    """Let a project-scoped tool identify its project by name or id.
+
+    Renames the first parameter (``project_id``) to ``project`` in the
+    exposed tool schema and resolves it to an internal project id before the
+    tool body runs, so bodies keep taking ``project_id``.
+    """
+
+    def decorate(fn):
+        params = list(inspect.signature(fn).parameters.values())
+        renamed = [params[0].replace(name="project", annotation=str | int)] + params[1:]
+        new_sig = inspect.signature(fn).replace(parameters=renamed)
+
+        @functools.wraps(fn)
+        def runner(*args, **kwargs):
+            if args:
+                kwargs = dict(kwargs)
+                kwargs.setdefault("project", args[0])
+                args = args[1:]
+            if "project" not in kwargs:
+                raise TypeError("missing required argument 'project'")
+            kwargs["project_id"] = _resolve_project(store, kwargs.pop("project"))
+            return fn(*args, **kwargs)
+
+        runner.__signature__ = new_sig
+        return runner
+
+    return decorate
+
+
 def build_server(store: Store) -> FastMCP:
     mcp = FastMCP("yask")
 
@@ -56,12 +110,14 @@ def build_server(store: Store) -> FastMCP:
 
     @mcp.tool()
     @_wrap
+    @_project_arg(store)
     def get_project(project_id: int) -> dict:
         """Get a project with its full task tree (epics nest their children)."""
         return store.get_project(project_id)
 
     @mcp.tool()
     @_wrap
+    @_project_arg(store)
     def list_tasks(
         project_id: int, state: str | None = None, include_archived: bool = False
     ) -> list[dict]:
@@ -70,6 +126,7 @@ def build_server(store: Store) -> FastMCP:
 
     @mcp.tool()
     @_wrap
+    @_project_arg(store)
     def create_task(
         project_id: int,
         title: str,
@@ -85,6 +142,7 @@ def build_server(store: Store) -> FastMCP:
 
     @mcp.tool()
     @_wrap
+    @_project_arg(store)
     def update_task(
         project_id: int,
         number: int,
@@ -100,19 +158,21 @@ def build_server(store: Store) -> FastMCP:
             number,
             title=title,
             description=description,
-            type_name=type,
+            type=type,
             estimate=estimate,
             parent_number=parent_number,
         )
 
     @mcp.tool()
     @_wrap
+    @_project_arg(store)
     def set_prerequisites(project_id: int, number: int, prereq_numbers: list[int]) -> dict:
         """Replace a task's prerequisite list. Cycles are rejected."""
         return store.set_prerequisites(project_id, number, prereq_numbers)
 
     @mcp.tool()
     @_wrap
+    @_project_arg(store)
     def move_task(
         project_id: int,
         number: int,
@@ -133,12 +193,14 @@ def build_server(store: Store) -> FastMCP:
 
     @mcp.tool()
     @_wrap
+    @_project_arg(store)
     def archive_task(project_id: int, number: int, confirm: bool = False) -> dict:
         """Archive a task (an epic archives its whole subtree)."""
         return store.archive_task(project_id, number, confirm)
 
     @mcp.tool()
     @_wrap
+    @_project_arg(store)
     def restore_task(
         project_id: int, number: int, to_state: str = "Backlog", confirm: bool = False
     ) -> dict:
@@ -147,12 +209,14 @@ def build_server(store: Store) -> FastMCP:
 
     @mcp.tool()
     @_wrap
+    @_project_arg(store)
     def delete_task(project_id: int, number: int, confirm: bool = False) -> dict:
         """Permanently delete a task (an epic's subtree is removed with it)."""
         return store.delete_task(project_id, number, confirm)
 
     @mcp.tool()
     @_wrap
+    @_project_arg(store)
     def reorder_task(
         project_id: int,
         number: int,
@@ -164,6 +228,7 @@ def build_server(store: Store) -> FastMCP:
 
     @mcp.tool()
     @_wrap
+    @_project_arg(store)
     def get_task_history(project_id: int, number: int) -> list[dict]:
         """Every state change of a task, with timestamps."""
         return store.get_history(project_id, number)
@@ -182,6 +247,7 @@ def build_server(store: Store) -> FastMCP:
 
     @mcp.tool()
     @_wrap
+    @_project_arg(store)
     def add_attachment(
         project_id: int, number: int, filename: str, data_base64: str,
         content_type: str = "text/markdown",
@@ -195,6 +261,7 @@ def build_server(store: Store) -> FastMCP:
 
     @mcp.tool()
     @_wrap
+    @_project_arg(store)
     def list_attachments(project_id: int, number: int) -> list[dict]:
         """List a task's attachments (metadata only)."""
         return store.list_attachments(project_id, number)
