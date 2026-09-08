@@ -39,6 +39,129 @@ def test_get_attachment_text(store, project):
     assert data["text"] == "# Hello\n\nworld"
 
 
+def test_add_attachment_from_file_path(store, project, tmp_path):
+    t = store.create_task(project["id"], "T")
+    md_file = tmp_path / "notes.md"
+    md_file.write_bytes(b"# From file\n")
+    res = call(
+        store,
+        "add_attachment",
+        project=project["name"],
+        number=t["number"],
+        file_path=str(md_file),
+    )
+    meta = json.loads(texts(res)[0].text)
+    assert meta["filename"] == "notes.md"
+    assert meta["content_type"] == "text/markdown"
+    got_meta, data = store.get_attachment(meta["id"])
+    assert data == b"# From file\n"
+    # viewer round-trip confirms the stored type is usable
+    view = call(store, "get_attachment", attachment_id=meta["id"])
+    assert json.loads(texts(view)[0].text)["text"] == "# From file\n"
+
+
+def test_add_attachment_file_path_explicit_filename_content_type(store, project, tmp_path):
+    t = store.create_task(project["id"], "T")
+    png_file = tmp_path / "logo.png"
+    png_file.write_bytes(PNG_1X1)
+    res = call(
+        store,
+        "add_attachment",
+        project=project["name"],
+        number=t["number"],
+        file_path=str(png_file),
+        filename="renamed.png",
+        content_type="image/png",
+    )
+    meta = json.loads(texts(res)[0].text)
+    assert meta["filename"] == "renamed.png"
+    assert meta["content_type"] == "image/png"
+
+
+def test_add_attachment_file_path_infers_image_type(store, project, tmp_path):
+    t = store.create_task(project["id"], "T")
+    png_file = tmp_path / "logo.png"
+    png_file.write_bytes(PNG_1X1)
+    res = call(
+        store,
+        "add_attachment",
+        project=project["name"],
+        number=t["number"],
+        file_path=str(png_file),
+    )
+    meta = json.loads(texts(res)[0].text)
+    assert meta["filename"] == "logo.png"  # basename used by default
+    assert meta["content_type"] == "image/png"  # inferred from extension
+
+
+def test_add_attachment_file_path_missing(store, project, tmp_path):
+    t = store.create_task(project["id"], "T")
+    res = call(
+        store,
+        "add_attachment",
+        project=project["name"],
+        number=t["number"],
+        file_path=str(tmp_path / "nope.md"),
+    )
+    assert json.loads(texts(res)[0].text)["ok"] is False
+
+
+def test_add_attachment_requires_data_base64_or_file_path(store, project):
+    t = store.create_task(project["id"], "T")
+    res = call(store, "add_attachment", project=project["name"], number=t["number"])
+    data = json.loads(texts(res)[0].text)
+    assert data["ok"] is False
+    assert "data_base64 or file_path" in data["error"]
+
+
+def test_add_attachment_unknown_extension(store, project, tmp_path):
+    t = store.create_task(project["id"], "T")
+    f = tmp_path / "x.weird"
+    f.write_bytes(b"hi")
+    res = call(
+        store,
+        "add_attachment",
+        project=project["name"],
+        number=t["number"],
+        file_path=str(f),
+    )
+    data = json.loads(texts(res)[0].text)
+    assert data["ok"] is False
+    assert "content type" in data["error"]
+
+
+def test_add_attachment_data_base64_roundtrip(store, project):
+    t = store.create_task(project["id"], "T")
+    content = b"# b64 note"
+    res = call(
+        store,
+        "add_attachment",
+        project=project["name"],
+        number=t["number"],
+        filename="b64.md",
+        data_base64=base64.b64encode(content).decode(),
+    )
+    meta = json.loads(texts(res)[0].text)
+    assert meta["content_type"] == "text/markdown"
+    got_meta, data = store.get_attachment(meta["id"])
+    assert data == content
+
+
+def test_add_attachment_bad_base64(store, project):
+    t = store.create_task(project["id"], "T")
+    res = call(
+        store,
+        "add_attachment",
+        project=project["name"],
+        number=t["number"],
+        filename="bad.md",
+        data_base64="@@not-base64@@",
+    )
+    data = json.loads(texts(res)[0].text)
+    assert data["ok"] is False
+    assert "data_base64" in data["error"]
+
+
 def test_get_attachment_image(store, project):
     t = store.create_task(project["id"], "T")
     att = store.add_attachment(project["id"], t["number"], "px.png", "image/png", PNG_1X1)

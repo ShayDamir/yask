@@ -12,6 +12,7 @@ import functools
 import inspect
 
 import json
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.types import TextContent
@@ -91,6 +92,41 @@ def _project_arg(store: Store):
         return runner
 
     return decorate
+
+
+_EXT_TO_CONTENT_TYPE = {
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".txt": "text/plain",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+}
+
+
+def _read_attachment_file(file_path: str) -> tuple[str, bytes, str]:
+    """Read an attachment off the local filesystem after basic sanity checks.
+
+    Returns ``(filename, data, content_type)`` derived from the given path.
+    Raises a domain error for missing files, oversized files, or extensions
+    whose content type cannot be determined.
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise NotFound(f"attachment file not found: {file_path}")
+    size = path.stat().st_size
+    if size > Store.MAX_ATTACHMENT_SIZE:
+        raise ValidationError("attachment exceeds 10 MB limit")
+    ext = path.suffix.lower()
+    content_type = _EXT_TO_CONTENT_TYPE.get(ext)
+    if content_type is None:
+        raise ValidationError(
+            f"cannot infer content type from extension '{path.suffix}'; pass content_type explicitly"
+        )
+    return path.name, path.read_bytes(), content_type
 
 
 def build_server(store: Store) -> FastMCP:
@@ -249,14 +285,36 @@ def build_server(store: Store) -> FastMCP:
     @_wrap
     @_project_arg(store)
     def add_attachment(
-        project_id: int, number: int, filename: str, data_base64: str,
-        content_type: str = "text/markdown",
+        project_id: int,
+        number: int,
+        filename: str | None = None,
+        data_base64: str | None = None,
+        content_type: str | None = None,
+        file_path: str | None = None,
     ) -> dict:
-        """Attach markdown or an image to a task (base64-encoded content)."""
-        import base64
+        """Attach markdown or an image to a task.
 
+        Provide ``file_path`` (reads the file, infers content_type from the
+        extension, filename defaults to the basename) or ``data_base64``
+        (base64-encoded content, content_type defaults to text/markdown).
+        data_base64 is the primary path; if both are given, file_path wins.
+        """
+        if file_path is not None:
+            inferred_name, data, inferred_type = _read_attachment_file(file_path)
+            filename = filename if filename is not None else inferred_name
+            content_type = content_type or inferred_type
+        else:
+            if data_base64 is None:
+                raise ValidationError("provide data_base64 or file_path")
+            import base64
+
+            try:
+                data = base64.b64decode(data_base64)
+            except (ValueError, TypeError) as e:
+                raise ValidationError(f"invalid data_base64: {e}") from e
+            content_type = content_type or "text/markdown"
         return store.add_attachment(
-            project_id, number, filename, content_type, base64.b64decode(data_base64)
+            project_id, number, filename, content_type, data
         )
 
     @mcp.tool()
