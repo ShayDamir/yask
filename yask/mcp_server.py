@@ -214,6 +214,13 @@ def build_server(store: Store) -> FastMCP:
         fmt = meta["content_type"].split("/", 1)[1]
         return [TextContent(type="text", text=json.dumps(meta)), Image(data=data, format=fmt)]
 
+    @mcp.tool()
+    @_wrap
+    def delete_attachment(attachment_id: int) -> dict:
+        """Delete an attachment permanently."""
+        store.delete_attachment(attachment_id)
+        return {"deleted": attachment_id}
+
     return mcp
 
 

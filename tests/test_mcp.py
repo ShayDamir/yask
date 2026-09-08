@@ -64,4 +64,20 @@ def test_get_attachment_is_registered(store, project):
     async def names():
         return sorted(t.name for t in await server.list_tools())
 
-    assert "get_attachment" in asyncio.run(names())
+    names_list = asyncio.run(names())
+    assert "get_attachment" in names_list
+    assert "delete_attachment" in names_list
+
+
+def test_delete_attachment(store, project):
+    t = store.create_task(project["id"], "T")
+    att = store.add_attachment(
+        project["id"], t["number"], "x.md", "text/markdown", b"bye"
+    )
+    res = call(store, "delete_attachment", attachment_id=att["id"])
+    assert json.loads(texts(res)[0].text) == {"deleted": att["id"]}
+    assert store.list_attachments(project["id"], t["number"]) == []
+    res = call(store, "delete_attachment", attachment_id=att["id"])
+    data = json.loads(texts(res)[0].text)
+    assert data["ok"] is False
+    assert "not found" in data["error"]

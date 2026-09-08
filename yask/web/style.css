@@ -79,6 +79,7 @@ html, body {
 }
 
 #app { display: flex; height: 100vh; overflow: hidden; }
+#app.sidebar-collapsed #sidebar { display: none; }
 
 /* ---- sidebar ---------------------------------------------------------- */
 
@@ -179,8 +180,8 @@ html, body {
 }
 
 .column {
-  width: 280px;
-  min-width: 280px;
+  width: 240px;
+  min-width: 240px;
   max-height: 100%;
   background: var(--bg-column);
   border: 1px solid var(--border);

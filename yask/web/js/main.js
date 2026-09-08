@@ -18,6 +18,28 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+const SIDEBAR_KEY = "yask.sidebar";
+const SIDEBAR_ROOT = "app";
+
+function applySidebar(collapsed) {
+  document.getElementById(SIDEBAR_ROOT).classList.toggle("sidebar-collapsed", collapsed);
+  const btn = $("sidebar-toggle");
+  btn.textContent = collapsed ? "»" : "«";
+  btn.title = collapsed ? "Show sidebar" : "Hide sidebar";
+}
+
+function initSidebar() {
+  const saved = localStorage.getItem(SIDEBAR_KEY);
+  applySidebar(saved === "collapsed");
+  $("sidebar-toggle").addEventListener("click", () => {
+    const app = document.getElementById(SIDEBAR_ROOT);
+    const collapsing = !app.classList.contains("sidebar-collapsed");
+    app.classList.toggle("sidebar-collapsed", collapsing);
+    localStorage.setItem(SIDEBAR_KEY, collapsing ? "collapsed" : "open");
+    applySidebar(collapsing);
+  });
+}
+
 // -- data loading -------------------------------------------------------------
 
 async function loadProjects() {
@@ -272,6 +294,7 @@ async function handleDrop(number, intent) {
 
 function init() {
   initTheme();
+  initSidebar();
 
   $("search").addEventListener(
     "input",
