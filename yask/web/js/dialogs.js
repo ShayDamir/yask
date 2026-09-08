@@ -67,7 +67,7 @@ export function confirmDialog({
       message ? h("p", { style: "margin:0;color:var(--text-dim)" }, message) : null,
     ];
     if (affected.length) {
-      body.push(h("p", { style: "margin:12px 0 0;font-size:13px" }, "This also affects:"));
+      body.push(h("p", { style: "margin:12px 0 0;font-size:max(13px,var(--min-font))" }, "This also affects:"));
       body.push(
         h(
           "ul",
@@ -281,7 +281,7 @@ export function openEditorModal(project, task, actions) {
       return label;
     })
   );
-  if (!others.length) checkList.append(h("span", { style: "color:var(--text-dim);font-size:12px" }, "No other tasks in this project."));
+  if (!others.length) checkList.append(h("span", { style: "color:var(--text-dim);font-size:max(12px,var(--min-font))" }, "No other tasks in this project."));
 
   // attachments
   const attList = h("div", { class: "attachment-list" });
@@ -289,7 +289,7 @@ export function openEditorModal(project, task, actions) {
   const renderAttachments = (list) => {
     clear(attList);
     if (!list.length) {
-      attList.append(h("span", { style: "color:var(--text-dim);font-size:12px" }, "No attachments."));
+      attList.append(h("span", { style: "color:var(--text-dim);font-size:max(12px,var(--min-font))" }, "No attachments."));
       return;
     }
     for (const a of list) {

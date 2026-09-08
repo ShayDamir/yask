@@ -5,6 +5,7 @@ import { renderBoard, renderSearchResults, renderSidebar } from "./render.js";
 import { initDnd } from "./dnd.js";
 import { openEditorModal, openNewTaskModal, confirmDialog } from "./dialogs.js";
 import { initTheme } from "./theme.js";
+import { initFontSize } from "./fontsize.js";
 import { toast, toastError } from "./toast.js";
 import { debounce } from "./util.js";
 
@@ -294,6 +295,7 @@ async function handleDrop(number, intent) {
 
 function init() {
   initTheme();
+  initFontSize();
   initSidebar();
 
   $("search").addEventListener(

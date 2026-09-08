@@ -117,7 +117,7 @@ export function renderEpicChildren(task, actions) {
   const children = task.children || [];
   if (!children.length) {
     wrap.append(
-      h("span", { style: "color:var(--text-dim);font-size:12px" }, "No tasks in this epic yet.")
+      h("span", { style: "color:var(--text-dim);font-size:max(12px,var(--min-font))" }, "No tasks in this epic yet.")
     );
     return wrap;
   }
