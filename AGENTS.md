@@ -62,6 +62,39 @@ These are not obvious from file names and are easy to implement incorrectly:
 - **Every state change is recorded with a timestamp.**
 - Tasks may have **attachments**: markdown or images.
 
+## Task-solving workflow
+
+Development dogfoods yask through the MCP interface (`yask_*` tools). Solve
+one task at a time, moving it through its lifecycle and recording evidence in
+yask as attachments:
+
+1. A task starts in `Backlog`. Move it to `Todo` when it is scheduled and to
+   `Planning` when you start on it. Before implementing, write a short plan
+   and attach it to the task (`yask_add_attachment`).
+2. Move the task to `In progress` and implement the smallest appropriate
+   change for that task only — do not bundle unrelated fixes.
+3. Verify per the Commands section above (`python3 -m pytest tests -q`, and
+   `nix flake check` before calling it done; syntax-check edited JS with
+   `nix shell nixpkgs#nodejs -c node --check <file>`), then attach a short
+   session summary and move the task to `Review`.
+4. Address review findings in a follow-up round (attach your response). Run a
+   second review once the findings are resolved: if it finds **no significant
+   findings**, commit the changes, then the task may be marked `Done` without
+   waiting for the human. Otherwise leave the task in `Review` for the human
+   to decide.
+
+### When a new task arises during implementation
+
+If work outside the current task's scope comes up mid-implementation:
+
+- Create it immediately as a task (`yask_create_task`) and move it to `Todo`
+  so it is scheduled and not lost.
+- If the current task depends on it, record that: `yask_set_prerequisites`
+  with the current task's number and the new task as a prerequisite.
+- Do **not** implement the new work inside the current task. Work in
+  dependency order — finish prerequisite tasks first (through `Done`), then
+  come back to the task that depended on them.
+
 ## Scope note
 
 The README says development dogfoods yask on itself after MVP. Do not infer
