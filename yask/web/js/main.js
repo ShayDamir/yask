@@ -311,6 +311,15 @@ function init() {
     render();
   });
 
+  $("refresh").addEventListener("click", async () => {
+    try {
+      await refresh();
+      toast("Refreshed", "success");
+    } catch (err) {
+      toastError(err);
+    }
+  });
+
   $("new-project-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const input = $("new-project-name");
