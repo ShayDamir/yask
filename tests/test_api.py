@@ -63,6 +63,16 @@ def test_task_lifecycle_over_api(client, pid):
     assert [h["to_state"] for h in hist] == ["Backlog", "Todo"]
 
 
+def test_create_task_ignores_state_field(client, pid):
+    # new tasks can only be added to the Backlog (#1); a stale client
+    # sending "state" in the body is ignored and the task lands in Backlog
+    r = client.post(
+        f"/api/projects/{pid}/tasks", json={"title": "sneaky", "state": "Todo"}
+    )
+    assert r.status_code == 201
+    assert r.json()["state"] == "Backlog"
+
+
 def test_move_confirmation_flow(client, pid):
     client.post(f"/api/projects/{pid}/tasks", json={"title": "main"})
     client.post(f"/api/projects/{pid}/tasks", json={"title": "prereq"})

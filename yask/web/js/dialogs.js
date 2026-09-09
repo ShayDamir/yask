@@ -255,11 +255,11 @@ export function openNewTaskModal(project, state, onCreated) {
         const isEpic = types.find((t) => t.name === typeSelect.value)?.is_epic;
         const est = isEpic ? null : estInput.value === "" ? null : Number(estInput.value);
         try {
+          // new tasks always land in the Backlog (#1); no state field
           await api.createTask(pid, {
             title,
             type: typeSelect.value,
             estimate: est,
-            state,
             description: patternOn ? description : "",
           });
           setLastType(pid, typeSelect.value);

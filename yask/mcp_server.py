@@ -174,7 +174,8 @@ def build_server(store: Store) -> FastMCP:
         parent_number: int | None = None,
         description: str = "",
     ) -> dict:
-        """Create a task (Story/Task/Bug or Epic). Epics take no estimate."""
+        """Create a task (Story/Task/Bug or Epic). Epics take no estimate.
+        New tasks always start in the Backlog; move them forward separately."""
         return store.create_task(
             project_id, title, type, estimate, parent_number, description
         )

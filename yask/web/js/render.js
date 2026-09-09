@@ -216,7 +216,8 @@ function renderColumn(colState, roots, actions, filterLabel) {
     { class: "column-head" },
     h("span", {}, colState),
     h("span", { class: "count" }, String(roots.length)),
-    colState !== ARCHIVED
+    // new tasks can only be added to the Backlog (#1)
+    colState === "Backlog"
       ? h("button", {
           class: "add-btn",
           title: `Add task to ${colState}`,

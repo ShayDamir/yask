@@ -264,16 +264,16 @@ class Store:
         estimate: float | None = None,
         parent_number: int | None = None,
         description: str = "",
-        state: str = "Backlog",
         before_number: int | None = None,
         after_number: int | None = None,
     ) -> dict:
+        # New tasks always start in the Backlog; moving them forward is a
+        # separate, tracked action (see #1).
+        state = "Backlog"
         self._get_project(project_id)
         title = (title or "").strip()
         if not title:
             raise ValidationError("task title must not be empty")
-        if state not in db.ALL_STATES:
-            raise ValidationError(f"unknown state '{state}'")
         ttype = self._type_by_name(type)
         if ttype is None:
             raise ValidationError(f"unknown task type '{type}'")

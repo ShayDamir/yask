@@ -80,9 +80,28 @@ def test_all_states_available(store):
     assert db.ARCHIVED_STATE == "Archived"
 
 
-def test_default_state_is_backlog(store, project):
+def test_new_tasks_always_landed_in_backlog(store, project):
+    # new tasks can only be added to the Backlog (#1); there is no
+    # state parameter to create elsewhere, and history records the
+    # single Backlog entry
     t = store.create_task(project["id"], "x")
     assert t["state"] == "Backlog"
+    assert [h["to_state"] for h in store.get_history(project["id"], t["number"])] == [
+        "Backlog"
+    ]
+    # positioning within the Backlog still works
+    a = store.create_task(project["id"], "a")
+    c = store.create_task(project["id"], "c", before_number=a["number"])
+    assert [h["state"] for h in store.list_tasks(project["id"])] == [
+        "Backlog",
+        "Backlog",
+        "Backlog",
+    ]
+    assert [t["number"] for t in store.list_tasks(project["id"])] == [
+        t["number"],
+        c["number"],
+        a["number"],
+    ]
 
 
 def test_sorting_preserved_top_down(store, project):

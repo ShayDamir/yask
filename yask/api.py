@@ -45,12 +45,12 @@ class ProjectIn(BaseModel):
 
 
 class TaskIn(BaseModel):
+    # New tasks always land in the Backlog (#1); the column is not choosable.
     title: str
     type: str = "Task"
     estimate: float | None = None
     parent_number: int | None = None
     description: str = ""
-    state: str = "Backlog"
     before_number: int | None = None
     after_number: int | None = None
 
@@ -171,7 +171,6 @@ def create_app(db_path: str | Path) -> FastAPI:
                 body.estimate,
                 body.parent_number,
                 body.description,
-                body.state,
                 body.before_number,
                 body.after_number,
             )
