@@ -13,9 +13,10 @@ The MVP definition:
 * compound task type: Epic
 * Epics can contain other epics (tree-like structure) without cycles, and also Stories, Tasks and Bugs
 * Epics cannot be estimated, they contain the sum of estimations of all contained tasks
-* Tasks state: Backlog, Todo, Planning, In progress, Review, Done, Archived
+* Tasks state: Backlog, Todo, Planning, In progress, Review, Done, Blocked, Archived
 * Any task can be archived at any time
 * Archived tasks are not listed by default. They can be permanently deleted.
+* Blocked is a holding state for a task that cannot proceed until external input arrives (answers, a decision, missing info). It is skipped by the pipeline until the task is moved back to a normal state; moving to Blocked carries no prerequisite pull.
 * Tasks are sorted, sorting must be preserved. Order of execution is top-down.
 * Tasks can have other tasks as prerequisite
 * If task has prerequisites and is moved in the workflow, prerequisites are moved with it unless they're already past the stage

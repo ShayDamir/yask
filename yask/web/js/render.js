@@ -2,7 +2,7 @@
 
 import { h, clear, fmtEstimate, typeClass } from "./util.js";
 
-export const STATES = ["Backlog", "Todo", "Planning", "In progress", "Review", "Done"];
+export const STATES = ["Backlog", "Todo", "Planning", "In progress", "Review", "Done", "Blocked"];
 export const ARCHIVED = "Archived";
 export const ALL_STATES = [...STATES, ARCHIVED];
 
@@ -172,7 +172,7 @@ export function renderCard(task, actions, { expanded, filterLabel } = {}) {
   const card = h(
     "div",
     {
-      class: `card${task.state === "Done" ? " done" : ""}${task.is_epic ? " epic" : ""}`,
+      class: `card${task.state === "Done" ? " done" : ""}${task.state === "Blocked" ? " blocked" : ""}${task.is_epic ? " epic" : ""}`,
       draggable: "true",
       dataset: { number: task.number },
       title: task.description || undefined,

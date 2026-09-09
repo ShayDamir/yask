@@ -439,7 +439,9 @@ html, body {
   color: var(--text-dim);
 }
 .state-chip.Done { background: var(--ok-soft); color: var(--ok); }
+.state-chip.Blocked { background: var(--warn-soft); color: var(--warn); }
 .state-chip.Archived { background: var(--warn-soft); color: var(--warn); }
+.card.blocked { outline: 1px solid var(--warn); }
 
 /* ---- empty state ---------------------------------------------------------- */
 

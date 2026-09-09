@@ -238,11 +238,14 @@ def build_server(store: Store) -> FastMCP:
         before_number: int | None = None,
         after_number: int | None = None,
     ) -> dict:
-        """Move a task to a workflow state (Backlog, Todo, Planning, In progress, Review, Done).
+        """Move a task to a workflow state (Backlog, Todo, Planning, In progress, Review, Done) or the holding state Blocked.
 
-        Prerequisites not yet past the target stage are moved along with it.
-        If several tasks are affected and confirm is false, the result contains
-        the affected list and nothing is changed.
+        Moving forward pulls prerequisites not yet past the target stage along
+        with it. Moving to Blocked is a single-task action that pulls no
+        prerequisites along; the workflow docs require an unblock.md attachment
+        explaining what unblocks the task. If several tasks are affected and
+        confirm is false, the result contains the affected list and nothing is
+        changed.
         """
         return store.move_task(
             project_id, number, to_state, confirm, before_number, after_number

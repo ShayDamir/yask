@@ -118,7 +118,13 @@ WORKFLOW_STATES = [
     "Done",
 ]
 ARCHIVED_STATE = "Archived"
-ALL_STATES = WORKFLOW_STATES + [ARCHIVED_STATE]
+BLOCKED_STATE = "Blocked"
+# Holding states are never pulled forward by the prerequisite cascade (they are
+# not forward workflow stages, so they have no STATE_RANK entry). Archived is a
+# terminal holding state; Blocked is an active "waiting on external input"
+# holding state — both are skipped by the pick loop and never cascaded into.
+HOLDING_STATES = (BLOCKED_STATE, ARCHIVED_STATE)
+ALL_STATES = WORKFLOW_STATES + [BLOCKED_STATE, ARCHIVED_STATE]
 STATE_RANK = {s: i for i, s in enumerate(WORKFLOW_STATES)}
 
 

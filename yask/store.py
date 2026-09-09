@@ -498,8 +498,8 @@ class Store:
         Within each state, tasks follow their sort_order. If the top candidate
         has a prerequisite not yet Done, the first unmet prerequisite is
         followed recursively, since it must be worked on first. Archived,
-        Done and Backlog tasks are never returned; the future 'Blocked' holding
-        state is skipped implicitly by only scanning the listed states.
+        Blocked, Done and Backlog tasks are never returned; holding states are
+        skipped implicitly by only scanning the listed forward states.
         """
         self._get_project(project_id)
         priority_states = ["Review", "In progress", "Planning", "Todo"]
@@ -677,13 +677,20 @@ class Store:
 
         The moved task plus every transitive prerequisite that has not yet
         reached `to_state` (i.e. sits at an earlier workflow stage). Archived
-        prerequisites are left untouched.
+        and Blocked prerequisites (holding states) are left untouched.
+        Moving to a holding state (Blocked) is terminal for this action and
+        pulls no prerequisites along.
         """
-        if to_state not in db.WORKFLOW_STATES:
+        if to_state not in db.ALL_STATES:
             raise ValidationError(f"cannot move to '{to_state}'")
         row = self._get_task(project_id, number)
         if row["state"] == to_state:
             return []
+        # Moving to a holding state is a single-task action: it does not pull
+        # prerequisites forward (mirrors Archived; Blocked is the only move
+        # target among the holding states).
+        if to_state in db.HOLDING_STATES:
+            return self._describe_states([row["id"]], to_state)
         target_rank = db.STATE_RANK[to_state]
 
         affected_ids: list[int] = [row["id"]]
@@ -700,7 +707,7 @@ class Store:
                 if p["id"] in seen:
                     continue
                 seen.add(p["id"])
-                if p["state"] == db.ARCHIVED_STATE:
+                if p["state"] in db.HOLDING_STATES:
                     continue
                 if db.STATE_RANK[p["state"]] < target_rank:
                     affected_ids.append(p["id"])
