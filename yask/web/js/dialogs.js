@@ -5,6 +5,26 @@ import { h, clear, fmtEstimate, fmtBytes, fmtTime, typeClass } from "./util.js";
 import { renderMarkdown } from "./markdown.js";
 import { toast, toastError } from "./toast.js";
 
+// -- per-project preferences (localStorage) ----------------------------------------------
+
+const LAST_TYPE_KEY = (pid) => `yask.last-type.${pid}`;
+
+function getLastType(pid) {
+  try {
+    return localStorage.getItem(LAST_TYPE_KEY(pid));
+  } catch {
+    return null;
+  }
+}
+
+function setLastType(pid, type) {
+  try {
+    localStorage.setItem(LAST_TYPE_KEY(pid), type);
+  } catch {
+    /* ignore quota / private-mode failures */
+  }
+}
+
 // -- modal plumbing ----------------------------------------------------------
 
 let modalCount = 0;
@@ -163,11 +183,18 @@ export function openNewTaskModal(project, state, onCreated) {
   const pid = project.id;
   const titleInput = h("input", { type: "text", id: "nt-title", placeholder: "Task title" });
   const types = project.task_types || [];
+  // Default to the last type created in this project (see #6), else Task, else the first type.
+  const lastType = getLastType(pid);
+  const defaultType =
+    types.some((t) => t.name === lastType) ? lastType :
+    types.some((t) => t.name === "Task") ? "Task" :
+    types[0]?.name ?? "";
   const typeSelect = h(
     "select",
     { id: "nt-type" },
-    types.map((t) => h("option", { value: t.name, selected: t.name === "Task" ? "selected" : null }, t.name))
+    types.map((t) => h("option", { value: t.name }, t.name))
   );
+  typeSelect.value = defaultType;
   const estInput = h("input", { type: "number", id: "nt-est", min: "0", step: "0.5", placeholder: "—" });
   const syncEpic = () => {
     const isEpic = types.find((t) => t.name === typeSelect.value)?.is_epic;
@@ -193,6 +220,7 @@ export function openNewTaskModal(project, state, onCreated) {
             estimate: est,
             state,
           });
+          setLastType(pid, typeSelect.value);
           modal.close();
           if (onCreated) onCreated();
         } catch (err) {
