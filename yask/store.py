@@ -18,6 +18,7 @@ Notable domain rules (see README.md):
 * Archiving an Epic archives its whole subtree; restoring only ever affects
   the single named task.
 * Deleting an Epic permanently removes its whole subtree.
+* Only archived tasks can be permanently deleted.
 """
 
 from __future__ import annotations
@@ -877,6 +878,8 @@ class Store:
 
     def delete_task(self, project_id: int, number: int, confirm: bool = False) -> dict:
         row = self._get_task(project_id, number)
+        if row["state"] != db.ARCHIVED_STATE:
+            raise ValidationError("only archived tasks can be deleted")
         affected = self.plan_delete(project_id, number)
         if len(affected) > 1 and not confirm:
             raise ConfirmationRequired(affected)

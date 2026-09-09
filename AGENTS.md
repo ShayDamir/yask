@@ -58,8 +58,9 @@ These are not obvious from file names and are easy to implement incorrectly:
   move must be accompanied by an `unblock.md` attachment explaining what is
   needed to unblock (questions for the user, decisions, inputs) and the
   resume state. Blocked tasks wait for the user, never for agents.
-- Any task can be **archived** at any time; archived tasks are hidden by default
-  and can be permanently deleted.
+- Any task can be **archived** at any time; archived tasks are hidden by default.
+   **Only archived tasks may be permanently deleted** — a task must be archived
+   first, then deleted.
 - Tasks are **sorted**; sorting and order-of-execution (top-down) must be
   preserved across changes.
 - **Prerequisites**: moving a task pulls its prerequisites along **unless a

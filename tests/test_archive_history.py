@@ -67,6 +67,21 @@ def test_restore_requires_archived(store, project):
 def test_delete_permanent_single(store, project):
     pid = project["id"]
     t = store.create_task(pid, "t")
+    store.archive_task(pid, t["number"], confirm=True)
+    store.delete_task(pid, t["number"], confirm=True)
+    with pytest.raises(NotFound):
+        store.get_task(pid, t["number"])
+
+
+def test_delete_requires_archived(store, project):
+    pid = project["id"]
+    t = store.create_task(pid, "t")
+    with pytest.raises(ValidationError):
+        store.delete_task(pid, t["number"], confirm=True)
+    # still exists, not deleted
+    assert store.get_task(pid, t["number"]) is not None
+    # archiving then deleting works
+    store.archive_task(pid, t["number"], confirm=True)
     store.delete_task(pid, t["number"], confirm=True)
     with pytest.raises(NotFound):
         store.get_task(pid, t["number"])
@@ -76,6 +91,7 @@ def test_delete_epic_removes_subtree_with_confirmation(store, project):
     pid = project["id"]
     e = store.create_task(pid, "e", type="Epic")
     s = store.create_task(pid, "s", type="Story", parent_number=e["number"])
+    store.archive_task(pid, e["number"], confirm=True)
     with pytest.raises(ConfirmationRequired) as exc:
         store.delete_task(pid, e["number"])
     assert {a["number"] for a in exc.value.affected} == {e["number"], s["number"]}

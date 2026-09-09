@@ -96,6 +96,11 @@ def test_archive_and_delete_flow(client, pid):
     client.post(f"/api/projects/{pid}/tasks", json={"title": "e", "type": "Epic"})
     client.post(f"/api/projects/{pid}/tasks", json={"title": "s", "parent_number": 1})
 
+    # deleting a non-archived task is refused — only archived tasks may be deleted
+    r = client.delete(f"/api/projects/{pid}/tasks/1?confirm=true")
+    assert r.status_code == 400
+    assert client.get(f"/api/projects/{pid}/tasks/1").status_code == 200
+
     # archived tasks hidden by default
     r = client.post(f"/api/projects/{pid}/tasks/1/archive", json={})
     assert r.status_code == 409  # subtree of 2 tasks
@@ -111,7 +116,10 @@ def test_archive_and_delete_flow(client, pid):
     assert r.status_code == 200
     assert client.get(f"/api/projects/{pid}/tasks/1").json()["state"] == "Backlog"
 
-    # delete with confirmation
+    # re-archive, then delete with confirmation (409 without, 200 with, subtree gone)
+    r = client.post(f"/api/projects/{pid}/tasks/1/archive", json={"confirm": True})
+    assert r.status_code == 200
+    # deleting a 2-task subtree needs confirmation: 409 without, 200 with
     r = client.delete(f"/api/projects/{pid}/tasks/1")
     assert r.status_code == 409
     r = client.delete(f"/api/projects/{pid}/tasks/1?confirm=true")

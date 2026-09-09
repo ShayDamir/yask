@@ -268,7 +268,7 @@ def build_server(store: Store) -> FastMCP:
     @_wrap
     @_project_arg(store)
     def delete_task(project_id: int, number: int, confirm: bool = False) -> dict:
-        """Permanently delete a task (an epic's subtree is removed with it)."""
+        """Permanently delete an archived task (an epic's subtree is removed with it)."""
         return store.delete_task(project_id, number, confirm)
 
     @mcp.tool()

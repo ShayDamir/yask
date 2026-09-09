@@ -123,6 +123,7 @@ def test_labels_follow_task_delete(store, project):
     l = store.create_label(pid, "temp")["id"]
     t = store.create_task(pid, "t")
     store.set_task_labels(pid, t["number"], [l])
+    store.archive_task(pid, t["number"], confirm=True)
     store.delete_task(pid, t["number"], confirm=True)
     # orphaned link rows are gone but the label itself survives
     assert store.list_tasks(pid) == []

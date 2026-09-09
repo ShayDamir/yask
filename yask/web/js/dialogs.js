@@ -635,14 +635,16 @@ export function openEditorModal(project, task, actions) {
               actions.onArchive(task);
             },
           }, "Archive"),
-      h("button", {
-        class: "btn danger",
-        type: "button",
-        onclick: async () => {
-          modal.close();
-          actions.onDelete(task);
-        },
-      }, "Delete"),
+      isArchived
+        ? h("button", {
+            class: "btn danger",
+            type: "button",
+            onclick: async () => {
+              modal.close();
+              actions.onDelete(task);
+            },
+          }, "Delete")
+        : null,
       h("span", { class: "spacer" }),
       h("button", { class: "btn ghost", type: "button", onclick: () => modal.close() }, "Cancel"),
       h("button", { class: "btn", type: "submit", id: "ed-save" }, "Save")

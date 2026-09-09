@@ -31,6 +31,9 @@ def test_numbers_never_reused_after_delete(store, project):
     a = store.create_task(pid, "a")
     b = store.create_task(pid, "b")
     c = store.create_task(pid, "c")
+    with pytest.raises(ValidationError):
+        store.delete_task(pid, b["number"], confirm=True)
+    store.archive_task(pid, b["number"], confirm=True)
     store.delete_task(pid, b["number"], confirm=True)
     d = store.create_task(pid, "d")
     assert d["number"] == 4
