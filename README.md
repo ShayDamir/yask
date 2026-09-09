@@ -86,7 +86,8 @@ Speaks MCP over stdio. Example client config:
 
 Tools: list/create projects and tasks, set prerequisites, move/archive/
 restore/delete/reorder tasks, task history, task types, attachments (list,
-read — images come back as viewable image blocks, markdown as text). Actions
+read — images come back as viewable image blocks, markdown as text — plus a
+`last_attachment` convenience that returns the task's most recent one). Actions
 that would touch several tasks return `requires_confirmation` plus the list of
 affected tasks; re-invoke with `confirm: true` to apply.
 

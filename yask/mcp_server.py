@@ -365,6 +365,23 @@ def build_server(store: Store) -> FastMCP:
 
     @mcp.tool()
     @_wrap
+    @_project_arg(store)
+    def last_attachment(project_id: int, number: int):
+        """Return the most recently attached document for a task, with its name.
+
+        Markdown/text attachments come back as a JSON object with the decoded
+        text in the "text" field. Images come back as metadata plus a native
+        MCP image block. "Last" is the most recently created attachment; if it
+        is not useful, request a specific one by id with get_attachment.
+        """
+        meta, data = store.last_attachment(project_id, number)
+        if meta["content_type"].startswith("text/"):
+            return {**meta, "text": data.decode("utf-8", errors="replace")}
+        fmt = meta["content_type"].split("/", 1)[1]
+        return [TextContent(type="text", text=json.dumps(meta)), Image(data=data, format=fmt)]
+
+    @mcp.tool()
+    @_wrap
     def delete_attachment(attachment_id: int) -> dict:
         """Delete an attachment permanently."""
         store.delete_attachment(attachment_id)

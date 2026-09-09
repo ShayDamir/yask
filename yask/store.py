@@ -1017,6 +1017,17 @@ class Store:
             bytes(a["data"]),
         )
 
+    def last_attachment(self, project_id: int, number: int) -> tuple[dict, bytes]:
+        self._get_task(project_id, number)
+        a = self.conn.execute(
+            "SELECT * FROM attachments WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (number,),
+        ).fetchone()
+        if a is None:
+            raise NotFound(f"no attachments on task #{number}")
+        meta, data = self.get_attachment(a["id"])
+        return {**meta, "id": a["id"]}, data
+
     def delete_attachment(self, attachment_id: int) -> None:
         a = self.conn.execute(
             "SELECT 1 FROM attachments WHERE id = ?", (attachment_id,)

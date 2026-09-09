@@ -192,6 +192,62 @@ def test_get_attachment_is_registered(store, project):
     names_list = asyncio.run(names())
     assert "get_attachment" in names_list
     assert "delete_attachment" in names_list
+    assert "last_attachment" in names_list
+
+
+def test_last_attachment_returns_latest(store, project):
+    t = store.create_task(project["id"], "T")
+    store.add_attachment(
+        project["id"], t["number"], "first.md", "text/markdown", b"first"
+    )
+    store.add_attachment(
+        project["id"], t["number"], "second.md", "text/markdown", b"second"
+    )
+    res = call(store, "last_attachment", project=project["name"], number=t["number"])
+    data = json.loads(texts(res)[0].text)
+    assert data["text"] == "second"
+    assert data["filename"] == "second.md"
+    assert "id" in data  # for the get_attachment-by-id fallback
+
+
+def test_last_attachment_image(store, project):
+    t = store.create_task(project["id"], "T")
+    store.add_attachment(project["id"], t["number"], "px.png", "image/png", PNG_1X1)
+    res = call(store, "last_attachment", project=project["name"], number=t["number"])
+    imgs = [c for c in res if isinstance(c, ImageContent)]
+    assert len(texts(res)) == 1
+    assert len(imgs) == 1
+    meta = json.loads(texts(res)[0].text)
+    assert meta["filename"] == "px.png"
+    assert meta["size"] == len(PNG_1X1)
+    assert "id" in meta
+    assert imgs[0].mimeType == "image/png"
+    assert base64.b64decode(imgs[0].data) == PNG_1X1
+
+
+def test_last_attachment_no_attachments(store, project):
+    t = store.create_task(project["id"], "T")
+    res = call(store, "last_attachment", project=project["name"], number=t["number"])
+    data = json.loads(texts(res)[0].text)
+    assert data["ok"] is False
+    assert "no attachments" in data["error"]
+
+
+def test_last_attachment_unknown_task(store, project):
+    res = call(store, "last_attachment", project=project["id"], number=999999)
+    data = json.loads(texts(res)[0].text)
+    assert data["ok"] is False
+    assert "not found" in data["error"]
+
+
+def test_last_attachment_is_registered(store, project):
+    server = build_server(store)
+
+    async def names():
+        return sorted(t.name for t in await server.list_tools())
+
+    names_list = asyncio.run(names())
+    assert "last_attachment" in names_list
 
 
 def test_delete_attachment(store, project):
@@ -223,6 +279,7 @@ PROJECT_SCOPED = (
     "get_task_history",
     "add_attachment",
     "list_attachments",
+    "last_attachment",
     "create_label",
     "list_labels",
     "set_task_labels",
