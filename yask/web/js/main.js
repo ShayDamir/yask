@@ -23,6 +23,16 @@ const $ = (id) => document.getElementById(id);
 const SIDEBAR_KEY = "yask.sidebar";
 const SIDEBAR_ROOT = "app";
 
+// Remember the last-opened project so the UI reopens it on next load (#4).
+const LAST_PROJECT_KEY = "yask.last-project";
+function rememberLastProject(pid) {
+  try { localStorage.setItem(LAST_PROJECT_KEY, String(pid)); } catch { /* ignore */ }
+}
+function recallLastProject() {
+  const saved = localStorage.getItem(LAST_PROJECT_KEY);
+  return saved === null ? null : Number(saved);
+}
+
 function applySidebar(collapsed) {
   document.getElementById(SIDEBAR_ROOT).classList.toggle("sidebar-collapsed", collapsed);
   const btn = $("sidebar-toggle");
@@ -51,6 +61,7 @@ async function loadProjects() {
 
 async function selectProject(pid) {
   state.currentProjectId = pid;
+  rememberLastProject(pid);
   state.project = await api.getProject(pid);
   state.filterLabel = "";
   await loadProjects();
@@ -369,8 +380,10 @@ function init() {
 
   loadProjects().then(() => {
     render();
-    const first = state.projects[0];
-    if (first) selectProject(first.id);
+    // Prefer the last-opened project if it still exists, else the first (#4).
+    const candidates = [recallLastProject(), ...state.projects.map((p) => p.id)];
+    const chosen = candidates.find((id) => state.projects.some((p) => p.id === id));
+    if (chosen) selectProject(chosen);
   });
 }
 
