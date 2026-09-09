@@ -66,6 +66,7 @@ async function selectProject(pid) {
   state.filterLabel = "";
   await loadProjects();
   await populateLabelFilter();
+  renderRoles();
   render();
 }
 
@@ -87,6 +88,46 @@ async function populateLabelFilter() {
   select.value = state.filterLabel;
 }
 
+// User-story role presets for the current project (#7). Manageable here; the
+// new-task modal reads project.roles for its "As a" dropdown.
+function renderRoles() {
+  const panel = $("roles-panel");
+  if (!state.project) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const list = $("roles-list");
+  clear(list);
+  const roles = state.project.roles || [];
+  for (const role of roles) {
+    const remove = h(
+      "button",
+      {
+        type: "button",
+        class: "btn ghost role-remove",
+        title: `Remove role “${role.name}”`,
+        "aria-label": `Remove role “${role.name}”`,
+      },
+      "×"
+    );
+    remove.addEventListener("click", async () => {
+      try {
+        await api.removeProjectRole(state.project.id, role.name);
+        // the server deletes case-insensitively; match that locally
+        state.project.roles = (state.project.roles || []).filter(
+          (r) => r.name.toLowerCase() !== role.name.toLowerCase()
+        );
+        toast(`Removed role “${role.name}`, "success");
+        renderRoles();
+      } catch (err) {
+        toastError(err);
+      }
+    });
+    list.append(h("div", { class: "role-item" }, h("span", {}, role.name), remove));
+  }
+}
+
 async function refresh() {
   if (state.currentProjectId === null) return;
   const [project, projects] = await Promise.all([
@@ -96,6 +137,7 @@ async function refresh() {
   state.project = project;
   state.projects = projects;
   await populateLabelFilter();
+  renderRoles();
   render();
 }
 
@@ -375,6 +417,33 @@ function init() {
       input.value = "";
       toast(`Created project “${name}”`, "success");
       await selectProject(p.id);
+    } catch (err) {
+      toastError(err);
+    }
+  });
+
+  $("new-role-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const input = $("new-role-name");
+    const name = input.value.trim();
+    if (!name) return;
+    try {
+      const current = (state.project.roles || []).map((r) => r.name);
+      const duplicate = current.find(
+        (r) => r.toLowerCase() === name.toLowerCase()
+      );
+      input.value = "";
+      if (duplicate) {
+        // the server would de-dupe anyway; avoid a redundant replace-all PUT
+        toast(`Role “${duplicate}” already exists`, "info");
+      } else {
+        state.project.roles = await api.setProjectRoles(state.project.id, [
+          ...current,
+          name,
+        ]);
+        toast(`Added role “${name}”`, "success");
+      }
+      renderRoles();
     } catch (err) {
       toastError(err);
     }

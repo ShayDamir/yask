@@ -104,6 +104,10 @@ class TaskLabelsIn(BaseModel):
     label_ids: list[int]
 
 
+class ProjectRolesIn(BaseModel):
+    names: list[str]
+
+
 # -- app factory -------------------------------------------------------------
 
 
@@ -306,6 +310,20 @@ def create_app(db_path: str | Path) -> FastAPI:
     @app.delete("/api/projects/{project_id}/labels/{label_id}")
     def api_delete_label(project_id: int, label_id: int):
         return handle(lambda: store().delete_label(project_id, label_id))
+
+    # -- project roles (user-story role presets)
+
+    @app.get("/api/projects/{project_id}/roles")
+    def api_list_roles(project_id: int):
+        return handle(lambda: store().list_project_roles(project_id))
+
+    @app.put("/api/projects/{project_id}/roles")
+    def api_set_roles(project_id: int, body: ProjectRolesIn):
+        return handle(lambda: store().set_project_roles(project_id, body.names))
+
+    @app.delete("/api/projects/{project_id}/roles/{name}")
+    def api_delete_role(project_id: int, name: str):
+        return handle(lambda: store().remove_project_role(project_id, name))
 
     # -- task types
 

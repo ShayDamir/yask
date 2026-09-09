@@ -225,6 +225,9 @@ PROJECT_SCOPED = (
     "create_label",
     "list_labels",
     "set_task_labels",
+    "list_project_roles",
+    "set_project_roles",
+    "remove_project_role",
 )
 NOT_PROJECT_SCOPED = ("create_project", "list_task_types", "add_task_type",
                       "get_attachment", "delete_attachment")

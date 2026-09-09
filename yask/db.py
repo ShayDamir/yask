@@ -86,6 +86,14 @@ CREATE TABLE IF NOT EXISTS task_labels (
     PRIMARY KEY (task_id, label_id)
 );
 CREATE INDEX IF NOT EXISTS idx_task_labels_label ON task_labels(label_id);
+
+CREATE TABLE IF NOT EXISTS project_roles (
+    id         INTEGER PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL COLLATE NOCASE,
+    UNIQUE (project_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_project_roles_project ON project_roles(project_id);
 """
 
 # Seed task types. Epic is the single compound type.

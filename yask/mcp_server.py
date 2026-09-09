@@ -377,6 +377,29 @@ def build_server(store: Store) -> FastMCP:
         """Delete a project label, detaching it from all tasks it is applied to."""
         return store.delete_label(project_id, label_id)
 
+    @mcp.tool()
+    @_wrap
+    @_project_arg(store)
+    def list_project_roles(project_id: int):
+        """List a project's preset user-story roles (ordered)."""
+        return store.list_project_roles(project_id)
+
+    @mcp.tool()
+    @_wrap
+    @_project_arg(store)
+    def set_project_roles(project_id: int, names: list[str]):
+        """Replace a project's preset user-story roles. Order is preserved and
+        names are case-insensitively de-duplicated. Names must not be empty
+        and must not contain '/'."""
+        return store.set_project_roles(project_id, names)
+
+    @mcp.tool()
+    @_wrap
+    @_project_arg(store)
+    def remove_project_role(project_id: int, name: str) -> dict:
+        """Remove one preset role from a project."""
+        return store.remove_project_role(project_id, name)
+
     return mcp
 
 

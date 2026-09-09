@@ -129,6 +129,34 @@ html, body {
 .sidebar-form { display: flex; gap: 6px; }
 .sidebar-form input { flex: 1; min-width: 0; }
 
+/* ---- roles panel -------------------------------------------------------- */
+
+.roles-panel {
+  padding: 4px 4px 6px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.roles-title {
+  font-size: max(11px, var(--min-font));
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+}
+.roles-list { display: flex; flex-direction: column; gap: 2px; }
+.role-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: max(12px, var(--min-font));
+  padding: 2px 6px;
+  border-radius: var(--radius);
+}
+.role-item:hover { background: var(--bg-hover); }
+.role-item span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.roles-add { margin-top: 2px; }
+
 /* ---- topbar ------------------------------------------------------------ */
 
 #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }

@@ -101,6 +101,13 @@ const api = {
   setTaskLabels: (pid, num, labelIds) =>
     req("PUT", `/api/projects/${pid}/tasks/${num}/labels`, { label_ids: labelIds }),
   deleteLabel: (pid, labelId) => req("DELETE", `/api/projects/${pid}/labels/${labelId}`),
+
+  // project roles (user-story role presets)
+  listProjectRoles: (pid) => req("GET", `/api/projects/${pid}/roles`),
+  setProjectRoles: (pid, names) =>
+    req("PUT", `/api/projects/${pid}/roles`, { names }),
+  removeProjectRole: (pid, name) =>
+    req("DELETE", `/api/projects/${pid}/roles/${encodeURIComponent(name)}`),
 };
 
 export default api;

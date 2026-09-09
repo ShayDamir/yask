@@ -205,7 +205,18 @@ export function openNewTaskModal(project, state, onCreated) {
 
   // User story pattern (see #5): opt-in three-field form composing an
   // "As a …, I want …, so that …." description. Hidden until toggled on.
-  const usAs = h("input", { type: "text", id: "nt-us-as", placeholder: "a role or user" });
+  // (#7) When the project has preset roles, "As a" is a dropdown of them;
+  // otherwise it stays a free-text field so the pattern still works.
+  const projectRoles =
+    project && Array.isArray(project.roles) ? project.roles : [];
+  const useRoleSelect = projectRoles.length > 0;
+  const usAs = useRoleSelect
+    ? h(
+        "select",
+        { id: "nt-us-as" },
+        projectRoles.map((r) => h("option", { value: r.name }, r.name))
+      )
+    : h("input", { type: "text", id: "nt-us-as", placeholder: "a role or user" });
   const usWant = h("input", { type: "text", id: "nt-us-want", placeholder: "an action or capability" });
   const usSo = h("input", { type: "text", id: "nt-us-so", placeholder: "a benefit or reason" });
   const usFields = h(

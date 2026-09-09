@@ -480,6 +480,7 @@ class Store:
         return {
             **dict(proj),
             "task_types": self.list_task_types(),
+            "roles": self.list_project_roles(project_id),
             "tasks": [build(t) for t in roots],
         }
 
@@ -1032,4 +1033,63 @@ class Store:
             "label_id": label_id,
             "name": row["name"],
             "detached_tasks": detached,
+        }
+
+    # -- project roles (user-story role presets) ----------------------------
+
+    def list_project_roles(self, project_id: int) -> list[dict]:
+        self._get_project(project_id)
+        return [
+            {"id": r["id"], "name": r["name"]}
+            for r in self.conn.execute(
+                "SELECT id, name FROM project_roles WHERE project_id = ? "
+                "ORDER BY id",
+                (project_id,),
+            ).fetchall()
+        ]
+
+    def set_project_roles(self, project_id: int, names: list[str]) -> list[dict]:
+        self._get_project(project_id)
+        order: list[str] = []
+        seen: set[str] = set()
+        for raw_name in names:
+            name = (raw_name or "").strip()
+            if not name:
+                raise ValidationError("role name must not be empty")
+            if "/" in name:
+                # '/' cannot be addressed by DELETE .../roles/{name}
+                raise ValidationError("role name must not contain '/'")
+            key = name.upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            order.append(name)
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM project_roles WHERE project_id = ?", (project_id,)
+            )
+            self.conn.executemany(
+                "INSERT INTO project_roles(project_id, name) VALUES (?, ?)",
+                [(project_id, name) for name in order],
+            )
+        return self.list_project_roles(project_id)
+
+    def remove_project_role(self, project_id: int, name: str) -> dict:
+        self._get_project(project_id)
+        name = (name or "").strip()
+        row = self.conn.execute(
+            "SELECT id, name FROM project_roles WHERE project_id = ? AND name = ? "
+            "COLLATE NOCASE",
+            (project_id, name),
+        ).fetchone()
+        if row is None:
+            raise NotFound(f"role '{name}' not found in this project")
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM project_roles WHERE id = ?", (row["id"],)
+            )
+        return {
+            "applied": True,
+            "name": row["name"],
+            "remaining": len(self.list_project_roles(project_id)),
         }
