@@ -207,7 +207,7 @@ export function renderCard(task, actions, { expanded, filterLabel } = {}) {
 
 // -- columns / board ---------------------------------------------------------------
 
-function renderColumn(colState, roots, actions, filterLabel) {
+function renderColumn(colState, roots, actions, filterLabel, opts = {}) {
   const body = h("div", { class: "column-body", dataset: { state: colState } });
   if (!roots.length) {
     body.append(
@@ -215,13 +215,8 @@ function renderColumn(colState, roots, actions, filterLabel) {
     );
   }
   for (const t of roots) body.append(renderCard(t, actions, { filterLabel }));
-  const head = h(
-    "div",
-    { class: "column-head" },
-    h("span", {}, colState),
-    h("span", { class: "count" }, String(roots.length)),
-    // new tasks can only be added to the Backlog (#1)
-    colState === "Backlog"
+  const addBtn =
+    colState === "Backlog" && opts.showAdd !== false
       ? h("button", {
           class: "add-btn",
           title: `Add task to ${colState}`,
@@ -231,9 +226,55 @@ function renderColumn(colState, roots, actions, filterLabel) {
             actions.onAdd(colState);
           },
         }, "+")
-      : null
-  );
+      : null;
+  const head = h("div", { class: "column-head" }, h("span", {}, colState), h("span", { class: "count" }, String(roots.length)), addBtn);
   return h("div", { class: `column${colState === ARCHIVED ? " archived" : ""}` }, head, body);
+}
+
+// Locate an Epic (by its task number) anywhere in the nested tree; epics may
+// be nested, so recurse (#30).
+export function findEpic(tasks, number) {
+  for (const t of tasks) {
+    if (t.number === number) return t;
+    if (t.children) {
+      const hit = findEpic(t.children, number);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+// Board view of a single Epic's direct subtasks as full kanban cards, instead
+// of the cramped inline rows inside the epic card (#30). When an epic is
+// selected the selector in main.js routes render() here; when not, renderBoard
+// renders the normal project board with nested epics.
+export function renderEpicBoard(project, epicNumber, actions, { showArchived, filterLabel } = {}) {
+  const board = document.getElementById("board");
+  clear(board);
+  const epic = findEpic(project.tasks, epicNumber);
+  if (!epic) {
+    board.append(h("div", { class: "empty-column", style: "flex:1;text-align:center" }, "Epic not found."));
+    return;
+  }
+  let children = epic.children || [];
+  if (filterLabel) children = children.filter((c) => subtreeHasLabel(c, filterLabel));
+  if (!children.length) {
+    board.append(h("div", { class: "empty-column", style: "flex:1;text-align:center" }, "This epic has no tasks yet."));
+    return;
+  }
+  const columns = [...STATES];
+  if (showArchived) columns.push(ARCHIVED);
+  const byState = new Map();
+  for (const c of children) {
+    if (!byState.has(c.state)) byState.set(c.state, []);
+    byState.get(c.state).push(c);
+  }
+  for (const colState of columns) {
+    // Passing showAdd: false suppresses the "+" button — task creation stays at
+    // project scope (adding to an epic is a follow-up). renderCard already
+    // handles regular tasks and nested epics, so nothing else is needed there.
+    board.append(renderColumn(colState, byState.get(colState) || [], actions, filterLabel, { showAdd: false }));
+  }
 }
 
 export function renderBoard(project, actions, opts) {

@@ -1,7 +1,7 @@
 // yask web UI — bootstrap, app state, and user actions.
 
 import api from "./api.js";
-import { renderBoard, renderSearchResults, renderSidebar, ARCHIVED } from "./render.js";
+import { renderBoard, renderEpicBoard, renderSearchResults, renderSidebar, ARCHIVED } from "./render.js";
 import { initDnd } from "./dnd.js";
 import { openEditorModal, openNewTaskModal, confirmDialog } from "./dialogs.js";
 import { initTheme } from "./theme.js";
@@ -16,6 +16,7 @@ const state = {
   search: "",
   showArchived: false,
   filterLabel: "",
+  selectedEpicNumber: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -64,8 +65,10 @@ async function selectProject(pid) {
   rememberLastProject(pid);
   state.project = await api.getProject(pid);
   state.filterLabel = "";
+  state.selectedEpicNumber = "";
   await loadProjects();
   await populateLabelFilter();
+  populateEpicFilter();
   renderRoles();
   render();
 }
@@ -86,6 +89,30 @@ async function populateLabelFilter() {
     state.filterLabel = "";
   }
   select.value = state.filterLabel;
+}
+
+// Fill the Epic selector (#30), mirroring populateLabelFilter. Epics may be
+// nested, so walk the tree and collect every epic.
+function collectEpics(tasks, out = []) {
+  for (const t of tasks) {
+    if (t.is_epic) out.push(t);
+    if (t.children) collectEpics(t.children, out);
+  }
+  return out;
+}
+
+function populateEpicFilter() {
+  const select = $("epic-filter");
+  const current = state.selectedEpicNumber;
+  clear(select);
+  select.append(h("option", { value: "" }, "No epic"));
+  const epics = collectEpics(state.project.tasks || []);
+  for (const e of epics) {
+    select.append(h("option", { value: String(e.number) }, `#${e.number} ${e.title}`));
+  }
+  if (current && epics.some((e) => String(e.number) === String(current))) state.selectedEpicNumber = current;
+  else state.selectedEpicNumber = "";
+  select.value = state.selectedEpicNumber;
 }
 
 // User-story role presets for the current project (#7). Manageable here; the
@@ -137,6 +164,7 @@ async function refresh() {
   state.project = project;
   state.projects = projects;
   await populateLabelFilter();
+  populateEpicFilter();
   renderRoles();
   render();
 }
@@ -158,6 +186,13 @@ function render() {
   if (!hasProject) return;
   if (state.search.trim() !== "") {
     renderSearchResults(state.project, state.search, actions, state.filterLabel);
+    return;
+  }
+  if (state.selectedEpicNumber) {
+    renderEpicBoard(state.project, state.selectedEpicNumber, actions, {
+      showArchived: state.showArchived,
+      filterLabel: state.filterLabel,
+    });
     return;
   }
   renderBoard(state.project, actions, {
@@ -399,6 +434,11 @@ function init() {
 
   $("label-filter").addEventListener("change", (e) => {
     state.filterLabel = e.target.value;
+    render();
+  });
+
+  $("epic-filter").addEventListener("change", (e) => {
+    state.selectedEpicNumber = e.target.value;
     render();
   });
 
