@@ -211,6 +211,7 @@ def test_delete_attachment(store, project):
 PROJECT_SCOPED = (
     "get_project",
     "list_tasks",
+    "get_next_task",
     "create_task",
     "update_task",
     "set_prerequisites",
@@ -298,3 +299,79 @@ def test_list_typed_tools_surface_readable_error_payload(store, project):
         data = json.loads(texts(res)[0].text)
         assert data["ok"] is False
         assert "error" in data
+
+
+def result(store, name, **args):
+    """Return the tool's structured result value (dict or None)."""
+    server = build_server(store)
+    blocks = asyncio.run(server.call_tool(name, args))
+    assert blocks
+    structured = blocks[1] if isinstance(blocks, tuple) else {}
+    return structured.get("result")
+
+
+def test_get_next_task_empty_returns_null(store, project):
+    # A project with no actionable tasks yields null. None produces no text
+    # block, so this is checked via the structured result.
+    assert result(store, "get_next_task", project=project["id"]) is None
+
+
+def test_get_next_task_priority_order(store, project):
+    # Review > In progress > Planning > Todo.
+    todo = store.create_task(project["id"], "todo")
+    store.move_task(project["id"], todo["number"], "Todo", confirm=True)
+    inprog = store.create_task(project["id"], "inprog")
+    store.move_task(project["id"], inprog["number"], "In progress", confirm=True)
+    review = store.create_task(project["id"], "review")
+    store.move_task(project["id"], review["number"], "Review", confirm=True)
+    got = result(store, "get_next_task", project=project["id"])
+    assert got == {"number": review["number"], "title": "review", "state": "Review"}
+
+
+def test_get_next_task_skips_non_actionable_states(store, project):
+    # Backlog, Done and Archived are never returned.
+    backlog = store.create_task(project["id"], "backlog")
+    done = store.create_task(project["id"], "done")
+    store.move_task(project["id"], done["number"], "Done", confirm=True)
+    store.archive_task(project["id"], backlog["number"], confirm=True)
+    todo = store.create_task(project["id"], "todo")
+    store.move_task(project["id"], todo["number"], "Todo", confirm=True)
+    got = result(store, "get_next_task", project=project["id"])
+    assert got["number"] == todo["number"]
+
+
+def test_get_next_task_returns_unmet_prerequisite(store, project):
+    # A candidate whose prerequisite is not Done surfaces that prerequisite.
+    base = store.create_task(project["id"], "base")
+    top = store.create_task(project["id"], "top")
+    store.move_task(project["id"], top["number"], "In progress", confirm=True)
+    store.set_prerequisites(project["id"], top["number"], [base["number"]])
+    got = result(store, "get_next_task", project=project["id"])
+    assert got["number"] == base["number"]
+
+
+def test_get_next_task_recurses_prerequisites(store, project):
+    # review -> inprog(base unmet) -> todo(unmet): recursion follows to the
+    # first fully-unblocked task.
+    base = store.create_task(project["id"], "base")
+    store.move_task(project["id"], base["number"], "Todo", confirm=True)
+    mid = store.create_task(project["id"], "mid")
+    store.move_task(project["id"], mid["number"], "In progress", confirm=True)
+    top = store.create_task(project["id"], "top")
+    store.move_task(project["id"], top["number"], "Review", confirm=True)
+    store.set_prerequisites(project["id"], mid["number"], [base["number"]])
+    store.set_prerequisites(project["id"], top["number"], [mid["number"]])
+    got = result(store, "get_next_task", project=project["id"])
+    assert got["number"] == base["number"]
+
+
+def test_get_next_task_all_done_returns_null(store, project):
+    t = store.create_task(project["id"], "t")
+    store.move_task(project["id"], t["number"], "Done", confirm=True)
+    assert result(store, "get_next_task", project=project["id"]) is None
+
+
+def test_get_next_task_unknown_project(store, project):
+    data = result(store, "get_next_task", project=999999)
+    assert data["ok"] is False
+    assert "not found" in data["error"]

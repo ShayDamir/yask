@@ -490,6 +490,55 @@ class Store:
             "tasks": [build(t) for t in roots],
         }
 
+    def get_next_task(self, project_id: int) -> dict | None:
+        """Return the next actionable task, or None if nothing is actionable.
+
+        Priority order (highest first): Review, In progress, Planning, Todo.
+        Within each state, tasks follow their sort_order. If the top candidate
+        has a prerequisite not yet Done, the first unmet prerequisite is
+        followed recursively, since it must be worked on first. Archived,
+        Done and Backlog tasks are never returned; the future 'Blocked' holding
+        state is skipped implicitly by only scanning the listed states.
+        """
+        self._get_project(project_id)
+        priority_states = ["Review", "In progress", "Planning", "Todo"]
+        for state in priority_states:
+            rows = self.conn.execute(
+                "SELECT * FROM tasks WHERE project_id = ? AND state = ? "
+                "ORDER BY sort_order, id",
+                (project_id, state),
+            ).fetchall()
+            for row in rows:
+                result = self._follow_prereqs(row)
+                if result is not None:
+                    return result
+        return None
+
+    def _follow_prereqs(self, row: sqlite3.Row, _seen: set[int] | None = None) -> dict | None:
+        """Resolve the actionable task reached from `row`, following prerequisites.
+
+        If `row` has prerequisites whose state is not Done, follow the first
+        unmet one (by task number) recursively. Returns the serialized task
+        once a candidate has no unmet prerequisites, or None if the chain
+        dead-ends. ``_seen`` guards against prerequisite cycles (structurally
+        impossible once set, kept as a cheap safety net).
+        """
+        if _seen is None:
+            _seen = set()
+        if row["id"] in _seen:
+            return None
+        _seen.add(row["id"])
+        prereqs = self.conn.execute(
+            "SELECT p2.* "
+            "FROM task_prereqs pr JOIN tasks p2 ON p2.id = pr.prereq_id "
+            "WHERE pr.task_id = ? ORDER BY p2.number",
+            (row["id"],),
+        ).fetchall()
+        unmet = [p for p in prereqs if p["state"] != "Done"]
+        if unmet:
+            return self._follow_prereqs(unmet[0], _seen)
+        return self._serialize_task(row)
+
     # -- updating ------------------------------------------------------------
 
     def update_task(

@@ -167,6 +167,22 @@ def build_server(store: Store) -> FastMCP:
     @mcp.tool()
     @_wrap
     @_project_arg(store)
+    def get_next_task(project_id: int) -> dict | None:
+        """Return the next actionable task in the project, or null.
+
+        The Orchestrator uses this to pick the next task to dispatch. Priority:
+        Review > In progress > Planning > Todo, by sort_order within each state.
+        If the candidate has a prerequisite not yet Done, the first unmet
+        prerequisite is returned instead so it is worked on first.
+        """
+        result = store.get_next_task(project_id)
+        if result is None:
+            return None
+        return {"number": result["number"], "title": result["title"], "state": result["state"]}
+
+    @mcp.tool()
+    @_wrap
+    @_project_arg(store)
     def create_task(
         project_id: int,
         title: str,
