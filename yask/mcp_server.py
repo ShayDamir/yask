@@ -134,7 +134,7 @@ def build_server(store: Store) -> FastMCP:
 
     @mcp.tool()
     @_wrap
-    def list_projects() -> list[dict]:
+    def list_projects():
         """List all projects with their task counts."""
         return store.list_projects()
 
@@ -268,13 +268,13 @@ def build_server(store: Store) -> FastMCP:
     @mcp.tool()
     @_wrap
     @_project_arg(store)
-    def get_task_history(project_id: int, number: int) -> list[dict]:
+    def get_task_history(project_id: int, number: int):
         """Every state change of a task, with timestamps."""
         return store.get_history(project_id, number)
 
     @mcp.tool()
     @_wrap
-    def list_task_types() -> list[dict]:
+    def list_task_types():
         """List task types (Story, Task, Bug, Epic, plus any custom ones)."""
         return store.list_task_types()
 
@@ -323,7 +323,7 @@ def build_server(store: Store) -> FastMCP:
     @mcp.tool()
     @_wrap
     @_project_arg(store)
-    def list_attachments(project_id: int, number: int) -> list[dict]:
+    def list_attachments(project_id: int, number: int):
         """List a task's attachments (metadata only)."""
         return store.list_attachments(project_id, number)
 

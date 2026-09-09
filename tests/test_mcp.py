@@ -283,3 +283,15 @@ def test_all_digit_project_name_resolves(store):
     res = call(store, "list_tasks", project="123")
     titles = [data["title"] for tb in texts(res) for data in [json.loads(tb.text)]]
     assert titles == ["Numeric name task"]
+
+
+def test_list_typed_tools_surface_readable_error_payload(store, project):
+    # Domain errors in list-typed tools must surface as the agreed readable
+    # {"ok": False, "error": ...} payload, not a pydantic output-validation
+    # ToolError (see #13). get_task_history / list_attachments look up the task
+    # and raise NotFound for an unknown number.
+    for name in ("get_task_history", "list_attachments"):
+        res = call(store, name, project=project["id"], number=999999)
+        data = json.loads(texts(res)[0].text)
+        assert data["ok"] is False
+        assert "error" in data
