@@ -1,7 +1,7 @@
 // yask web UI — bootstrap, app state, and user actions.
 
 import api from "./api.js";
-import { renderBoard, renderSearchResults, renderSidebar } from "./render.js";
+import { renderBoard, renderSearchResults, renderSidebar, ARCHIVED } from "./render.js";
 import { initDnd } from "./dnd.js";
 import { openEditorModal, openNewTaskModal, confirmDialog } from "./dialogs.js";
 import { initTheme } from "./theme.js";
@@ -367,10 +367,14 @@ async function handleDrop(number, intent) {
     return;
   }
 
-  await doMove(task, intent.state, {
-    before: intent.before,
-    after: intent.after,
-  });
+  if (intent.state === ARCHIVED) {
+    await doArchive(task);
+  } else {
+    await doMove(task, intent.state, {
+      before: intent.before,
+      after: intent.after,
+    });
+  }
 }
 
 // -- wiring ---------------------------------------------------------------------------
