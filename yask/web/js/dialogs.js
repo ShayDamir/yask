@@ -203,13 +203,43 @@ export function openNewTaskModal(project, state, onCreated) {
   typeSelect.addEventListener("change", syncEpic);
   syncEpic();
 
+  // User story pattern (see #5): opt-in three-field form composing an
+  // "As a …, I want …, so that …." description. Hidden until toggled on.
+  const usAs = h("input", { type: "text", id: "nt-us-as", placeholder: "a role or user" });
+  const usWant = h("input", { type: "text", id: "nt-us-want", placeholder: "an action or capability" });
+  const usSo = h("input", { type: "text", id: "nt-us-so", placeholder: "a benefit or reason" });
+  const usFields = h(
+    "div",
+    { class: "us-fields", hidden: "" },
+    h("div", { class: "field" }, h("label", {}, "As a", usAs)),
+    h("div", { class: "field" }, h("label", {}, "I want", usWant)),
+    h("div", { class: "field" }, h("label", {}, "So that", usSo))
+  );
+  const usToggle = h("input", { type: "checkbox", id: "nt-us-pattern" });
+  usToggle.addEventListener("change", () => {
+    usFields.hidden = !usToggle.checked;
+  });
+
   const form = h(
     "form",
     {
       id: "nt-form",
       onsubmit: async (e) => {
         e.preventDefault();
-        const title = titleInput.value.trim();
+        let title = titleInput.value.trim();
+        const patternOn = usToggle.checked;
+        let description = "";
+        if (patternOn) {
+          const as = usAs.value.trim();
+          const want = usWant.value.trim();
+          const so = usSo.value.trim();
+          const clauses = [];
+          if (as) clauses.push(`As a ${as}`);
+          if (want) clauses.push(`I want ${want}`);
+          if (so) clauses.push(`So that ${so}`);
+          if (clauses.length) description = clauses.join(", ") + ".";
+          if (!title) title = want || "User story";
+        }
         if (!title) return;
         const isEpic = types.find((t) => t.name === typeSelect.value)?.is_epic;
         const est = isEpic ? null : estInput.value === "" ? null : Number(estInput.value);
@@ -219,6 +249,7 @@ export function openNewTaskModal(project, state, onCreated) {
             type: typeSelect.value,
             estimate: est,
             state,
+            description: patternOn ? description : "",
           });
           setLastType(pid, typeSelect.value);
           modal.close();
@@ -236,6 +267,8 @@ export function openNewTaskModal(project, state, onCreated) {
       h("div", { class: "field" }, h("label", {}, "Type"), typeSelect),
       h("div", { class: "field" }, h("label", {}, "Story points"), estInput)
     ),
+    h("div", { class: "field" }, h("label", {}, usToggle, " User story pattern")),
+    usFields,
     h(
       "div",
       { class: "modal-actions" },
