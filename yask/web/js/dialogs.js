@@ -414,6 +414,11 @@ export function openEditorModal(project, task, actions) {
   // save below never clears labels even if the project label fetch fails.
   let projectLabels = (task.labels || []).map((l) => ({ id: l.id, name: l.name }));
   const chosenLabelIds = new Set(projectLabels.map((l) => l.id));
+  // Snapshot the task's label ids as loaded, before any checkbox toggles. The
+  // checkboxes mutate `chosenLabelIds` on every change (see below), so comparing
+  // the checked boxes against `chosenLabelIds` at save time is always equal and
+  // never persists — this snapshot is the correct baseline for change detection.
+  const initialLabelIds = new Set(projectLabels.map((l) => l.id));
   const renderLabels = () => {
     clear(labelList);
     if (!projectLabels.length) {
@@ -572,8 +577,8 @@ export function openEditorModal(project, task, actions) {
             await api.setPrerequisites(pid, task.number, checked);
           }
           const checkedLabelIds = [...labelList.querySelectorAll("input:checked")].map((c) => Number(c.value)).sort((a, b) => a - b);
-          const currentLabelIds = [...chosenLabelIds].sort((a, b) => a - b);
-          if (checkedLabelIds.join() !== currentLabelIds.join()) {
+          const initialSorted = [...initialLabelIds].sort((a, b) => a - b);
+          if (checkedLabelIds.join() !== initialSorted.join()) {
             await api.setTaskLabels(pid, task.number, checkedLabelIds);
           }
           toast(`Task #${task.number} saved`, "success");
