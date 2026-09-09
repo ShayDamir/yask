@@ -108,26 +108,28 @@ function renderChildRow(task, actions, filterLabel) {
   }
 
   row.append(
-    h("span", { class: "num" }, `#${task.number}`),
-    h("span", { class: "title", title: task.title, onclick: () => actions.onEdit(task) }, task.title),
-    labelChips(task),
-    h("span", { class: `badge ${typeClass(task.type)}` }, task.type),
-    estimateBadge(task),
-    prereqFlag(task),
-    attachFlag(task),
-    h(
-      "select",
-      {
-        title: "Move to state",
-        onchange: (e) => {
-          e.target.value = task.state; // reset until the server confirms
-          actions.onMove(task, e.target.value);
+    ...[
+      h("span", { class: "num" }, `#${task.number}`),
+      h("span", { class: "title", title: task.title, onclick: () => actions.onEdit(task) }, task.title),
+      labelChips(task),
+      h("span", { class: `badge ${typeClass(task.type)}` }, task.type),
+      estimateBadge(task),
+      prereqFlag(task),
+      attachFlag(task),
+      h(
+        "select",
+        {
+          title: "Move to state",
+          onchange: (e) => {
+            e.target.value = task.state; // reset until the server confirms
+            actions.onMove(task, e.target.value);
+          },
         },
-      },
-      ALL_STATES.map((s) =>
-        h("option", { value: s, selected: s === task.state ? "selected" : null }, s)
-      )
-    )
+        ALL_STATES.map((s) =>
+          h("option", { value: s, selected: s === task.state ? "selected" : null }, s)
+        )
+      ),
+    ].filter(Boolean)
   );
 
   container.append(row);
@@ -181,15 +183,17 @@ export function renderCard(task, actions, { expanded, filterLabel } = {}) {
     }
   );
   card.append(
-    h(
-      "div",
-      { class: "card-top" },
-      h("span", { class: "num" }, `#${task.number}`),
-      h("span", { class: "title" }, task.title),
-      task.state === "Done" ? h("span", { class: "done-mark", title: "Done" }, "✓") : null
-    ),
-    labelChips(task),
-    h("div", { class: "card-meta" }, cardBadges(task))
+    ...[
+      h(
+        "div",
+        { class: "card-top" },
+        h("span", { class: "num" }, `#${task.number}`),
+        h("span", { class: "title" }, task.title),
+        task.state === "Done" ? h("span", { class: "done-mark", title: "Done" }, "✓") : null
+      ),
+      labelChips(task),
+      h("div", { class: "card-meta" }, cardBadges(task)),
+    ].filter(Boolean)
   );
   if (task.description) {
     card.append(h("div", { class: "card-desc" }, task.description));
