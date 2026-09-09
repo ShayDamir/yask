@@ -203,8 +203,9 @@ export function openNewTaskModal(project, state, onCreated) {
   typeSelect.addEventListener("change", syncEpic);
   syncEpic();
 
-  // User story pattern (see #5): opt-in three-field form composing an
-  // "As a …, I want …, so that …." description. Hidden until toggled on.
+  // User story pattern (see #5): three-field form composing an
+  // "As a …, I want …, so that …." description. Auto-shown only when the
+  // selected type is "Story" (#20); hidden for every other type.
   // (#7) When the project has preset roles, "As a" is a dropdown of them;
   // otherwise it stays a free-text field so the pattern still works.
   const projectRoles =
@@ -226,10 +227,12 @@ export function openNewTaskModal(project, state, onCreated) {
     h("div", { class: "field" }, h("label", {}, "I want", usWant)),
     h("div", { class: "field" }, h("label", {}, "So that", usSo))
   );
-  const usToggle = h("input", { type: "checkbox", id: "nt-us-pattern" });
-  usToggle.addEventListener("change", () => {
-    usFields.hidden = !usToggle.checked;
-  });
+  // Show the pattern only when the selected type is "Story" (#20).
+  const syncStoryPattern = () => {
+    usFields.hidden = typeSelect.value !== "Story";
+  };
+  typeSelect.addEventListener("change", syncStoryPattern);
+  syncStoryPattern(); // initial state
 
   const form = h(
     "form",
@@ -238,9 +241,9 @@ export function openNewTaskModal(project, state, onCreated) {
       onsubmit: async (e) => {
         e.preventDefault();
         let title = titleInput.value.trim();
-        const patternOn = usToggle.checked;
+        const isStory = typeSelect.value === "Story";
         let description = "";
-        if (patternOn) {
+        if (isStory) {
           const as = usAs.value.trim();
           const want = usWant.value.trim();
           const so = usSo.value.trim();
@@ -260,7 +263,7 @@ export function openNewTaskModal(project, state, onCreated) {
             title,
             type: typeSelect.value,
             estimate: est,
-            description: patternOn ? description : "",
+            description: isStory ? description : "",
           });
           setLastType(pid, typeSelect.value);
           modal.close();
@@ -278,7 +281,6 @@ export function openNewTaskModal(project, state, onCreated) {
       h("div", { class: "field" }, h("label", {}, "Type"), typeSelect),
       h("div", { class: "field" }, h("label", {}, "Story points"), estInput)
     ),
-    h("div", { class: "field" }, h("label", {}, usToggle, " User story pattern")),
     usFields,
     h(
       "div",
