@@ -370,6 +370,13 @@ def build_server(store: Store) -> FastMCP:
         """Replace a task's label set. The labels must belong to the project."""
         return store.set_task_labels(project_id, number, label_ids)
 
+    @mcp.tool()
+    @_wrap
+    @_project_arg(store)
+    def delete_label(project_id: int, label_id: int) -> dict:
+        """Delete a project label, detaching it from all tasks it is applied to."""
+        return store.delete_label(project_id, label_id)
+
     return mcp
 
 

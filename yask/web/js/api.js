@@ -100,6 +100,7 @@ const api = {
   createLabel: (pid, name) => req("POST", `/api/projects/${pid}/labels`, { name }),
   setTaskLabels: (pid, num, labelIds) =>
     req("PUT", `/api/projects/${pid}/tasks/${num}/labels`, { label_ids: labelIds }),
+  deleteLabel: (pid, labelId) => req("DELETE", `/api/projects/${pid}/labels/${labelId}`),
 };
 
 export default api;

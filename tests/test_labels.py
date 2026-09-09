@@ -10,7 +10,7 @@ from mcp.types import TextContent
 
 from yask.api import create_app
 from yask.mcp_server import build_server
-from yask.store import Conflict, ValidationError
+from yask.store import Conflict, NotFound, ValidationError
 
 
 # -- store ------------------------------------------------------------------
@@ -139,6 +139,34 @@ def test_labels_embedded_in_get_task_and_project(store, project):
     assert proj["tasks"][0]["labels"][0]["name"] == "frontend"
 
 
+def test_delete_label_detaches_from_all_tasks(store, project):
+    pid = project["id"]
+    l = store.create_label(pid, "temp")
+    a = store.create_task(pid, "a")
+    b = store.create_task(pid, "b")
+    store.set_task_labels(pid, a["number"], [l["id"]])
+    store.set_task_labels(pid, b["number"], [l["id"]])
+    c = store.create_task(pid, "c")
+
+    res = store.delete_label(pid, l["id"])
+    assert res["applied"] is True
+    assert res["name"] == "temp"
+    assert res["detached_tasks"] == 2
+
+    # the label is gone from the project
+    assert store.list_labels(pid) == []
+    # detached from the tasks it was applied to
+    assert store.get_task(pid, a["number"])["labels"] == []
+    assert store.get_task(pid, b["number"])["labels"] == []
+    # a task that never had the label is unaffected
+    assert store.get_task(pid, c["number"])["labels"] == []
+
+
+def test_delete_label_unknown_raises_not_found(store, project):
+    with pytest.raises(NotFound):
+        store.delete_label(project["id"], 9999)
+
+
 # -- REST API ---------------------------------------------------------------
 
 @pytest.fixture()
@@ -198,6 +226,28 @@ def test_label_endpoints_404_on_unknown_project(client):
     )
 
 
+def test_delete_label_over_api(client, pid):
+    r = client.post(f"/api/projects/{pid}/labels", json={"name": "temp"})
+    lid = r.json()["id"]
+    client.post(f"/api/projects/{pid}/tasks", json={"title": "a"})
+    client.put(f"/api/projects/{pid}/tasks/1/labels", json={"label_ids": [lid]})
+
+    r = client.delete(f"/api/projects/{pid}/labels/{lid}")
+    assert r.status_code == 200
+    assert r.json()["detached_tasks"] == 1
+    assert client.get(f"/api/projects/{pid}/labels").json() == []
+    # the link is gone from the task
+    assert client.get(f"/api/projects/{pid}/tasks/1").json()["labels"] == []
+
+
+def test_delete_label_over_api_unknown_project(client):
+    assert client.delete("/api/projects/999/labels/1").status_code == 404
+
+
+def test_delete_label_over_api_unknown_label(client, pid):
+    assert client.delete(f"/api/projects/{pid}/labels/9999").status_code == 404
+
+
 # -- MCP --------------------------------------------------------------------
 
 def _call(store, tool, **args):
@@ -215,7 +265,7 @@ def test_label_tools_are_registered(store, project):
         return sorted(t.name for t in await server.list_tools())
 
     names_list = asyncio.run(names())
-    for tool in ("create_label", "list_labels", "set_task_labels"):
+    for tool in ("create_label", "list_labels", "set_task_labels", "delete_label"):
         assert tool in names_list
 
 
@@ -226,7 +276,7 @@ def test_label_tools_expose_project_by_name(store, project):
         return {t.name: t.inputSchema for t in await server.list_tools()}
 
     schemas_by_name = asyncio.run(schemas())
-    for name in ("create_label", "list_labels", "set_task_labels"):
+    for name in ("create_label", "list_labels", "set_task_labels", "delete_label"):
         props = schemas_by_name[name]["properties"]
         assert "project" in props
         assert "project_id" not in props
@@ -258,3 +308,29 @@ def test_list_tasks_by_label_unknown_via_mcp(store, project):
     data = json.loads([c for c in res if isinstance(c, TextContent)][0].text)
     assert data["ok"] is False
     assert "not found" in data["error"]
+
+
+def test_delete_label_via_mcp(store, project):
+    l = _call(store, "create_label", project="demo", name="temp")
+    lid = json.loads([c for c in l if isinstance(c, TextContent)][0].text)["id"]
+    t = store.create_task(project["id"], "t")
+    _call(store, "set_task_labels", project=project["name"], number=t["number"], label_ids=[lid])
+
+    res = _call(store, "delete_label", project=project["name"], label_id=lid)
+    data = json.loads([c for c in res if isinstance(c, TextContent)][0].text)
+    assert data["applied"] is True
+    assert data["detached_tasks"] == 1
+
+    labels = [
+        json.loads(c.text)
+        for c in _call(store, "list_labels", project=project["name"])
+        if isinstance(c, TextContent)
+    ]
+    assert labels == []
+
+    tasks = [
+        json.loads(c.text)
+        for c in _call(store, "list_tasks", project=project["name"])
+        if isinstance(c, TextContent)
+    ]
+    assert tasks[0]["labels"] == []

@@ -169,6 +169,10 @@ const actions = {
       onArchive: (t) => doArchive(t),
       onRestore: (t) => doRestore(t),
       onDelete: (t) => doDelete(t),
+      onLabelDeleted: (name) => {
+        if (state.filterLabel === name) state.filterLabel = "";
+        refresh();
+      },
     }),
   onAdd: (colState) =>
     openNewTaskModal(state.project, colState, () => {

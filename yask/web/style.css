@@ -500,6 +500,18 @@ textarea { resize: vertical; min-height: 70px; width: 100%; }
 .check-list label { display: flex; align-items: center; gap: 8px; font-size: max(13px, var(--min-font)); cursor: pointer; padding: 3px 4px; border-radius: 5px; }
 .check-list label:hover { background: var(--bg-hover); }
 .check-list .state-chip { margin-left: auto; }
+.check-list .label-del {
+  margin-left: auto;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--danger);
+  cursor: pointer;
+  padding: 1px 6px;
+  border-radius: var(--radius);
+  font-size: max(13px, var(--min-font));
+  line-height: 1;
+}
+.check-list .label-del:hover { background: var(--bg-hover); border-color: var(--border); }
 
 .attachment-list { display: flex; flex-direction: column; gap: 6px; }
 .attachment-item {

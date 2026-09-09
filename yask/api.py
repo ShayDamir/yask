@@ -303,6 +303,10 @@ def create_app(db_path: str | Path) -> FastAPI:
             lambda: store().set_task_labels(project_id, number, body.label_ids)
         )
 
+    @app.delete("/api/projects/{project_id}/labels/{label_id}")
+    def api_delete_label(project_id: int, label_id: int):
+        return handle(lambda: store().delete_label(project_id, label_id))
+
     # -- task types
 
     @app.get("/api/task-types")

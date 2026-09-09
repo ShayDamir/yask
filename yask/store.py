@@ -1011,3 +1011,25 @@ class Store:
                 [(row["id"], lid) for lid in deduped],
             )
         return self.get_task(project_id, number)
+
+    def delete_label(self, project_id: int, label_id: int) -> dict:
+        self._get_project(project_id)
+        row = self.conn.execute(
+            "SELECT id, name FROM labels WHERE project_id = ? AND id = ?",
+            (project_id, label_id),
+        ).fetchone()
+        if row is None:
+            raise NotFound(f"label {label_id} not found in this project")
+        detached = self.conn.execute(
+            "SELECT COUNT(*) FROM task_labels WHERE label_id = ?", (label_id,)
+        ).fetchone()[0]
+        with self.conn:
+            # ON DELETE CASCADE removes the task_labels links, detaching the
+            # label from every task it was applied to.
+            self.conn.execute("DELETE FROM labels WHERE id = ?", (label_id,))
+        return {
+            "applied": True,
+            "label_id": label_id,
+            "name": row["name"],
+            "detached_tasks": detached,
+        }

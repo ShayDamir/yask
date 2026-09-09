@@ -379,7 +379,26 @@ export function openEditorModal(project, task, actions) {
         else chosenLabelIds.delete(l.id);
       });
       labelList.append(
-        h("label", {}, cb, h("span", { class: "label-chip" }, l.name))
+        h(
+          "label",
+          {},
+          cb,
+          h("span", { class: "label-chip" }, l.name),
+          h(
+            "button",
+            {
+              type: "button",
+              class: "label-del",
+              title: `Delete label “${l.name}”`,
+              "aria-label": `Delete label “${l.name}”`,
+              onclick: (e) => {
+                e.stopPropagation();
+                deleteLabel(l);
+              },
+            },
+            "✕"
+          )
+        )
       );
     }
   };
@@ -412,6 +431,29 @@ export function openEditorModal(project, task, actions) {
       toastError(err);
     }
   };
+  async function deleteLabel(l) {
+    const ok = await confirmDialog({
+      title: `Delete label “${l.name}”?`,
+      message: "This removes the label from all tasks in this project.",
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const res = await api.deleteLabel(pid, l.id);
+      projectLabels = projectLabels.filter((x) => x.id !== l.id);
+      chosenLabelIds.delete(l.id);
+      renderLabels();
+      const n = res.detached_tasks ?? 0;
+      const where = n === 1 ? "1 task" : `${n} tasks`;
+      toast(`Deleted label “${l.name}” (removed from ${where})`, "success");
+      if (actions && typeof actions.onLabelDeleted === "function") {
+        await actions.onLabelDeleted(l.name);
+      }
+    } catch (err) {
+      toastError(err);
+    }
+  }
   // Enter in the new-label field must create the label, not save the editor form.
   newLabelInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
