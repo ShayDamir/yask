@@ -327,7 +327,11 @@ class Store:
         return self._serialize_task(row)
 
     def list_tasks(
-        self, project_id: int, state: str | None = None, include_archived: bool = False
+        self,
+        project_id: int,
+        state: str | None = None,
+        include_archived: bool = False,
+        label: str | None = None,
     ) -> list[dict]:
         self._get_project(project_id)
         sql = "SELECT * FROM tasks WHERE project_id = ?"
@@ -339,6 +343,20 @@ class Store:
             args.append(state)
         if not include_archived and state is None:
             sql += f" AND state != '{db.ARCHIVED_STATE}'"
+        if label is not None:
+            label = (label or "").strip()
+            if not label:
+                raise ValidationError("label must not be empty")
+            row = self.conn.execute(
+                "SELECT l.id FROM labels l WHERE l.project_id = ? AND l.name = ? COLLATE NOCASE",
+                (project_id, label),
+            ).fetchone()
+            if row is None:
+                raise ValidationError(f"label '{label}' not found")
+            sql += (
+                " AND id IN (SELECT task_id FROM task_labels WHERE label_id = ?)"
+            )
+            args.append(row["id"])
         rows = self.conn.execute(
             sql + " ORDER BY state, parent_id, sort_order", args
         ).fetchall()
@@ -403,6 +421,15 @@ class Store:
                 (row["id"],),
             ).fetchall()
         ]
+        labels = [
+            {"id": l["id"], "name": l["name"]}
+            for l in self.conn.execute(
+                "SELECT l.id, l.name FROM labels l "
+                "JOIN task_labels tl ON tl.label_id = l.id "
+                "WHERE tl.task_id = ? ORDER BY l.name COLLATE NOCASE",
+                (row["id"],),
+            ).fetchall()
+        ]
         parent_number = None
         if row["parent_id"] is not None:
             parent_number = self.conn.execute(
@@ -425,6 +452,7 @@ class Store:
             "prerequisites": prereqs,
             "has_unmet_prerequisites": any(p["state"] != "Done" for p in prereqs),
             "attachments": attachments,
+            "labels": labels,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -931,3 +959,55 @@ class Store:
             raise NotFound(f"attachment {attachment_id} not found")
         with self.conn:
             self.conn.execute("DELETE FROM attachments WHERE id = ?", (attachment_id,))
+
+    # -- labels --------------------------------------------------------------------
+
+    def create_label(self, project_id: int, name: str) -> dict:
+        self._get_project(project_id)
+        name = (name or "").strip()
+        if not name:
+            raise ValidationError("label name must not be empty")
+        try:
+            with self.conn:
+                cur = self.conn.execute(
+                    "INSERT INTO labels(project_id, name) VALUES (?, ?)",
+                    (project_id, name),
+                )
+        except sqlite3.IntegrityError:
+            raise Conflict(f"label '{name}' already exists") from None
+        return {"id": cur.lastrowid, "name": name}
+
+    def list_labels(self, project_id: int) -> list[dict]:
+        self._get_project(project_id)
+        return [
+            {"id": l["id"], "name": l["name"]}
+            for l in self.conn.execute(
+                "SELECT id, name FROM labels WHERE project_id = ? "
+                "ORDER BY name COLLATE NOCASE",
+                (project_id,),
+            ).fetchall()
+        ]
+
+    def set_task_labels(self, project_id: int, number: int, label_ids: list[int]) -> dict:
+        row = self._get_task(project_id, number)
+        valid = {
+            l["id"]
+            for l in self.conn.execute(
+                "SELECT id FROM labels WHERE project_id = ?", (project_id,)
+            ).fetchall()
+        }
+        deduped: list[int] = []
+        for lid in label_ids:
+            if lid not in valid:
+                raise ValidationError(f"label {lid} does not belong to this project")
+            if lid not in deduped:
+                deduped.append(lid)
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM task_labels WHERE task_id = ?", (row["id"],)
+            )
+            self.conn.executemany(
+                "INSERT INTO task_labels(task_id, label_id) VALUES (?, ?)",
+                [(row["id"], lid) for lid in deduped],
+            )
+        return self.get_task(project_id, number)

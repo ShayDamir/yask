@@ -49,6 +49,15 @@ function attachFlag(task) {
   );
 }
 
+function labelChips(task) {
+  if (!task.labels || !task.labels.length) return null;
+  return h(
+    "span",
+    { class: "label-chips" },
+    task.labels.map((l) => h("span", { class: "label-chip", title: `Label: ${l.name}` }, l.name))
+  );
+}
+
 function cardBadges(task) {
   return [
     h("span", { class: `badge ${typeClass(task.type)}` }, task.type),
@@ -58,9 +67,18 @@ function cardBadges(task) {
   ].filter(Boolean);
 }
 
+function hasLabel(task, name) {
+  return (task.labels || []).some((l) => l.name === name);
+}
+
+function subtreeHasLabel(task, name) {
+  if (hasLabel(task, name)) return true;
+  return (task.children || []).some((c) => subtreeHasLabel(c, name));
+}
+
 // -- nested children of an epic ------------------------------------------------
 
-function renderChildRow(task, actions) {
+function renderChildRow(task, actions, filterLabel) {
   const container = h("div", { class: "child-container" });
   const row = h("div", { class: "child-row", dataset: { number: task.number } });
 
@@ -69,7 +87,10 @@ function renderChildRow(task, actions) {
     const subWrap = h("div", { class: "sub-children" });
     const renderSub = () => {
       clear(subWrap);
-      for (const c of task.children || []) subWrap.append(renderChildRow(c, actions));
+      const kids = filterLabel
+        ? (task.children || []).filter((c) => subtreeHasLabel(c, filterLabel))
+        : task.children || [];
+      for (const c of kids) subWrap.append(renderChildRow(c, actions, filterLabel));
     };
     row.append(
       h("button", {
@@ -89,6 +110,7 @@ function renderChildRow(task, actions) {
   row.append(
     h("span", { class: "num" }, `#${task.number}`),
     h("span", { class: "title", title: task.title, onclick: () => actions.onEdit(task) }, task.title),
+    labelChips(task),
     h("span", { class: `badge ${typeClass(task.type)}` }, task.type),
     estimateBadge(task),
     prereqFlag(task),
@@ -112,9 +134,10 @@ function renderChildRow(task, actions) {
   return container;
 }
 
-export function renderEpicChildren(task, actions) {
+export function renderEpicChildren(task, actions, filterLabel) {
   const wrap = h("div", { class: "epic-children" });
-  const children = task.children || [];
+  let children = task.children || [];
+  if (filterLabel) children = children.filter((c) => subtreeHasLabel(c, filterLabel));
   if (!children.length) {
     wrap.append(
       h("span", { style: "color:var(--text-dim);font-size:max(12px,var(--min-font))" }, "No tasks in this epic yet.")
@@ -135,7 +158,7 @@ export function renderEpicChildren(task, actions) {
         h("span", {}, s),
         h("span", { class: "count" }, String(groups.get(s).length))
       ),
-      ...groups.get(s).map((c) => renderChildRow(c, actions))
+      ...groups.get(s).map((c) => renderChildRow(c, actions, filterLabel))
     );
   }
   return wrap;
@@ -143,7 +166,7 @@ export function renderEpicChildren(task, actions) {
 
 // -- root cards ----------------------------------------------------------------
 
-export function renderCard(task, actions, { expanded } = {}) {
+export function renderCard(task, actions, { expanded, filterLabel } = {}) {
   const card = h(
     "div",
     {
@@ -165,13 +188,14 @@ export function renderCard(task, actions, { expanded } = {}) {
       h("span", { class: "title" }, task.title),
       task.state === "Done" ? h("span", { class: "done-mark", title: "Done" }, "✓") : null
     ),
+    labelChips(task),
     h("div", { class: "card-meta" }, cardBadges(task))
   );
   if (task.description) {
     card.append(h("div", { class: "card-desc" }, task.description));
   }
   if (task.is_epic) {
-    const kids = renderEpicChildren(task, actions);
+    const kids = renderEpicChildren(task, actions, filterLabel);
     if (expanded !== false) card.append(kids);
   }
   return card;
@@ -179,14 +203,14 @@ export function renderCard(task, actions, { expanded } = {}) {
 
 // -- columns / board ---------------------------------------------------------------
 
-function renderColumn(colState, roots, actions) {
+function renderColumn(colState, roots, actions, filterLabel) {
   const body = h("div", { class: "column-body", dataset: { state: colState } });
   if (!roots.length) {
     body.append(
       h("div", { class: "empty-column" }, colState === ARCHIVED ? "Nothing archived." : "Drop tasks here.")
     );
   }
-  for (const t of roots) body.append(renderCard(t, actions));
+  for (const t of roots) body.append(renderCard(t, actions, { filterLabel }));
   const head = h(
     "div",
     { class: "column-head" },
@@ -210,17 +234,19 @@ function renderColumn(colState, roots, actions) {
 export function renderBoard(project, actions, opts) {
   const board = document.getElementById("board");
   clear(board);
+  const filterLabel = opts.filterLabel;
   const columns = [...STATES];
   if (opts.showArchived) columns.push(ARCHIVED);
   for (const colState of columns) {
-    const roots = project.tasks.filter((t) => t.state === colState);
-    board.append(renderColumn(colState, roots, actions));
+    let roots = project.tasks.filter((t) => t.state === colState);
+    if (filterLabel) roots = roots.filter((r) => subtreeHasLabel(r, filterLabel));
+    board.append(renderColumn(colState, roots, actions, filterLabel));
   }
 }
 
 // -- search results ------------------------------------------------------------------
 
-export function renderSearchResults(project, query, actions) {
+export function renderSearchResults(project, query, actions, filterLabel) {
   const el = document.getElementById("search-results");
   clear(el);
   const q = query.trim().toLowerCase();
@@ -232,11 +258,12 @@ export function renderSearchResults(project, query, actions) {
     }
   };
   walk(project.tasks);
-  const matches = flat.filter(
+  let matches = flat.filter(
     (t) =>
       t.title.toLowerCase().includes(q) ||
       (t.description || "").toLowerCase().includes(q)
   );
+  if (filterLabel) matches = matches.filter((t) => hasLabel(t, filterLabel));
   el.append(h("h2", {}, `${matches.length} task${matches.length === 1 ? "" : "s"} matching “${query.trim()}”`));
   if (!matches.length) {
     el.append(h("p", { style: "color:var(--text-dim)" }, "No tasks match. Try a different search."));

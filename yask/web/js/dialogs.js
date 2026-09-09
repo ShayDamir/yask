@@ -331,6 +331,68 @@ export function openEditorModal(project, task, actions) {
     fileInput.value = "";
   });
 
+  // labels
+  const labelList = h("div", { class: "check-list" });
+  const newLabelInput = h("input", { type: "text", id: "ed-new-label", placeholder: "New label…" });
+  // Seed from the task's own labels (already serialized on the task) so the
+  // save below never clears labels even if the project label fetch fails.
+  let projectLabels = (task.labels || []).map((l) => ({ id: l.id, name: l.name }));
+  const chosenLabelIds = new Set(projectLabels.map((l) => l.id));
+  const renderLabels = () => {
+    clear(labelList);
+    if (!projectLabels.length) {
+      labelList.append(h("span", { style: "color:var(--text-dim);font-size:max(12px,var(--min-font))" }, "No labels in this project yet."));
+      return;
+    }
+    for (const l of projectLabels) {
+      const cb = h("input", { type: "checkbox", value: String(l.id), checked: chosenLabelIds.has(l.id) ? "checked" : null });
+      cb.addEventListener("change", () => {
+        if (cb.checked) chosenLabelIds.add(l.id);
+        else chosenLabelIds.delete(l.id);
+      });
+      labelList.append(
+        h("label", {}, cb, h("span", { class: "label-chip" }, l.name))
+      );
+    }
+  };
+  renderLabels();
+  (async () => {
+    try {
+      const all = await api.listLabels(pid);
+      for (const l of all) {
+        if (!projectLabels.some((x) => x.id === l.id)) {
+          projectLabels.push(l);
+          renderLabels();
+        }
+      }
+    } catch {
+      /* non-fatal: the task's own labels are already shown */
+    }
+  })();
+  const addLabelBtn = h("button", { type: "button", class: "btn" }, "Add");
+  const createLabel = async () => {
+    const name = newLabelInput.value.trim();
+    if (!name) return;
+    try {
+      const l = await api.createLabel(pid, name);
+      chosenLabelIds.delete(l.id); // not auto-applied until save
+      projectLabels.push(l);
+      renderLabels();
+      newLabelInput.value = "";
+      toast(`Label “${name}” created`, "success");
+    } catch (err) {
+      toastError(err);
+    }
+  };
+  // Enter in the new-label field must create the label, not save the editor form.
+  newLabelInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      createLabel();
+    }
+  });
+  addLabelBtn.addEventListener("click", createLabel);
+
   // history
   const historyList = h("ul", { class: "history-list" });
   (async () => {
@@ -379,6 +441,11 @@ export function openEditorModal(project, task, actions) {
           if (checked.join() !== [...chosen].sort((a, b) => a - b).join()) {
             await api.setPrerequisites(pid, task.number, checked);
           }
+          const checkedLabelIds = [...labelList.querySelectorAll("input:checked")].map((c) => Number(c.value)).sort((a, b) => a - b);
+          const currentLabelIds = [...chosenLabelIds].sort((a, b) => a - b);
+          if (checkedLabelIds.join() !== currentLabelIds.join()) {
+            await api.setTaskLabels(pid, task.number, checkedLabelIds);
+          }
           toast(`Task #${task.number} saved`, "success");
           modal.close();
           await actions.refresh();
@@ -410,6 +477,14 @@ export function openEditorModal(project, task, actions) {
     h("div", { class: "section-title" }, "Attachments"),
     fileInput,
     attList,
+    h("div", { class: "section-title" }, "Labels"),
+    labelList,
+    h(
+      "div",
+      { class: "field-row" },
+      newLabelInput,
+      addLabelBtn
+    ),
     h("div", { class: "section-title" }, "History"),
     historyList,
     h(

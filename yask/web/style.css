@@ -301,6 +301,18 @@ html, body {
 .flag { font-size: max(11px, var(--min-font)); color: var(--text-dim); display: inline-flex; align-items: center; gap: 3px; }
 .flag.unmet { color: var(--danger); font-weight: 600; }
 
+.label-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+.card-top + .label-chips { margin-top: 7px; }
+.label-chip {
+  font-size: max(11px, var(--min-font));
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 9px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
 .card-desc {
   margin-top: 7px;
   font-size: max(12px, var(--min-font));

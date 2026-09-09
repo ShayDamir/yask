@@ -7,7 +7,7 @@ import { openEditorModal, openNewTaskModal, confirmDialog } from "./dialogs.js";
 import { initTheme } from "./theme.js";
 import { initFontSize } from "./fontsize.js";
 import { toast, toastError } from "./toast.js";
-import { debounce } from "./util.js";
+import { debounce, h, clear } from "./util.js";
 
 const state = {
   projects: [],
@@ -15,6 +15,7 @@ const state = {
   project: null,
   search: "",
   showArchived: false,
+  filterLabel: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -51,8 +52,28 @@ async function loadProjects() {
 async function selectProject(pid) {
   state.currentProjectId = pid;
   state.project = await api.getProject(pid);
+  state.filterLabel = "";
   await loadProjects();
+  await populateLabelFilter();
   render();
+}
+
+async function populateLabelFilter() {
+  const select = $("label-filter");
+  const current = state.filterLabel;
+  clear(select);
+  select.append(h("option", { value: "" }, "Any label"));
+  try {
+    const labels = await api.listLabels(state.currentProjectId);
+    for (const l of labels) {
+      select.append(h("option", { value: l.name }, l.name));
+    }
+    if (current && labels.some((l) => l.name === current)) state.filterLabel = current;
+    else state.filterLabel = "";
+  } catch {
+    state.filterLabel = "";
+  }
+  select.value = state.filterLabel;
 }
 
 async function refresh() {
@@ -63,6 +84,7 @@ async function refresh() {
   ]);
   state.project = project;
   state.projects = projects;
+  await populateLabelFilter();
   render();
 }
 
@@ -82,10 +104,13 @@ function render() {
   }
   if (!hasProject) return;
   if (state.search.trim() !== "") {
-    renderSearchResults(state.project, state.search, actions);
+    renderSearchResults(state.project, state.search, actions, state.filterLabel);
     return;
   }
-  renderBoard(state.project, actions, { showArchived: state.showArchived });
+  renderBoard(state.project, actions, {
+    showArchived: state.showArchived,
+    filterLabel: state.filterLabel,
+  });
 }
 
 // -- task lookup --------------------------------------------------------------------
@@ -308,6 +333,11 @@ function init() {
 
   $("show-archived").addEventListener("change", (e) => {
     state.showArchived = e.target.checked;
+    render();
+  });
+
+  $("label-filter").addEventListener("change", (e) => {
+    state.filterLabel = e.target.value;
     render();
   });
 

@@ -94,6 +94,12 @@ const api = {
   // task types
   listTaskTypes: () => req("GET", "/api/task-types"),
   createTaskType: (name) => req("POST", "/api/task-types", { name }),
+
+  // labels
+  listLabels: (pid) => req("GET", `/api/projects/${pid}/labels`),
+  createLabel: (pid, name) => req("POST", `/api/projects/${pid}/labels`, { name }),
+  setTaskLabels: (pid, num, labelIds) =>
+    req("PUT", `/api/projects/${pid}/tasks/${num}/labels`, { label_ids: labelIds }),
 };
 
 export default api;

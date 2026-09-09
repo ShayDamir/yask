@@ -155,10 +155,13 @@ def build_server(store: Store) -> FastMCP:
     @_wrap
     @_project_arg(store)
     def list_tasks(
-        project_id: int, state: str | None = None, include_archived: bool = False
-    ) -> list[dict]:
-        """List a project's tasks. Optional state filter; archived hidden by default."""
-        return store.list_tasks(project_id, state, include_archived)
+        project_id: int,
+        state: str | None = None,
+        include_archived: bool = False,
+        label: str | None = None,
+    ):
+        """List a project's tasks. Optional state/label filters; archived hidden by default."""
+        return store.list_tasks(project_id, state, include_archived, label)
 
     @mcp.tool()
     @_wrap
@@ -345,6 +348,27 @@ def build_server(store: Store) -> FastMCP:
         """Delete an attachment permanently."""
         store.delete_attachment(attachment_id)
         return {"deleted": attachment_id}
+
+    @mcp.tool()
+    @_wrap
+    @_project_arg(store)
+    def create_label(project_id: int, name: str) -> dict:
+        """Create a project label, unique within the project."""
+        return store.create_label(project_id, name)
+
+    @mcp.tool()
+    @_wrap
+    @_project_arg(store)
+    def list_labels(project_id: int):
+        """List a project's labels."""
+        return store.list_labels(project_id)
+
+    @mcp.tool()
+    @_wrap
+    @_project_arg(store)
+    def set_task_labels(project_id: int, number: int, label_ids: list[int]) -> dict:
+        """Replace a task's label set. The labels must belong to the project."""
+        return store.set_task_labels(project_id, number, label_ids)
 
     return mcp
 

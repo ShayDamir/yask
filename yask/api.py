@@ -96,6 +96,14 @@ class TaskTypeIn(BaseModel):
     name: str
 
 
+class LabelIn(BaseModel):
+    name: str
+
+
+class TaskLabelsIn(BaseModel):
+    label_ids: list[int]
+
+
 # -- app factory -------------------------------------------------------------
 
 
@@ -143,9 +151,10 @@ def create_app(db_path: str | Path) -> FastAPI:
         project_id: int,
         state: str | None = None,
         include_archived: bool = False,
+        label: str | None = None,
     ):
         return handle(
-            lambda: store().list_tasks(project_id, state, include_archived)
+            lambda: store().list_tasks(project_id, state, include_archived, label)
         )
 
     @app.post("/api/projects/{project_id}/tasks", status_code=201)
@@ -277,6 +286,22 @@ def create_app(db_path: str | Path) -> FastAPI:
     @app.delete("/api/attachments/{attachment_id}")
     def api_delete_attachment(attachment_id: int):
         return handle(lambda: store().delete_attachment(attachment_id))
+
+    # -- labels
+
+    @app.get("/api/projects/{project_id}/labels")
+    def api_list_labels(project_id: int):
+        return handle(lambda: store().list_labels(project_id))
+
+    @app.post("/api/projects/{project_id}/labels", status_code=201)
+    def api_create_label(project_id: int, body: LabelIn):
+        return handle(lambda: store().create_label(project_id, body.name))
+
+    @app.put("/api/projects/{project_id}/tasks/{number}/labels")
+    def api_set_task_labels(project_id: int, number: int, body: TaskLabelsIn):
+        return handle(
+            lambda: store().set_task_labels(project_id, number, body.label_ids)
+        )
 
     # -- task types
 
