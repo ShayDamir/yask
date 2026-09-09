@@ -336,7 +336,9 @@ export function openEditorModal(project, task, actions) {
   );
 
   // prerequisites
-  const others = flattenTasks(project.tasks).filter((t) => t.id !== task.id);
+  const others = flattenTasks(project.tasks).filter(
+    (t) => t.id !== task.id && t.state !== "Done" && t.state !== "Archived"
+  );
   const chosen = new Set(task.prerequisites.map((p) => p.number));
   const checkList = h(
     "div",
@@ -552,7 +554,18 @@ export function openEditorModal(project, task, actions) {
           updates.parent_number = parentVal === "" ? null : Number(parentVal);
           if (updates.title === "") throw new Error("Title must not be empty");
           await api.updateTask(pid, task.number, updates);
-          const checked = [...checkList.querySelectorAll("input:checked")].map((c) => Number(c.value));
+          // Prereqs that are Done/Archived are filtered out of `others` and thus
+          // have no checkbox; they were already chosen at load, so preserve them
+          // (plan: existing assignments must remain intact — don't silently drop
+          // them on Save).
+          const otherNumbers = new Set(others.map((t) => t.number));
+          const hiddenChosen = [...chosen].filter((n) => !otherNumbers.has(n));
+          const visibleChecked = [...checkList.querySelectorAll("input:checked")].map(
+            (c) => Number(c.value)
+          );
+          const checked = [...new Set([...visibleChecked, ...hiddenChosen])].sort(
+            (a, b) => a - b
+          );
           if (checked.join() !== [...chosen].sort((a, b) => a - b).join()) {
             await api.setPrerequisites(pid, task.number, checked);
           }
