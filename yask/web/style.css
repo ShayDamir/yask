@@ -554,6 +554,7 @@ textarea { resize: vertical; min-height: 70px; width: 100%; }
 .history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: max(12.5px, var(--min-font)); }
 .history-list li { display: flex; gap: 8px; color: var(--text-dim); }
 .history-list .ts { margin-left: auto; white-space: nowrap; }
+.history-list .src { color: var(--text-dim); opacity: 0.7; font-size: 0.9em; }
 .history-list .to { color: var(--text); font-weight: 600; }
 
 /* attachment viewer */

@@ -47,7 +47,7 @@ Everything is provided by the flake (nixpkgs 26.05). Enter the dev environment
 nix develop
 ```
 
-Run the test suite (57 tests covering the domain rules above):
+Run the test suite (131 tests covering the domain rules above):
 
 ```
 python3 -m pytest tests -q

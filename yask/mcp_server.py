@@ -131,6 +131,7 @@ def _read_attachment_file(file_path: str) -> tuple[str, bytes, str]:
 
 def build_server(store: Store) -> FastMCP:
     mcp = FastMCP("yask")
+    store.source = "mcp"
 
     @mcp.tool()
     @_wrap

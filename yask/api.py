@@ -116,7 +116,7 @@ def create_app(db_path: str | Path) -> FastAPI:
     app = FastAPI(title="yask", version="0.1.0")
 
     def store() -> Store:
-        return Store(db_.conn())
+        return Store(db_.conn(), source="web")
 
     def handle(fn):
         try:

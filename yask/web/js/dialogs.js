@@ -519,6 +519,7 @@ export function openEditorModal(project, task, actions) {
             {},
             h("span", {}, `${e.from_state ?? "created"} → `),
             h("span", { class: "to" }, e.to_state),
+            h("span", { class: "src" }, "· " + (e.source ?? "")),
             h("span", { class: "ts" }, fmtTime(e.changed_at))
           )
         );

@@ -65,8 +65,11 @@ class CycleError(ValidationError):
 
 
 class Store:
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(self, conn: sqlite3.Connection, source: str = "web"):
+        if source not in ("web", "mcp"):
+            raise ValidationError(f"invalid source '{source}': expected 'web' or 'mcp'")
         self.conn = conn
+        self.source = source
 
     # -- low-level helpers ------------------------------------------------------
 
@@ -107,12 +110,13 @@ class Store:
         return bool(self._get_type(row["type_id"])["is_epic"])
 
     def _log_state(
-        self, task_id: int, from_state: str | None, to_state: str, now: str
+        self, task_id: int, from_state: str | None, to_state: str, now: str,
+        source: str | None = None,
     ) -> None:
         self.conn.execute(
-            "INSERT INTO state_history(task_id, from_state, to_state, changed_at)"
-            " VALUES (?, ?, ?, ?)",
-            (task_id, from_state, to_state, now),
+            "INSERT INTO state_history(task_id, from_state, to_state, changed_at, source)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (task_id, from_state, to_state, now, self.source if source is None else source),
         )
 
     # -- projects ------------------------------------------------------------
@@ -304,15 +308,16 @@ class Store:
             )
             cur = self.conn.execute(
                 "INSERT INTO tasks(project_id, number, title, description, type_id,"
-                " state, estimate, parent_id, sort_order, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                " state, estimate, parent_id, sort_order, created_at, updated_at,"
+                " created_by)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
                 (
                     project_id, number, title, description or "", ttype["id"],
                     state, None if ttype["is_epic"] else estimate, parent_id,
-                    now, now,
+                    now, now, self.source,
                 ),
             )
-            self._log_state(cur.lastrowid, None, state, now)
+            self._log_state(cur.lastrowid, None, state, now, self.source)
             # place the new task within its column scope
             idx = self._position_index(
                 project_id, state, parent_id, before_number, after_number
@@ -455,6 +460,7 @@ class Store:
             "labels": labels,
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            "created_by": row["created_by"],
         }
 
     def get_project(self, project_id: int) -> dict:
@@ -726,7 +732,7 @@ class Store:
             "UPDATE tasks SET state = ?, sort_order = ?, updated_at = ? WHERE id = ?",
             (to_state, sort_order, now, task_id),
         )
-        self._log_state(task_id, cur["state"], to_state, now)
+        self._log_state(task_id, cur["state"], to_state, now, self.source)
 
     # -- archiving ---------------------------------------------------------------
 

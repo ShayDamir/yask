@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     sort_order  REAL NOT NULL,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
+    created_by  TEXT NOT NULL DEFAULT 'unknown',
     UNIQUE (project_id, number)
 );
 
@@ -58,7 +59,8 @@ CREATE TABLE IF NOT EXISTS state_history (
     task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     from_state TEXT,
     to_state   TEXT NOT NULL,
-    changed_at TEXT NOT NULL
+    changed_at TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT 'unknown'
 );
 CREATE INDEX IF NOT EXISTS idx_history_task ON state_history(task_id, changed_at);
 
@@ -136,8 +138,29 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
     conn.executescript(SCHEMA)
+    _ensure_missing_columns(conn)
     _seed_task_types(conn)
     return conn
+
+
+def _ensure_missing_columns(conn: sqlite3.Connection) -> None:
+    """Add columns created after this repo's existing databases were made.
+
+    Fresh DBs get the columns from SCHEMA; existing DBs get them here.
+    The default ('unknown') is the honest value for legacy rows — old
+    state_history rows have no attribution, and tasks were created before
+    created_by existed.
+    """
+    task_cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
+    if "created_by" not in task_cols:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN created_by TEXT NOT NULL DEFAULT 'unknown'"
+        )
+    hist_cols = {r["name"] for r in conn.execute("PRAGMA table_info(state_history)")}
+    if "source" not in hist_cols:
+        conn.execute(
+            "ALTER TABLE state_history ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'"
+        )
 
 
 def _seed_task_types(conn: sqlite3.Connection) -> None:
