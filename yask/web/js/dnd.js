@@ -114,8 +114,14 @@ export function initDnd(actions) {
       if (slotIdx >= 0) {
         const prev = children[slotIdx - 1];
         const next = children[slotIdx + 1];
-        if (prev && prev.classList.contains("card")) intent.after = Number(prev.dataset.number);
-        if (next && next.classList.contains("card")) intent.before = Number(next.dataset.number);
+        // A drop in the gap between two cards is "insert after prev" (or,
+        // equivalently, "before next"). Send only ONE of the two so we never
+        // violate the backend's before/after contract (see #25).
+        if (prev && prev.classList.contains("card")) {
+          intent.after = Number(prev.dataset.number);
+        } else if (next && next.classList.contains("card")) {
+          intent.before = Number(next.dataset.number);
+        }
       }
     }
     cleanup();
