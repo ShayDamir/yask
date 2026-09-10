@@ -128,3 +128,58 @@ def test_reorder_within_column_stable(store, project):
     store.reorder_task(pid, nums[0], after_number=nums[2])
     order = [t["number"] for t in store.list_tasks(pid)]
     assert order == [nums[1], nums[2], nums[0], nums[3]]
+
+
+def test_project_overviews_empty_store(store):
+    assert store.list_project_overviews() == []
+
+
+def test_project_overviews_counts_and_order(store):
+    alpha = store.create_project("alpha")["id"]
+    beta = store.create_project("Beta")["id"]
+    zeta = store.create_project("zeta")["id"]
+
+    store.create_task(alpha, "a1")
+    store.create_task(alpha, "a2")
+    a3 = store.create_task(alpha, "a3")
+    store.move_task(alpha, a3["number"], "Todo", confirm=True)
+    a4 = store.create_task(alpha, "a4")
+    store.move_task(alpha, a4["number"], "In progress", confirm=True)
+    a5 = store.create_task(alpha, "a5")
+    store.move_task(alpha, a5["number"], "Blocked")
+    a6 = store.create_task(alpha, "a6")
+    store.archive_task(alpha, a6["number"], confirm=True)
+
+    b1 = store.create_task(beta, "b1")
+    store.move_task(beta, b1["number"], "Done", confirm=True)
+
+    # zeta stays taskless
+
+    overviews = store.list_project_overviews()
+    # same name order as list_projects (case-insensitive)
+    assert [(o["id"], o["name"]) for o in overviews] == [
+        (alpha, "alpha"),
+        (beta, "Beta"),
+        (zeta, "zeta"),
+    ]
+    assert [o["name"] for o in overviews] == [
+        p["name"] for p in store.list_projects()
+    ]
+
+    # zero-count states absent; Archived tasks excluded
+    assert overviews[0]["states"] == {
+        "Backlog": 2,
+        "Todo": 1,
+        "In progress": 1,
+        "Blocked": 1,
+    }
+    # canonical state order inside the dict (Blocked last)
+    assert list(overviews[0]["states"]) == [
+        "Backlog",
+        "Todo",
+        "In progress",
+        "Blocked",
+    ]
+    assert overviews[1]["states"] == {"Done": 1}
+    # a project with no visible tasks still appears, without a state segment
+    assert overviews[2]["states"] == {}

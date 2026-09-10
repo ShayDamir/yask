@@ -77,9 +77,15 @@ class Script:
         raise AssertionError(f"unexpected Bot API method: {method}")
 
 
-def run_bot_until_stop(script, error_delay=0.01):
-    """Run run_bot against the script until the script drains (sets stop)."""
+def run_bot_until_stop(script, dispatch=None, error_delay=0.01):
+    """Run run_bot against the script until the script drains (sets stop).
+
+    ``dispatch`` defaults to the static ``reply_for``; pass a
+    ``make_dispatch(store)`` dispatcher for store-backed commands.
+    """
     script.stop = asyncio.Event()
+    if dispatch is None:
+        dispatch = telegram_bot.reply_for
 
     async def go():
         client = make_client(script.handler)
@@ -87,7 +93,7 @@ def run_bot_until_stop(script, error_delay=0.01):
         try:
             await telegram_bot.run_bot(
                 api,
-                telegram_bot.reply_for,
+                dispatch,
                 stop_event=script.stop,
                 poll_timeout=1,
                 error_delay=error_delay,
@@ -254,3 +260,92 @@ def test_reply_for_dispatch_table():
     assert "/help" in telegram_bot.reply_for("random chatter")
     assert telegram_bot.reply_for(None) is None
     assert telegram_bot.reply_for("   ") is None
+
+
+# --- /projects (store-backed dispatch) -------------------------------------
+
+
+def test_projects_empty_board(store):
+    script = run_bot_until_stop(
+        Script([[message_update(71, "/projects")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 7
+    assert script.sent[0]["text"] == "Projects:\n(none)"
+
+
+def test_projects_populated_board(store):
+    # ids follow creation order; display order is by name
+    yask = store.create_project("yask")["id"]
+    side = store.create_project("side-project")["id"]
+    zeta = store.create_project("zeta")["id"]
+
+    for i in range(3):
+        store.create_task(yask, f"backlog {i}")
+    t1 = store.create_task(yask, "todo 1")
+    store.move_task(yask, t1["number"], "Todo", confirm=True)
+    t2 = store.create_task(yask, "todo 2")
+    store.move_task(yask, t2["number"], "Todo", confirm=True)
+    t3 = store.create_task(yask, "working")
+    store.move_task(yask, t3["number"], "In progress", confirm=True)
+    gone = store.create_task(yask, "archived")
+    store.archive_task(yask, gone["number"], confirm=True)
+
+    z1 = store.create_task(zeta, "z1")
+    store.move_task(zeta, z1["number"], "Blocked")
+    z2 = store.create_task(zeta, "z2")
+    store.move_task(zeta, z2["number"], "Blocked")
+
+    script = run_bot_until_stop(
+        Script([[message_update(81, "/projects")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    # name order, id prefixes, zero states skipped, archived excluded
+    assert script.sent[0]["text"] == (
+        "Projects:\n"
+        f"{side}. side-project\n"
+        f"{yask}. yask — Backlog: 3, Todo: 2, In progress: 1\n"
+        f"{zeta}. zeta — Blocked: 2"
+    )
+
+
+def test_projects_with_bot_mention(store):
+    script = run_bot_until_stop(
+        Script([[message_update(84, "/projects@yask_test_bot")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    assert script.sent[0]["text"] == "Projects:\n(none)"
+
+
+def test_projects_unknown_command_still_gets_hint(store):
+    script = run_bot_until_stop(
+        Script([[message_update(86, "/nope")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    assert "/help" in script.sent[0]["text"]
+
+
+def test_help_mentions_projects():
+    assert "/projects" in telegram_bot.HELP_TEXT
+
+
+def test_projects_store_failure_replies_and_recovers(store, monkeypatch):
+    def boom():
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "list_project_overviews", boom)
+    script = run_bot_until_stop(
+        Script(
+            [[message_update(91, "/projects"), message_update(92, "/start")]]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    # the failure produces a reply, not a crash; the next message is still
+    # answered
+    assert len(script.sent) == 2
+    assert script.sent[0]["text"] == telegram_bot.PROJECTS_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT

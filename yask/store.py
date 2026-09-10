@@ -153,6 +153,37 @@ class Store:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def list_project_overviews(self) -> list[dict]:
+        """Per-project task-count overview (the bot's ``/projects`` view).
+
+        One entry per project, in the same name order as ``list_projects``:
+        ``{"id", "name", "states"}`` where ``states`` maps state → count and
+        contains only non-zero counts, in canonical order (workflow order,
+        then ``Blocked``). Archived tasks are excluded — the overview
+        mirrors the visible board.
+        """
+        states = [s for s in db.ALL_STATES if s != db.ARCHIVED_STATE]
+        counts = {
+            (r["project_id"], r["state"]): r["n"]
+            for r in self.conn.execute(
+                "SELECT project_id, state, COUNT(*) AS n FROM tasks "
+                "WHERE state IN (%s) GROUP BY project_id, state"
+                % ",".join("?" * len(states)),
+                states,
+            )
+        }
+        out = []
+        for p in self.conn.execute(
+            "SELECT id, name FROM projects ORDER BY name COLLATE NOCASE"
+        ):
+            entry_states: dict[str, int] = {}
+            for s in states:
+                n = counts.get((p["id"], s), 0)
+                if n:
+                    entry_states[s] = n
+            out.append({"id": p["id"], "name": p["name"], "states": entry_states})
+        return out
+
     def create_project(self, name: str) -> dict:
         name = (name or "").strip()
         if not name:

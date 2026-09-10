@@ -2,9 +2,11 @@
 
 Run via ``yask telegram``: validates the bot token (``TELEGRAM_BOT_TOKEN``)
 with ``getMe``, opens the yask store, then long-polls the Bot API with
-``getUpdates`` and answers incoming messages. Today the command table is
-``/start`` and ``/help``; later features of the Telegram interface (Epic #27)
-extend the dispatch layer on top of the store passed in here.
+``getUpdates`` and answers incoming messages. Today the bot answers
+``/start``, ``/help`` and ``/projects`` (the project list with per-state
+task counts, read from the store); later features of the Telegram
+interface (Epic #27) extend the dispatch layer on top of the store passed
+in here.
 
 The bot talks to the Bot API directly with ``httpx`` (already a project
 dependency). The client accepts an injected ``httpx.AsyncClient`` so tests
@@ -44,15 +46,20 @@ START_TEXT = (
 HELP_TEXT = (
     "Commands:\n"
     "/start — introduction\n"
-    "/help — this help\n\n"
+    "/help — this help\n"
+    "/projects — list of projects with per-state task counts\n\n"
     "I read the yask board that this process was started with\n"
     "(yask telegram --data DIR). More commands are on the way."
 )
 
 UNKNOWN_HINT = "I don't understand that. Try /help to see what I can do."
 
-# Command table. Later bot features (project view, task list, notifications)
-# extend this without changing the poll loop.
+# Store-backed command failed: reply, don't crash the poll loop.
+PROJECTS_ERROR_TEXT = "I could not read the board right now. Please try again."
+
+# Static command table. Store-backed commands (today: /projects) live in
+# make_dispatch; later features (task list, notifications) extend the
+# dispatch layer without changing the poll loop.
 COMMANDS: dict[str, str] = {
     "/start": START_TEXT,
     "/help": HELP_TEXT,
@@ -75,6 +82,20 @@ class BotAPIError(Exception):
         return self.description
 
 
+def _command_token(text: Optional[str]) -> Optional[str]:
+    """Lowercased leading command of ``text`` (``/cmd@bot`` → ``/cmd``).
+
+    Returns None when the message carries no command to dispatch: non-text,
+    blank, or a first word that is not a ``/command``.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    token = text.strip().split()[0]
+    if not token.startswith("/"):
+        return None
+    return token.split("@", 1)[0].lower()
+
+
 def reply_for(text: Optional[str]) -> Optional[str]:
     """Reply text for an incoming message, or None if there is nothing to say.
 
@@ -83,20 +104,53 @@ def reply_for(text: Optional[str]) -> Optional[str]:
     """
     if not isinstance(text, str) or not text.strip():
         return None
-    token = text.strip().split()[0]
-    if not token.startswith("/"):
+    cmd = _command_token(text)
+    if cmd is None:
         return UNKNOWN_HINT
-    cmd = token.split("@", 1)[0].lower()
     return COMMANDS.get(cmd, UNKNOWN_HINT)
+
+
+def project_view(store: Store) -> str:
+    """Format the ``/projects`` reply.
+
+    One line per project in name order, prefixed with the project's DB id
+    (the id the web API and MCP tools use); each line lists the task counts
+    of the states that have tasks, in canonical state order. A project with
+    no visible tasks is listed without a state segment; an empty board is
+    just ``Projects:`` and ``(none)``.
+    """
+    overviews = store.list_project_overviews()
+    if not overviews:
+        return "Projects:\n(none)"
+    lines = ["Projects:"]
+    for ov in overviews:
+        line = f"{ov['id']}. {ov['name']}"
+        if ov["states"]:
+            line += " — " + ", ".join(
+                f"{state}: {n}" for state, n in ov["states"].items()
+            )
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def make_dispatch(store: Store) -> Callable[[Optional[str]], Optional[str]]:
     """Build the message→reply dispatcher for a bot bound to ``store``.
 
-    The store is not consulted yet — the command table is static. Later bot
-    features close over the store here to answer board queries.
+    Store-backed commands (today: ``/projects``) read the board through
+    ``store``; everything else falls back to the static :func:`reply_for`.
+    A failure reading the store yields a short error reply instead of
+    crashing the long-poll loop.
     """
-    return reply_for
+
+    def dispatch(text: Optional[str]) -> Optional[str]:
+        if _command_token(text) == "/projects":
+            try:
+                return project_view(store)
+            except Exception:
+                return PROJECTS_ERROR_TEXT
+        return reply_for(text)
+
+    return dispatch
 
 
 class BotAPI:
