@@ -1,4 +1,5 @@
-"""Command line interface: ``yask serve`` (web UI) and ``yask mcp`` (stdio)."""
+"""Command line interface: ``yask serve`` (web UI), ``yask mcp`` (stdio)
+and ``yask telegram`` (Telegram bot)."""
 
 from __future__ import annotations
 
@@ -46,6 +47,19 @@ def cmd_mcp(args) -> int:
     return 0
 
 
+def cmd_telegram(args) -> int:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        print(
+            "yask: TELEGRAM_BOT_TOKEN is not set (get a bot from @BotFather and export it)",
+            file=sys.stderr,
+        )
+        return 1
+    from .telegram_bot import main as bot_main
+
+    return bot_main(token, _data_path(args))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="yask", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -59,6 +73,10 @@ def build_parser() -> argparse.ArgumentParser:
     m = sub.add_parser("mcp", help="run the MCP server on stdio")
     m.add_argument("--data", help="data directory (default: $YASK_DATA or ~/.local/share/yask)")
     m.set_defaults(func=cmd_mcp)
+
+    t = sub.add_parser("telegram", help="run the Telegram bot (long polling)")
+    t.add_argument("--data", help="data directory (default: $YASK_DATA or ~/.local/share/yask)")
+    t.set_defaults(func=cmd_telegram)
 
     return p
 

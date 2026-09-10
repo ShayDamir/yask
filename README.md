@@ -91,6 +91,18 @@ read — images come back as viewable image blocks, markdown as text — plus a
 that would touch several tasks return `requires_confirmation` plus the list of
 affected tasks; re-invoke with `confirm: true` to apply.
 
+### Telegram bot
+
+```
+TELEGRAM_BOT_TOKEN=123:ABC yask telegram
+yask telegram --data DIR    # or: YASK_DATA=DIR yask telegram
+```
+
+Runs the bot as a separate process: long-polls the Bot API with the token
+from `TELEGRAM_BOT_TOKEN` (get one from @BotFather) and answers `/start`
+and `/help` for now — more board commands are on the way. Reads the same
+data directory as the other subcommands.
+
 ## Project layout
 
 - `yask/store.py` — all domain logic (projects, numbering, epic trees,
@@ -98,6 +110,7 @@ affected tasks; re-invoke with `confirm: true` to apply.
 - `yask/api.py` — REST API; also serves the web UI
 - `yask/web/` — web UI (vanilla JS modules, no build step)
 - `yask/mcp_server.py` — MCP tool surface
-- `yask/cli.py` — `yask serve` / `yask mcp`
+- `yask/telegram_bot.py` — Telegram bot process (Bot API client, poll loop, command dispatch)
+- `yask/cli.py` — `yask serve` / `yask mcp` / `yask telegram`
 - `tests/` — pytest suite
 - `flake.nix` / `package.nix` — packaging and dev environment

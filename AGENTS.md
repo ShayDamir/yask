@@ -23,6 +23,7 @@ nix build                                  # build the package
 nix flake check                            # build + run tests hermetically
 nix develop -c yask serve                  # web UI on http://127.0.0.1:4304
 nix develop -c yask mcp                    # MCP server on stdio
+nix develop -c yask telegram               # Telegram bot (needs $TELEGRAM_BOT_TOKEN)
 ```
 
 The yask MCP server (`yask_*` tools) is how every agent in the workflow talks
