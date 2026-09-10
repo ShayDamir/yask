@@ -1,5 +1,9 @@
 # AGENTS.md
 
+## Project
+
+The project name is **`yask`**. All `yask_*` tools and agent dispatches use this name.
+
 ## Repo state
 
 The **MVP is implemented**: `yask/` (Python package: `store.py` domain logic,
@@ -80,8 +84,8 @@ on an **Orchestrator** agent that drives a loop — pick the next task that
 needs work, hand it off to the matching subagent by **project + task
 number**, repeat until nothing is actionable, then stop and report. Everyone
 else is a subagent it spawns. Role-specific instructions live in
-`.opencode/agent/{orchestrator,planner,executor,reviewer,judge}.md`; this
-file documents only what every agent must agree on.
+`.opencode/agent/{orchestrator,planner,epic-planner,executor,reviewer,judge}.md`;
+this file documents only what every agent must agree on.
 
 ### Dispatch (state → agent)
 
@@ -89,6 +93,7 @@ Subagents handle the states the Orchestrator dispatches:
 
 | Task state                | Handled by            | Ends with                         |
 | ------------------------- | --------------------- | --------------------------------- |
+| `Todo` / `Planning` (Epic)| Epic Planner          | stays `Todo` (prereqs set on subtasks) |
 | `Todo` / `Planning`       | Planner               | `In progress` (plan attached)     |
 | `In progress`             | Executor              | `Review` (session summary attached) |
 | `Review` (no review yet)  | Reviewer              | stays `Review` (review attached)  |
@@ -98,6 +103,33 @@ Subagents handle the states the Orchestrator dispatches:
 | `Done` / `Archived`       | nobody — finished     | —                                   |
 
 The Dispatch rule details are the Orchestrator's job (see its role file).
+
+### Epic workflow
+
+Epics are containers, not work items. Their planning is about **organizing
+subtasks**, not creating an implementation plan. The flow:
+
+1. An Epic in `Todo` is dispatched to the **Epic Planner** (not the regular
+   Planner).
+2. The Epic Planner reviews the full tree (`yask_get_project`), identifies
+   missing tasks, creates them, sets prerequisites between subtasks, and
+   defines execution order.
+3. The Epic Planner sets all direct child tasks as **prerequisites of the
+   Epic itself** (`yask_set_prerequisites`).
+4. Once the Epic has prerequisites, `get_next_task` skips it (unmet prereqs)
+   and picks up the subtasks individually. Subtasks flow through the normal
+   pipeline.
+5. When all subtasks are `Done`, `get_next_task` returns the Epic again — the
+   Orchestrator dispatches the Judge to move it to `Done`.
+
+This means an Epic **never enters `In progress`** — it stays in `Todo` until
+all its subtasks complete, then jumps to `Done`. The prerequisite mechanism
+is the gate.
+
+If the Epic Planner discovers that subtasks already exist and are properly
+ordered, it may skip creating new tasks and just attach an `epic-plan.md`
+summary of the current structure. The key output is the prerequisite links,
+not the attachment.
 
 ### Handoff contract
 
@@ -119,6 +151,7 @@ Filenames are the contract; content is markdown unless noted:
 | filename             | writer       | content                                        |
 | -------------------- | ------------ | ---------------------------------------------- |
 | `plan.md`            | Planner      | implementation plan                            |
+| `epic-plan.md`       | Epic Planner | task breakdown, prerequisites, execution order  |
 | `session-summary.md` | Executor     | what changed, verification results, deviations |
 | `review.md`          | Reviewer     | plan→code verification, findings, verdict      |
 | `verdict.md`         | Judge        | what must be fixed (re-work round)             |

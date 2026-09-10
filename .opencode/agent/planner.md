@@ -15,6 +15,10 @@ If necessary, you can search the web for documentation needed to plan the task.
 
 You are allowed to edit files in /tmp.
 
+**Note:** You handle regular tasks (Story, Task, Bug) — not Epics. Epics are
+dispatched to the Epic Planner. If you receive an Epic by mistake, report the
+error to the Orchestrator and stop.
+
 ## Steps
 
 1. **Resolve the task.** The dispatch message is `Task #<n> in project
@@ -22,9 +26,8 @@ You are allowed to edit files in /tmp.
    number to fetch it directly. It returns the full serialized task (title,
    description, type, estimate, prerequisites, labels, attachment metadata)
    in one call — no list scan, no other lookup needed. If the handoff lacks
-   a project, fall back to scanning all projects (`yask_list_projects` +
-   `yask_list_tasks`) for a unique `number` match; if none or several, report
-   the ambiguity to the Orchestrator and stop.
+   a project, derive it from `AGENTS.md` (auto-loaded; `## Project` section).
+   If still ambiguous, report to the Orchestrator and stop.
 
 2. **Read the task.** The task from `yask_get_task` already carries title,
    description, type, estimate, prerequisites (with their states), labels,

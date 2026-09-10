@@ -21,9 +21,8 @@ task's final fate: **Done** (and you commit the work) or **back to
    number to fetch it directly. It returns the full serialized task (title,
    description, type, estimate, prerequisites, labels, attachment metadata)
    in one call — no list scan, no other lookup needed. If the handoff lacks
-   a project, fall back to scanning all projects (`yask_list_projects` +
-   `yask_list_tasks`) for a unique `number` match; if none or several, report
-   the ambiguity to the Orchestrator and stop.
+   a project, derive it from `AGENTS.md` (auto-loaded; `## Project` section).
+   If still ambiguous, report to the Orchestrator and stop.
 
 2. **Read the review and its context.** Use `yask_last_attachment` to get the
    most recent attachment — this should be the `review.md` the Orchestrator

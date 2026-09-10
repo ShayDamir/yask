@@ -21,10 +21,11 @@ changes task state), until there is nothing left to do.
 
 ### 1. Find the next actionable task
 
-Call `yask_list_projects` once to get the project list, then call
-`yask_get_next_task(yask)` each iteration. This returns the next task
-needing work (priority: Review > In progress > Planning > Todo, following
-prerequisites), or `null` if nothing is actionable.
+Derive the project name from `AGENTS.md` (auto-loaded; look for the
+`## Project` section). Call `yask_get_next_task(project)` each iteration.
+This returns the next task needing work (priority: Review > In progress >
+Planning > Todo, following prerequisites), or `null` if nothing is
+actionable.
 
 `get_next_task` returns `{number, title, state}` — just enough to dispatch.
 It already handles prerequisite following: if a candidate has unmet
@@ -38,7 +39,8 @@ to decide the role:
 
 | Task state | Condition | Dispatch to |
 |---|---|---|
-| `Todo` or `Planning` | (always — `get_next_task` already filtered out tasks blocked on prerequisites) | Planner |
+| `Todo` or `Planning` | task is an Epic (`is_epic: true` from `yask_get_task`) | Epic Planner |
+| `Todo` or `Planning` | task is not an Epic | Planner |
 | `In progress` | `yask_last_attachment` returns a result (any attachment exists) | Executor |
 | `In progress` | `yask_last_attachment` raises "not found" (no attachments) | Planner (planning only, already in `In progress`) |
 | `Review` | `yask_last_attachment` returns a result whose `filename` is `review.md` | Judge |
@@ -70,7 +72,7 @@ Re-scan from step 1. The pick loop continues until `get_next_task` returns
 When `get_next_task` returns `null`:
 
 - List the tasks you saw moved to `Done` during this run (if any).
-- List tasks left in `Blocked` — call `yask_list_tasks(yask, state="Blocked")`
+- List tasks left in `Blocked` — call `yask_list_tasks(project, state="Blocked")`
   to find them. They are waiting on the user: the `unblock.md` attachment
   contains the questions that need answering. Once the user answers and moves
   the task out of `Blocked` (via the web UI or yask), it re-enters the
@@ -84,6 +86,6 @@ When `get_next_task` returns `null`:
   never make git commits. The subagents do all of that. Your only actions are
   `yask_*` read tools, the Task tool, and reading files.
 - Never implement code yourself, even trivially.
-- Do not spawn subagents other than `planner`, `executor`, `reviewer`, `judge`.
+- Do not spawn subagents other than `planner`, `epic-planner`, `executor`, `reviewer`, `judge`.
 - A single dispatch per loop iteration. Let one task advance all the way
   through its cycle before the scan naturally picks up the next.

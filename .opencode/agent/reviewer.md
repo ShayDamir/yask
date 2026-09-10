@@ -21,9 +21,8 @@ you do not modify code or commit anything.
    number to fetch it directly. It returns the full serialized task (title,
    description, type, estimate, prerequisites, labels, attachment metadata)
    in one call — no list scan, no other lookup needed. If the handoff lacks
-   a project, fall back to scanning all projects (`yask_list_projects` +
-   `yask_list_tasks`) for a unique `number` match; if none or several, report
-   the ambiguity to the Orchestrator and stop.
+   a project, derive it from `AGENTS.md` (auto-loaded; `## Project` section).
+   If still ambiguous, report to the Orchestrator and stop.
 
 2. **Read the task and key attachments.** The task from `yask_get_task`
    already carries the title, description, type, estimate, prerequisites and
