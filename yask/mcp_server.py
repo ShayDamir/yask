@@ -167,6 +167,13 @@ def build_server(store: Store) -> FastMCP:
     @mcp.tool()
     @_wrap
     @_project_arg(store)
+    def get_task(project_id: int, number: int) -> dict:
+        """Get a single task by project and number. Returns the same data as a single item from list_tasks."""
+        return store.get_task(project_id, number)
+
+    @mcp.tool()
+    @_wrap
+    @_project_arg(store)
     def get_next_task(project_id: int) -> dict | None:
         """Return the next actionable task in the project, or null.
 

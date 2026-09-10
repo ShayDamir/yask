@@ -267,6 +267,7 @@ def test_delete_attachment(store, project):
 PROJECT_SCOPED = (
     "get_project",
     "list_tasks",
+    "get_task",
     "get_next_task",
     "create_task",
     "update_task",
@@ -432,3 +433,54 @@ def test_get_next_task_unknown_project(store, project):
     data = result(store, "get_next_task", project=999999)
     assert data["ok"] is False
     assert "not found" in data["error"]
+
+
+# --- get_task tests ---
+
+
+def test_get_task_returns_single_task(store, project):
+    t = store.create_task(project["id"], "My task", type="Story", description="desc")
+    res = call(store, "get_task", project=project["id"], number=t["number"])
+    data = json.loads(texts(res)[0].text)
+    assert data["number"] == t["number"]
+    assert data["title"] == "My task"
+    assert data["type"] == "Story"
+    assert data["state"] == "Backlog"
+    assert data["description"] == "desc"
+    assert data["prerequisites"] == []
+    assert data["attachments"] == []
+    assert data["labels"] == []
+    assert "created_at" in data
+    assert "updated_at" in data
+    assert "created_by" in data
+
+
+def test_get_task_by_project_name(store, project):
+    t = store.create_task(project["id"], "Named lookup")
+    res = call(store, "get_task", project="demo", number=t["number"])
+    data = json.loads(texts(res)[0].text)
+    assert data["title"] == "Named lookup"
+
+
+def test_get_task_unknown_project(store, project):
+    res = call(store, "get_task", project="nope", number=1)
+    data = json.loads(texts(res)[0].text)
+    assert data["ok"] is False
+    assert "not found" in data["error"]
+
+
+def test_get_task_unknown_number(store, project):
+    res = call(store, "get_task", project=project["id"], number=999999)
+    data = json.loads(texts(res)[0].text)
+    assert data["ok"] is False
+    assert "not found" in data["error"]
+
+
+def test_get_task_is_registered(store, project):
+    server = build_server(store)
+
+    async def names():
+        return sorted(t.name for t in await server.list_tools())
+
+    names_list = asyncio.run(names())
+    assert "get_task" in names_list
