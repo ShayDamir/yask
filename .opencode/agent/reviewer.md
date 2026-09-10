@@ -1,6 +1,7 @@
 ---
 description: "Subagent that reviews a yask task after the Executor: fetches all attachments, verifies the code against the plan, flags findings and deviations, and attaches the review as review.md."
 mode: subagent
+model: opencode/big-pickle
 permission:
   edit: allow
   write: allow
