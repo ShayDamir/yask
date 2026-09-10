@@ -8,6 +8,7 @@ export const ALL_STATES = [...STATES, ARCHIVED];
 
 const PREREQ_ICON = `<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M6 2h2v6h6v2H8v6H6V2z" transform="rotate(-90 8 8)"/></svg>`;
 const ATTACH_ICON = `<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M11.5 7 7 11.5a2.4 2.4 0 0 1-3.4-3.4l5-5a4 4 0 0 1 5.6 5.6l-5.5 5.5a5.7 5.7 0 0 1-8-8L7 1.6"/></svg>`;
+const DELETE_ICON = `<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M6.5 1.5a1 1 0 0 1 2 0h3a.75.75 0 0 1 .19 1.48L12.5 3h1.25a.75.75 0 1 1 0 1.5h-1l-.92 9.22a1.75 1.75 0 0 1-1.74 1.58H6.92a1.75 1.75 0 0 1-1.74-1.58L4.26 4.5h-1a.75.75 0 0 1 0-1.5h1.25l.81-2.02A1 1 0 0 1 6.5 1.5Zm1.25 2.25a.75.75 0 0 0-1.5 0v6a.75.75 0 0 0 1.5 0v-6Zm2.5 0a.75.75 0 0 0-1.5 0v6a.75.75 0 0 0 1.5 0v-6Zm-5 0a.75.75 0 0 0-1.5 0v6a.75.75 0 0 0 1.5 0v-6Z"/></svg>`;
 
 function estimateBadge(task) {
   if (task.is_epic) {
@@ -168,7 +169,7 @@ export function renderEpicChildren(task, actions, filterLabel) {
 
 // -- root cards ----------------------------------------------------------------
 
-export function renderCard(task, actions, { expanded, filterLabel } = {}) {
+export function renderCard(task, actions, { expanded, filterLabel, isArchived } = {}) {
   const card = h(
     "div",
     {
@@ -189,6 +190,18 @@ export function renderCard(task, actions, { expanded, filterLabel } = {}) {
         { class: "card-top" },
         h("span", { class: "num" }, `#${task.number}`),
         h("span", { class: "title" }, task.title),
+        isArchived
+          ? h("button", {
+              type: "button",
+              class: "icon-btn danger delete-btn",
+              title: `Delete task #${task.number}`,
+              "aria-label": `Delete task #${task.number}`,
+              onclick: (e) => {
+                e.stopPropagation();
+                actions.onDelete(task);
+              },
+            }, h("span", { html: DELETE_ICON }))
+          : null,
         task.state === "Done" ? h("span", { class: "done-mark", title: "Done" }, "✓") : null
       ),
       labelChips(task),
@@ -214,7 +227,7 @@ function renderColumn(colState, roots, actions, filterLabel, opts = {}) {
       h("div", { class: "empty-column" }, colState === ARCHIVED ? "Nothing archived." : "Drop tasks here.")
     );
   }
-  for (const t of roots) body.append(renderCard(t, actions, { filterLabel }));
+  for (const t of roots) body.append(renderCard(t, actions, { filterLabel, isArchived: colState === ARCHIVED }));
   const addBtn =
     colState === "Backlog" && opts.showAdd !== false
       ? h("button", {

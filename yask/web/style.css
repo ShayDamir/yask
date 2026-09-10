@@ -300,6 +300,8 @@ html, body {
 }
 .card.done .title { color: var(--text-dim); text-decoration: line-through; }
 .card .done-mark { margin-left: auto; color: var(--ok); font-weight: 700; }
+.card-top .delete-btn { margin-left: auto; color: var(--danger); border-color: var(--danger-soft); background: var(--danger-soft); }
+.card-top .delete-btn:hover { filter: brightness(0.95); background: var(--danger); color: #fff; }
 
 .card-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; align-items: center; }
 
