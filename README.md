@@ -100,9 +100,10 @@ yask telegram --data DIR    # or: YASK_DATA=DIR yask telegram
 
 Runs the bot as a separate process: long-polls the Bot API with the token
 from `TELEGRAM_BOT_TOKEN` (get one from @BotFather) and answers `/start`,
-`/help` and `/projects` (the list of projects with their per-state task
-counts) — more board commands are on the way. Reads the same data
-directory as the other subcommands.
+`/help`, `/projects` (the list of projects with their per-state task counts)
+and `/tasks [project]` (the tasks in the active states — Todo, Planning,
+In progress and Review — grouped by project and state) — more board commands
+are on the way. Reads the same data directory as the other subcommands.
 
 ## Project layout
 

@@ -2,7 +2,7 @@
 
 import pytest
 
-from yask.store import Conflict, ValidationError
+from yask.store import Conflict, NotFound, ValidationError
 
 
 def test_task_numbers_start_at_one_and_increase(store, project):
@@ -183,3 +183,78 @@ def test_project_overviews_counts_and_order(store):
     assert overviews[1]["states"] == {"Done": 1}
     # a project with no visible tasks still appears, without a state segment
     assert overviews[2]["states"] == {}
+
+
+def test_list_in_progress_empty(store, project):
+    assert store.list_in_progress(project["id"]) == []
+
+
+def test_list_in_progress_states_and_isolation(store):
+    alpha = store.create_project("alpha")["id"]
+    beta = store.create_project("beta")["id"]
+
+    # alpha: one task in every state
+    backlog = store.create_task(alpha, "backlog")
+    todo = store.create_task(alpha, "todo")
+    store.move_task(alpha, todo["number"], "Todo", confirm=True)
+    planning = store.create_task(alpha, "planning")
+    store.move_task(alpha, planning["number"], "Planning", confirm=True)
+    working = store.create_task(alpha, "working")
+    store.move_task(alpha, working["number"], "In progress", confirm=True)
+    review = store.create_task(alpha, "review")
+    store.move_task(alpha, review["number"], "Review", confirm=True)
+    done = store.create_task(alpha, "done")
+    store.move_task(alpha, done["number"], "Done", confirm=True)
+    blocked = store.create_task(alpha, "blocked")
+    store.move_task(alpha, blocked["number"], "Blocked")
+    archived = store.create_task(alpha, "archived")
+    store.archive_task(alpha, archived["number"], confirm=True)
+
+    # beta: a Todo task that must not leak into alpha's view
+    other = store.create_task(beta, "other todo")
+    store.move_task(beta, other["number"], "Todo", confirm=True)
+
+    out = store.list_in_progress(alpha)
+    assert out == [
+        {"number": todo["number"], "title": "todo", "state": "Todo"},
+        {"number": planning["number"], "title": "planning", "state": "Planning"},
+        {"number": working["number"], "title": "working", "state": "In progress"},
+        {"number": review["number"], "title": "review", "state": "Review"},
+    ]
+    # the excluded states never appear
+    for t in out:
+        assert t["state"] not in ("Backlog", "Done", "Blocked", "Archived")
+    # per-project isolation
+    assert all(t["title"] != "other todo" for t in out)
+
+
+def test_list_in_progress_ordering(store, project):
+    pid = project["id"]
+    # Todo: create a then b, then move b before a (column order != creation
+    # order) to prove sort_order is honored
+    a = store.create_task(pid, "a")
+    store.move_task(pid, a["number"], "Todo", confirm=True)
+    b = store.create_task(pid, "b")
+    store.move_task(pid, b["number"], "Todo", confirm=True)
+    store.reorder_task(pid, b["number"], before_number=a["number"])
+    c = store.create_task(pid, "c")
+    store.move_task(pid, c["number"], "Planning", confirm=True)
+    d = store.create_task(pid, "d")
+    store.move_task(pid, d["number"], "In progress", confirm=True)
+    e = store.create_task(pid, "e")
+    store.move_task(pid, e["number"], "Review", confirm=True)
+
+    out = store.list_in_progress(pid)
+    # states in workflow order; within Todo, b (reordered first) precedes a
+    assert [(t["state"], t["title"]) for t in out] == [
+        ("Todo", "b"),
+        ("Todo", "a"),
+        ("Planning", "c"),
+        ("In progress", "d"),
+        ("Review", "e"),
+    ]
+
+
+def test_list_in_progress_unknown_project(store):
+    with pytest.raises(NotFound):
+        store.list_in_progress(999)

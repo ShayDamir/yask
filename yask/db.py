@@ -127,6 +127,11 @@ BLOCKED_STATE = "Blocked"
 HOLDING_STATES = (BLOCKED_STATE, ARCHIVED_STATE)
 ALL_STATES = WORKFLOW_STATES + [BLOCKED_STATE, ARCHIVED_STATE]
 STATE_RANK = {s: i for i, s in enumerate(WORKFLOW_STATES)}
+# Active pipeline states, in workflow order: the contiguous slice of
+# WORKFLOW_STATES after Backlog and before Done. Shared by the Telegram
+# bot's in-progress task view (/tasks) — the store query and the reply
+# grouping both read from this, so the four states are never duplicated.
+IN_PROGRESS_STATES = ["Todo", "Planning", "In progress", "Review"]
 
 
 def utcnow() -> str:

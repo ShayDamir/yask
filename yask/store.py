@@ -184,6 +184,31 @@ class Store:
             out.append({"id": p["id"], "name": p["name"], "states": entry_states})
         return out
 
+    def list_in_progress(self, project_id: int) -> list[dict]:
+        """The project's tasks in the active pipeline states (the bot's ``/tasks`` view).
+
+        Returns lean ``{"number", "title", "state"}`` dicts for every task whose
+        state is in :data:`db.IN_PROGRESS_STATES` (``Todo``, ``Planning``,
+        ``In progress``, ``Review``) — Backlog, Done, Blocked and Archived
+        tasks are excluded. Ordered by workflow state, and within a state by
+        column order (``sort_order``). Raises ``NotFound`` for an unknown
+        project id.
+        """
+        self._get_project(project_id)
+        rows = self.conn.execute(
+            "SELECT number, title, state, sort_order, id FROM tasks "
+            "WHERE project_id = ? AND state IN (%s)"
+            % ",".join("?" * len(db.IN_PROGRESS_STATES)),
+            [project_id, *db.IN_PROGRESS_STATES],
+        ).fetchall()
+        rows = sorted(
+            rows, key=lambda r: (db.STATE_RANK[r["state"]], r["sort_order"], r["id"])
+        )
+        return [
+            {"number": r["number"], "title": r["title"], "state": r["state"]}
+            for r in rows
+        ]
+
     def create_project(self, name: str) -> dict:
         name = (name or "").strip()
         if not name:

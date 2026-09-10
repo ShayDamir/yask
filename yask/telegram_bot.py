@@ -3,10 +3,11 @@
 Run via ``yask telegram``: validates the bot token (``TELEGRAM_BOT_TOKEN``)
 with ``getMe``, opens the yask store, then long-polls the Bot API with
 ``getUpdates`` and answers incoming messages. Today the bot answers
-``/start``, ``/help`` and ``/projects`` (the project list with per-state
-task counts, read from the store); later features of the Telegram
-interface (Epic #27) extend the dispatch layer on top of the store passed
-in here.
+``/start``, ``/help``, ``/projects`` (the project list with per-state task
+counts) and ``/tasks`` (the tasks in the active states — Todo, Planning,
+In progress and Review — grouped by project and state); all board reads go
+through the store. Later features of the Telegram interface (Epic #27)
+extend the dispatch layer on top of the store passed in here.
 
 The bot talks to the Bot API directly with ``httpx`` (already a project
 dependency). The client accepts an injected ``httpx.AsyncClient`` so tests
@@ -47,7 +48,8 @@ HELP_TEXT = (
     "Commands:\n"
     "/start — introduction\n"
     "/help — this help\n"
-    "/projects — list of projects with per-state task counts\n\n"
+    "/projects — list of projects with per-state task counts\n"
+    "/tasks [project] — tasks in Todo, Planning, In progress and Review\n\n"
     "I read the yask board that this process was started with\n"
     "(yask telegram --data DIR). More commands are on the way."
 )
@@ -56,10 +58,11 @@ UNKNOWN_HINT = "I don't understand that. Try /help to see what I can do."
 
 # Store-backed command failed: reply, don't crash the poll loop.
 PROJECTS_ERROR_TEXT = "I could not read the board right now. Please try again."
+TASKS_ERROR_TEXT = "I could not read the board right now. Please try again."
 
-# Static command table. Store-backed commands (today: /projects) live in
-# make_dispatch; later features (task list, notifications) extend the
-# dispatch layer without changing the poll loop.
+# Static command table. Store-backed commands (today: /projects, /tasks)
+# live in make_dispatch; later features (task detail, notifications) extend
+# the dispatch layer without changing the poll loop.
 COMMANDS: dict[str, str] = {
     "/start": START_TEXT,
     "/help": HELP_TEXT,
@@ -133,21 +136,109 @@ def project_view(store: Store) -> str:
     return "\n".join(lines)
 
 
+def _tasks_arg(text: Optional[str]) -> Optional[str]:
+    """Argument words for ``/tasks``: everything after the command token.
+
+    Joins the words with a single space so project names containing spaces
+    work; returns ``None`` when the message is just the command. The command
+    token (and any ``@botname`` mention) is discarded.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    words = text.strip().split()
+    if len(words) < 2:
+        return None
+    return " ".join(words[1:])
+
+
+def _resolve_project(store: Store, arg: str) -> Optional[dict]:
+    """Resolve a project reference: case-insensitive name match, then id."""
+    arg = arg.strip()
+    projects = store.list_projects()
+    for p in projects:
+        if p["name"].lower() == arg.lower():
+            return p
+    for p in projects:
+        if str(p["id"]) == arg:
+            return p
+    return None
+
+
+def _task_state_lines(project_id: int, tasks: list[dict]) -> list[str]:
+    """The state sub-groups and task lines for one project's active tasks."""
+    lines = []
+    for state in db.IN_PROGRESS_STATES:
+        in_state = [t for t in tasks if t["state"] == state]
+        if not in_state:
+            continue
+        lines.append(f"  {state}:")
+        for t in in_state:
+            lines.append(
+                f"    #{t['number']} {t['title']} — /task {project_id} {t['number']}"
+            )
+    return lines
+
+
+def tasks_view(store: Store, project_arg: Optional[str] = None) -> str:
+    """Format the ``/tasks [project]`` reply.
+
+    Without an argument, lists every project (in name order, the same order
+    as ``/projects``) that has at least one task in an active state, grouped
+    by state. With an argument, resolves the project (case-insensitive name
+    or integer id) and lists only its active tasks. An empty board — or a
+    resolved project with no active tasks — shows ``(none)`` under the
+    header; an unresolvable argument yields a not-found reply pointing at
+    ``/projects``.
+    """
+    if project_arg is None:
+        sections = []
+        for p in store.list_projects():
+            tasks = store.list_in_progress(p["id"])
+            if tasks:
+                sections.append((p, tasks))
+        if not sections:
+            return "Tasks in progress:\n(none)"
+        lines = ["Tasks in progress:"]
+        for p, tasks in sections:
+            lines.append(f"{p['id']}. {p['name']}")
+            lines.extend(_task_state_lines(p["id"], tasks))
+        return "\n".join(lines)
+
+    project = _resolve_project(store, project_arg)
+    if project is None:
+        return (
+            f"Project '{project_arg}' not found. Use /projects to list projects."
+        )
+    tasks = store.list_in_progress(project["id"])
+    if not tasks:
+        return "Tasks in progress:\n(none)"
+    lines = ["Tasks in progress:"]
+    lines.append(f"{project['id']}. {project['name']}")
+    lines.extend(_task_state_lines(project["id"], tasks))
+    return "\n".join(lines)
+
+
 def make_dispatch(store: Store) -> Callable[[Optional[str]], Optional[str]]:
     """Build the message→reply dispatcher for a bot bound to ``store``.
 
-    Store-backed commands (today: ``/projects``) read the board through
-    ``store``; everything else falls back to the static :func:`reply_for`.
-    A failure reading the store yields a short error reply instead of
-    crashing the long-poll loop.
+    Store-backed commands (today: ``/projects``, ``/tasks``) read the board
+    through ``store``; everything else falls back to the static
+    :func:`reply_for`. A failure reading the store yields a short error reply
+    instead of crashing the long-poll loop.
     """
 
     def dispatch(text: Optional[str]) -> Optional[str]:
-        if _command_token(text) == "/projects":
+        cmd = _command_token(text)
+        if cmd == "/projects":
             try:
                 return project_view(store)
             except Exception:
                 return PROJECTS_ERROR_TEXT
+        if cmd == "/tasks":
+            try:
+                return tasks_view(store, _tasks_arg(text))
+            except Exception:
+                return TASKS_ERROR_TEXT
         return reply_for(text)
 
     return dispatch

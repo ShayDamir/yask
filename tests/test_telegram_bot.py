@@ -349,3 +349,193 @@ def test_projects_store_failure_replies_and_recovers(store, monkeypatch):
     assert len(script.sent) == 2
     assert script.sent[0]["text"] == telegram_bot.PROJECTS_ERROR_TEXT
     assert script.sent[1]["text"] == telegram_bot.START_TEXT
+
+
+# --- /tasks (store-backed dispatch) ----------------------------------------
+
+
+def test_tasks_empty_board(store):
+    script = run_bot_until_stop(
+        Script([[message_update(141, "/tasks")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 7
+    assert script.sent[0]["text"] == "Tasks in progress:\n(none)"
+
+
+def test_tasks_populated_board_exact(store):
+    # zeta is created first (id 1) but "alpha" sorts before "zeta", so the
+    # id-2 project is listed first — display order is by name.
+    zeta = store.create_project("zeta")["id"]
+    alpha = store.create_project("alpha")["id"]
+
+    # alpha: one task in each of the eight states
+    store.create_task(alpha, "backlog")                          # #1 Backlog
+    t = store.create_task(alpha, "todo 1")
+    store.move_task(alpha, t["number"], "Todo", confirm=True)         # #2
+    t = store.create_task(alpha, "planning 1")
+    store.move_task(alpha, t["number"], "Planning", confirm=True)     # #3
+    t = store.create_task(alpha, "working")
+    store.move_task(alpha, t["number"], "In progress", confirm=True)  # #4
+    t = store.create_task(alpha, "review 1")
+    store.move_task(alpha, t["number"], "Review", confirm=True)       # #5
+    t = store.create_task(alpha, "done")
+    store.move_task(alpha, t["number"], "Done", confirm=True)         # #6
+    t = store.create_task(alpha, "blocked")
+    store.move_task(alpha, t["number"], "Blocked")                    # #7
+    t = store.create_task(alpha, "archived")
+    store.archive_task(alpha, t["number"], confirm=True)              # #8
+
+    # zeta: a single in-progress task
+    t = store.create_task(zeta, "z working")
+    store.move_task(zeta, t["number"], "In progress", confirm=True)
+
+    script = run_bot_until_stop(
+        Script([[message_update(101, "/tasks")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    # exact text: name order, state grouping/order, id prefixes, per-task
+    # drill-down links, and the excluded states absent
+    assert script.sent[0]["text"] == (
+        "Tasks in progress:\n"
+        f"{alpha}. alpha\n"
+        "  Todo:\n"
+        f"    #2 todo 1 — /task {alpha} 2\n"
+        "  Planning:\n"
+        f"    #3 planning 1 — /task {alpha} 3\n"
+        "  In progress:\n"
+        f"    #4 working — /task {alpha} 4\n"
+        "  Review:\n"
+        f"    #5 review 1 — /task {alpha} 5\n"
+        f"{zeta}. zeta\n"
+        "  In progress:\n"
+        f"    #1 z working — /task {zeta} 1"
+    )
+
+
+def test_tasks_filter_by_id_and_name(store):
+    zeta = store.create_project("zeta")["id"]
+    alpha = store.create_project("alpha")["id"]
+    t = store.create_task(alpha, "alpha working")
+    store.move_task(alpha, t["number"], "In progress", confirm=True)
+    t = store.create_task(zeta, "zeta working")
+    store.move_task(zeta, t["number"], "In progress", confirm=True)
+
+    # by project name, case-insensitive
+    script = run_bot_until_stop(
+        Script([[message_update(111, "/tasks ALPHA")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Tasks in progress:\n"
+        f"{alpha}. alpha\n"
+        "  In progress:\n"
+        f"    #1 alpha working — /task {alpha} 1"
+    )
+
+    # by project id
+    script = run_bot_until_stop(
+        Script([[message_update(112, f"/tasks {zeta}")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Tasks in progress:\n"
+        f"{zeta}. zeta\n"
+        "  In progress:\n"
+        f"    #1 zeta working — /task {zeta} 1"
+    )
+
+
+def test_tasks_filter_name_with_spaces(store):
+    pid = store.create_project("my big project")["id"]
+    t = store.create_task(pid, "working")
+    store.move_task(pid, t["number"], "In progress", confirm=True)
+    script = run_bot_until_stop(
+        Script([[message_update(171, "/tasks my big project")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Tasks in progress:\n"
+        f"{pid}. my big project\n"
+        "  In progress:\n"
+        f"    #1 working — /task {pid} 1"
+    )
+
+
+def test_tasks_filter_zero_active(store):
+    alpha = store.create_project("alpha")["id"]
+    zeta = store.create_project("zeta")["id"]
+    # alpha has only Backlog/Done tasks (no active state)
+    store.create_task(alpha, "backlog only")
+    t = store.create_task(alpha, "done only")
+    store.move_task(alpha, t["number"], "Done", confirm=True)
+    # zeta has an active task, so the board is non-empty overall
+    t = store.create_task(zeta, "z working")
+    store.move_task(zeta, t["number"], "In progress", confirm=True)
+
+    # project found but zero active tasks
+    script = run_bot_until_stop(
+        Script([[message_update(121, "/tasks alpha")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == "Tasks in progress:\n(none)"
+
+
+def test_tasks_unknown_project(store):
+    store.create_project("alpha")
+    script = run_bot_until_stop(
+        Script([[message_update(131, "/tasks nope")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Project 'nope' not found. Use /projects to list projects."
+    )
+    # unknown by id
+    script = run_bot_until_stop(
+        Script([[message_update(132, "/tasks 999")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Project '999' not found. Use /projects to list projects."
+    )
+
+
+def test_tasks_with_bot_mention(store):
+    script = run_bot_until_stop(
+        Script([[message_update(151, "/tasks@yask_test_bot")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == "Tasks in progress:\n(none)"
+
+
+def test_tasks_unknown_command_still_gets_hint(store):
+    script = run_bot_until_stop(
+        Script([[message_update(155, "/nope")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] and "/help" in script.sent[0]["text"]
+
+
+def test_tasks_store_failure_replies_and_recovers(store, monkeypatch):
+    # a project must exist so the no-arg view reaches list_in_progress
+    store.create_project("alpha")
+
+    def boom(project_id):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "list_in_progress", boom)
+    script = run_bot_until_stop(
+        Script([[message_update(161, "/tasks"), message_update(162, "/start")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    # the failure produces a reply, not a crash; the next message is still
+    # answered
+    assert len(script.sent) == 2
+    assert script.sent[0]["text"] == telegram_bot.TASKS_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+
+
+def test_help_mentions_tasks():
+    assert "/tasks" in telegram_bot.HELP_TEXT
