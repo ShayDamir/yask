@@ -234,10 +234,11 @@ function renderColumn(colState, roots, actions, filterLabel, opts = {}) {
 // Locate an Epic (by its task number) anywhere in the nested tree; epics may
 // be nested, so recurse (#30).
 export function findEpic(tasks, number) {
+  const n = Number(number); // option values are strings; task numbers are ints (#31)
   for (const t of tasks) {
-    if (t.number === number) return t;
+    if (t.number === n) return t;
     if (t.children) {
-      const hit = findEpic(t.children, number);
+      const hit = findEpic(t.children, number); // keep recursing with the raw value
       if (hit) return hit;
     }
   }
