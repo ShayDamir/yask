@@ -98,6 +98,11 @@ class TaskTypeIn(BaseModel):
 
 class LabelIn(BaseModel):
     name: str
+    color: str = ""
+
+
+class LabelUpdateIn(BaseModel):
+    color: str = ""
 
 
 class TaskLabelsIn(BaseModel):
@@ -298,7 +303,11 @@ def create_app(db_path: str | Path) -> FastAPI:
 
     @app.post("/api/projects/{project_id}/labels", status_code=201)
     def api_create_label(project_id: int, body: LabelIn):
-        return handle(lambda: store().create_label(project_id, body.name))
+        return handle(lambda: store().create_label(project_id, body.name, body.color))
+
+    @app.put("/api/projects/{project_id}/labels/{label_id}")
+    def api_update_label(project_id: int, label_id: int, body: LabelUpdateIn):
+        return handle(lambda: store().update_label(project_id, label_id, body.color))
 
     @app.put("/api/projects/{project_id}/tasks/{number}/labels")
     def api_set_task_labels(project_id: int, number: int, body: TaskLabelsIn):

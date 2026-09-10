@@ -390,9 +390,16 @@ def build_server(store: Store) -> FastMCP:
     @mcp.tool()
     @_wrap
     @_project_arg(store)
-    def create_label(project_id: int, name: str) -> dict:
+    def create_label(project_id: int, name: str, color: str = "") -> dict:
         """Create a project label, unique within the project."""
-        return store.create_label(project_id, name)
+        return store.create_label(project_id, name, color)
+
+    @mcp.tool()
+    @_wrap
+    @_project_arg(store)
+    def update_label(project_id: int, label_id: int, color: str = "") -> dict:
+        """Update a project label's color. Color-only; renaming is out of scope."""
+        return store.update_label(project_id, label_id, color)
 
     @mcp.tool()
     @_wrap

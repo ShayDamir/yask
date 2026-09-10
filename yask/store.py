@@ -23,12 +23,15 @@ Notable domain rules (see README.md):
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from typing import Any
 
 from . import db
 
 _UNSET = object()
+
+_HEX_RE = re.compile(r"^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
 
 
 class YaskError(Exception):
@@ -63,6 +66,26 @@ class CycleError(ValidationError):
     def __init__(self, message: str):
         self.cycle = message
         super().__init__(message)
+
+
+def _normalize_color(raw: str | None) -> str:
+    """Normalize a label color to a canonical ``#RRGGBB`` uppercase hex.
+
+    ``""``, ``None`` and blank input mean "no color" and normalize to ``""``.
+    ``#RGB`` is expanded to ``#RRGGBB``. Anything else is rejected.
+    """
+    if raw is None:
+        return ""
+    value = raw.strip()
+    if not value:
+        return ""
+    m = _HEX_RE.match(value)
+    if m is None:
+        raise ValidationError(f"invalid color '{raw}': expected #RRGGBB or #RGB")
+    hexval = m.group(1)
+    if len(hexval) == 3:
+        hexval = "".join(c * 2 for c in hexval)
+    return f"#{hexval}".upper()
 
 
 class Store:
@@ -428,9 +451,9 @@ class Store:
             ).fetchall()
         ]
         labels = [
-            {"id": l["id"], "name": l["name"]}
+            {"id": l["id"], "name": l["name"], "color": l["color"] or ""}
             for l in self.conn.execute(
-                "SELECT l.id, l.name FROM labels l "
+                "SELECT l.id, l.name, l.color FROM labels l "
                 "JOIN task_labels tl ON tl.label_id = l.id "
                 "WHERE tl.task_id = ? ORDER BY l.name COLLATE NOCASE",
                 (row["id"],),
@@ -1039,31 +1062,47 @@ class Store:
 
     # -- labels --------------------------------------------------------------------
 
-    def create_label(self, project_id: int, name: str) -> dict:
+    def create_label(self, project_id: int, name: str, color: str = "") -> dict:
         self._get_project(project_id)
         name = (name or "").strip()
         if not name:
             raise ValidationError("label name must not be empty")
+        norm_color = _normalize_color(color)
         try:
             with self.conn:
                 cur = self.conn.execute(
-                    "INSERT INTO labels(project_id, name) VALUES (?, ?)",
-                    (project_id, name),
+                    "INSERT INTO labels(project_id, name, color) VALUES (?, ?, ?)",
+                    (project_id, name, norm_color),
                 )
         except sqlite3.IntegrityError:
             raise Conflict(f"label '{name}' already exists") from None
-        return {"id": cur.lastrowid, "name": name}
+        return {"id": cur.lastrowid, "name": name, "color": norm_color}
 
     def list_labels(self, project_id: int) -> list[dict]:
         self._get_project(project_id)
         return [
-            {"id": l["id"], "name": l["name"]}
+            {"id": l["id"], "name": l["name"], "color": l["color"] or ""}
             for l in self.conn.execute(
-                "SELECT id, name FROM labels WHERE project_id = ? "
+                "SELECT id, name, color FROM labels WHERE project_id = ? "
                 "ORDER BY name COLLATE NOCASE",
                 (project_id,),
             ).fetchall()
         ]
+
+    def update_label(self, project_id: int, label_id: int, color: str = "") -> dict:
+        self._get_project(project_id)
+        row = self.conn.execute(
+            "SELECT id, name FROM labels WHERE project_id = ? AND id = ?",
+            (project_id, label_id),
+        ).fetchone()
+        if row is None:
+            raise NotFound(f"label {label_id} not found in this project")
+        norm_color = _normalize_color(color)
+        with self.conn:
+            self.conn.execute(
+                "UPDATE labels SET color = ? WHERE id = ?", (norm_color, label_id)
+            )
+        return {"id": label_id, "name": row["name"], "color": norm_color}
 
     def set_task_labels(self, project_id: int, number: int, label_ids: list[int]) -> dict:
         row = self._get_task(project_id, number)

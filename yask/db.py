@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS labels (
     id          INTEGER PRIMARY KEY,
     project_id  INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     name        TEXT NOT NULL COLLATE NOCASE,
+    color       TEXT NOT NULL DEFAULT '',
     UNIQUE (project_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_labels_project ON labels(project_id);
@@ -166,6 +167,11 @@ def _ensure_missing_columns(conn: sqlite3.Connection) -> None:
     if "source" not in hist_cols:
         conn.execute(
             "ALTER TABLE state_history ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'"
+        )
+    label_cols = {r["name"] for r in conn.execute("PRAGMA table_info(labels)")}
+    if "color" not in label_cols:
+        conn.execute(
+            "ALTER TABLE labels ADD COLUMN color TEXT NOT NULL DEFAULT ''"
         )
 
 

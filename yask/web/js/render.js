@@ -55,8 +55,41 @@ function labelChips(task) {
   return h(
     "span",
     { class: "label-chips" },
-    task.labels.map((l) => h("span", { class: "label-chip", title: `Label: ${l.name}` }, l.name))
+    task.labels.map((l) => {
+      const chipStyle = l.color ? labelChipStyle(l.color) : undefined;
+      const title = l.color
+        ? `Label: ${l.name} (${l.color})`
+        : `Label: ${l.name}`;
+      return h("span", { class: "label-chip", title, style: chipStyle }, l.name);
+    })
   );
+}
+
+// Turn a normalized #RRGGBB color into an inline style that paints the chip
+// background with a slightly darker border, and picks a black/white foreground
+// from the chip's relative luminance so the label text stays readable. A
+// non-hex/empty color yields undefined so the default class styling is used.
+function labelChipStyle(color) {
+  const m = /^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.exec(color);
+  if (!m) return undefined;
+  let hex = m[1];
+  if (hex.length === 3) {
+    hex = hex
+      .split("")
+      .map((c) => c + c)
+      .join("");
+  }
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  const fg = lum > 0.6 ? "#000000" : "#ffffff";
+  const shade = 0.82;
+  const bg = `#${hex}`;
+  const border = `#${Math.round(r * shade).toString(16).padStart(2, "0")}`
+    + `${Math.round(g * shade).toString(16).padStart(2, "0")}`
+    + `${Math.round(b * shade).toString(16).padStart(2, "0")}`;
+  return `background:${bg};border-color:${border};color:${fg}`;
 }
 
 function cardBadges(task) {

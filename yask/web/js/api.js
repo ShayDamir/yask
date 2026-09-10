@@ -97,10 +97,13 @@ const api = {
 
   // labels
   listLabels: (pid) => req("GET", `/api/projects/${pid}/labels`),
-  createLabel: (pid, name) => req("POST", `/api/projects/${pid}/labels`, { name }),
+  createLabel: (pid, name, color = "") =>
+    req("POST", `/api/projects/${pid}/labels`, { name, color }),
   setTaskLabels: (pid, num, labelIds) =>
     req("PUT", `/api/projects/${pid}/tasks/${num}/labels`, { label_ids: labelIds }),
   deleteLabel: (pid, labelId) => req("DELETE", `/api/projects/${pid}/labels/${labelId}`),
+  updateLabel: (pid, labelId, color) =>
+    req("PUT", `/api/projects/${pid}/labels/${labelId}`, { color }),
 
   // project roles (user-story role presets)
   listProjectRoles: (pid) => req("GET", `/api/projects/${pid}/roles`),

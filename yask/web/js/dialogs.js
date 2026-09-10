@@ -412,7 +412,7 @@ export function openEditorModal(project, task, actions) {
   const newLabelInput = h("input", { type: "text", id: "ed-new-label", placeholder: "New label…" });
   // Seed from the task's own labels (already serialized on the task) so the
   // save below never clears labels even if the project label fetch fails.
-  let projectLabels = (task.labels || []).map((l) => ({ id: l.id, name: l.name }));
+  let projectLabels = (task.labels || []).map((l) => ({ id: l.id, name: l.name, color: l.color || "" }));
   const chosenLabelIds = new Set(projectLabels.map((l) => l.id));
   // Snapshot the task's label ids as loaded, before any checkbox toggles. The
   // checkboxes mutate `chosenLabelIds` on every change (see below), so comparing
@@ -431,12 +431,35 @@ export function openEditorModal(project, task, actions) {
         if (cb.checked) chosenLabelIds.add(l.id);
         else chosenLabelIds.delete(l.id);
       });
+      // color swatch — independent of the checkbox; persists the color only
+      // when the user actually picks one.
+      const colorInput = h("input", {
+        type: "color",
+        class: "label-color",
+        value: (l.color && l.color.length >= 7) ? l.color : "#888888",
+        title: "Label color (empty means none)",
+        "aria-label": `Color for label “${l.name}”`,
+      });
+      colorInput.addEventListener("change", async () => {
+        const color = colorInput.value;
+        try {
+          await api.updateLabel(pid, l.id, color);
+          l.color = color;
+          if (actions && typeof actions.onLabelUpdated === "function") {
+            await actions.onLabelUpdated();
+          }
+          renderLabels();
+        } catch (err) {
+          toastError(err);
+        }
+      });
       labelList.append(
         h(
           "label",
           {},
           cb,
           h("span", { class: "label-chip" }, l.name),
+          colorInput,
           h(
             "button",
             {
@@ -470,15 +493,24 @@ export function openEditorModal(project, task, actions) {
     }
   })();
   const addLabelBtn = h("button", { type: "button", class: "btn" }, "Add");
+  const newLabelColorInput = h("input", {
+    type: "color",
+    class: "label-color",
+    value: "#888888",
+    title: "Color for the new label (empty means none)",
+    "aria-label": "Color for the new label",
+  });
   const createLabel = async () => {
     const name = newLabelInput.value.trim();
     if (!name) return;
+    const color = newLabelColorInput.value;
     try {
-      const l = await api.createLabel(pid, name);
+      const l = await api.createLabel(pid, name, color);
       chosenLabelIds.delete(l.id); // not auto-applied until save
       projectLabels.push(l);
       renderLabels();
       newLabelInput.value = "";
+      newLabelColorInput.value = "#888888";
       toast(`Label “${name}” created`, "success");
     } catch (err) {
       toastError(err);
@@ -618,6 +650,7 @@ export function openEditorModal(project, task, actions) {
       "div",
       { class: "field-row" },
       newLabelInput,
+      newLabelColorInput,
       addLabelBtn
     ),
     h("div", { class: "section-title" }, "History"),

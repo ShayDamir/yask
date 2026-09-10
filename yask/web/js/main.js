@@ -250,6 +250,7 @@ const actions = {
         if (state.filterLabel === name) state.filterLabel = "";
         refresh();
       },
+      onLabelUpdated: () => refresh(),
     }),
   onAdd: (colState) =>
     openNewTaskModal(state.project, colState, () => {

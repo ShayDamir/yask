@@ -544,6 +544,17 @@ textarea { resize: vertical; min-height: 70px; width: 100%; }
   line-height: 1;
 }
 .check-list .label-del:hover { background: var(--bg-hover); border-color: var(--border); }
+.check-list .label-color {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: none;
+  cursor: pointer;
+}
 
 .attachment-list { display: flex; flex-direction: column; gap: 6px; }
 .attachment-item {
