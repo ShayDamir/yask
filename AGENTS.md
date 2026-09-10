@@ -104,10 +104,11 @@ The Dispatch rule details are the Orchestrator's job (see its role file).
 - The Orchestrator hands a task to a subagent by **project + task number** —
   `Task #<n> in project <name>` and nothing more. Including the project
   removes any ambiguity, since numbers start at 1 in every project.
-- Each subagent resolves the task itself via the yask MCP server and reads
-  the task's title, description, prerequisites, and the attachments relevant
-  to its role (role files say how; subagents fetch attachments selectively
-  with `yask_last_attachment` and only pull older ones when needed).
+- Each subagent resolves the task itself with `yask_get_task(project, task
+  number)` — one call returning only that task's full data — and reads the
+  attachments relevant to its role (role files say how; subagents fetch
+  attachments selectively with `yask_last_attachment` and only pull older
+  ones when needed).
 - Subagents never touch anything outside their own task except when creating
   a new task for out-of-scope work (below).
 

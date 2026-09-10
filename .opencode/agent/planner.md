@@ -18,16 +18,17 @@ You are allowed to edit files in /tmp.
 ## Steps
 
 1. **Resolve the task.** The dispatch message is `Task #<n> in project
-   <name>` — use the given project name and task number to look the task up
-   directly (e.g. `yask_list_tasks` with that project, then locate `number`).
-   If the handoff lacks a project, fall back to scanning all projects
-   (`yask_list_projects` + `yask_list_tasks`/`yask_get_project`) for a unique
-   `number` match; if none or several, report the ambiguity to the
-   Orchestrator and stop.
+   <name>` — call `yask_get_task` with the project name (or id) and task
+   number to fetch it directly. It returns the full serialized task (title,
+   description, type, estimate, prerequisites, labels, attachment metadata)
+   in one call — no list scan, no other lookup needed. If the handoff lacks
+   a project, fall back to scanning all projects (`yask_list_projects` +
+   `yask_list_tasks`) for a unique `number` match; if none or several, report
+   the ambiguity to the Orchestrator and stop.
 
-2. **Read the task.** Retrieve title, description, type, estimate,
-   prerequisites (with their states) and attachment metadata from the task
-   returned by `yask_list_tasks`.
+2. **Read the task.** The task from `yask_get_task` already carries title,
+   description, type, estimate, prerequisites (with their states), labels,
+   and attachment metadata — use it directly; no separate task lookup.
 
 3. **Read attachments selectively.** Call `yask_last_attachment` to get the
    most recent attachment. Use it to understand context, then decide what

@@ -58,7 +58,7 @@ Call the Task tool with `subagent_type` set to the role from the table above
 Wait for the subagent's final message. It reports the outcome, including any
 task state change or a blocking situation. If it reports that the task was
 not found or the project does not exist, re-verify the task with
-`yask_get_project` and dispatch again.
+`yask_get_task` (or `yask_get_project`) and dispatch again.
 
 ### 4. Repeat
 

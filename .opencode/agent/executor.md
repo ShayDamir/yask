@@ -12,17 +12,19 @@ task to `Review`.
 ## Steps
 
 1. **Resolve the task.** The dispatch message is `Task #<n> in project
-   <name>` — use the given project name and task number to look the task up
-   directly (e.g. `yask_list_tasks` with that project, then locate `number`).
-   If the handoff lacks a project, fall back to scanning all projects
-   (`yask_list_projects` + `yask_list_tasks`/`yask_get_project`) for a unique
-   `number` match; if none or several, report the ambiguity to the
-   Orchestrator and stop.
+   <name>` — call `yask_get_task` with the project name (or id) and task
+   number to fetch it directly. It returns the full serialized task (title,
+   description, type, estimate, prerequisites, labels, attachment metadata)
+   in one call — no list scan, no other lookup needed. If the handoff lacks
+   a project, fall back to scanning all projects (`yask_list_projects` +
+   `yask_list_tasks`) for a unique `number` match; if none or several, report
+   the ambiguity to the Orchestrator and stop.
 
-2. **Read the task and key attachments.** Retrieve title, description, type,
-   estimate, prerequisites and attachment metadata from the task. Then read
-   attachments selectively — use `yask_last_attachment` for the most recent
-   one, and fetch older attachments only when needed:
+2. **Read the task and key attachments.** The task from `yask_get_task`
+   already carries title, description, type, estimate, prerequisites and
+   attachment metadata. Then read attachments selectively — use
+   `yask_last_attachment` for the most recent one, and `yask_get_attachment`
+   (by id from the metadata) for specific older attachments only when needed:
 
    | Latest attachment | Action |
    |---|---|
