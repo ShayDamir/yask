@@ -1,8 +1,9 @@
 """SQLite schema and connection management for yask.
 
 The whole world lives in a single SQLite file. All domain state — projects,
-tasks, their types, prerequisites, state history and attachments — is stored
-here. Attachments are kept as BLOBs so the database is fully self-contained.
+tasks, their types, prerequisites, state history, attachments and Telegram
+subscriptions — is stored here. Attachments are kept as BLOBs so the
+database is fully self-contained.
 """
 
 from __future__ import annotations
@@ -97,6 +98,15 @@ CREATE TABLE IF NOT EXISTS project_roles (
     UNIQUE (project_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_project_roles_project ON project_roles(project_id);
+
+CREATE TABLE IF NOT EXISTS telegram_subscriptions (
+    chat_id    INTEGER NOT NULL,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (chat_id, project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_telegram_subscriptions_project
+    ON telegram_subscriptions(project_id);
 """
 
 # Seed task types. Epic is the single compound type.

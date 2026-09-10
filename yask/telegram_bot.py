@@ -6,7 +6,13 @@ with ``getMe``, opens the yask store, then long-polls the Bot API with
 ``/start``, ``/help``, ``/projects`` (the project list with per-state task
 counts) and ``/tasks`` (the tasks in the active states — Todo, Planning,
 In progress and Review — grouped by project and state); all board reads go
-through the store. Later features of the Telegram interface (Epic #27)
+through the store. A chat can ``/subscribe <project>`` to receive task
+state-change notifications for that project (``/unsubscribe <project>`` to
+stop; subscriptions are per chat, per project, and persist in the same
+SQLite database). While the bot runs, the :class:`Notifier` polls
+``state_history`` after each successful ``getUpdates`` batch and pushes a
+plain-text message per transition to every subscribed chat; latency is at
+most one poll interval. Later features of the Telegram interface (Epic #27)
 extend the dispatch layer on top of the store passed in here.
 
 The bot talks to the Bot API directly with ``httpx`` (already a project
@@ -49,7 +55,9 @@ HELP_TEXT = (
     "/start — introduction\n"
     "/help — this help\n"
     "/projects — list of projects with per-state task counts\n"
-    "/tasks [project] — tasks in Todo, Planning, In progress and Review\n\n"
+    "/tasks [project] — tasks in Todo, Planning, In progress and Review\n"
+    "/subscribe [project] — subscribe to task state-change notifications\n"
+    "/unsubscribe [project] — stop notifications for a project\n\n"
     "I read the yask board that this process was started with\n"
     "(yask telegram --data DIR). More commands are on the way."
 )
@@ -59,10 +67,18 @@ UNKNOWN_HINT = "I don't understand that. Try /help to see what I can do."
 # Store-backed command failed: reply, don't crash the poll loop.
 PROJECTS_ERROR_TEXT = "I could not read the board right now. Please try again."
 TASKS_ERROR_TEXT = "I could not read the board right now. Please try again."
+SUBSCRIBE_ERROR_TEXT = (
+    "I could not change your subscription right now. Please try again."
+)
+UNSUBSCRIBE_ERROR_TEXT = (
+    "I could not change your subscription right now. Please try again."
+)
 
-# Static command table. Store-backed commands (today: /projects, /tasks)
-# live in make_dispatch; later features (task detail, notifications) extend
-# the dispatch layer without changing the poll loop.
+# Static command table. Store-backed commands (today: /projects, /tasks,
+# /subscribe, /unsubscribe) live in make_dispatch; state-change
+# notifications are pushed by the Notifier on every poll cycle. Later
+# features (task detail) extend the dispatch layer without changing the
+# poll loop.
 COMMANDS: dict[str, str] = {
     "/start": START_TEXT,
     "/help": HELP_TEXT,
@@ -218,16 +234,78 @@ def tasks_view(store: Store, project_arg: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
-def make_dispatch(store: Store) -> Callable[[Optional[str]], Optional[str]]:
+def subscribe_view(store: Store, chat_id: int, arg: Optional[str] = None) -> str:
+    """Format the ``/subscribe [project]`` reply.
+
+    Without an argument, lists the chat's current subscriptions (``{id}.
+    {name}`` lines in name order, or ``(none)``) — the same output shape as
+    ``/projects``. With an argument, subscribes the chat to the resolved
+    project (case-insensitive name or integer id); an unresolvable argument
+    yields the same not-found reply as ``/tasks``.
+    """
+    if arg is None:
+        subs = store.list_subscriptions(chat_id)
+        if not subs:
+            return "Your subscriptions:\n(none)"
+        lines = ["Your subscriptions:"]
+        for s in subs:
+            lines.append(f"{s['project_id']}. {s['project_name']}")
+        return "\n".join(lines)
+
+    project = _resolve_project(store, arg)
+    if project is None:
+        return f"Project '{arg}' not found. Use /projects to list projects."
+    sub = store.subscribe_project(chat_id, project["id"])
+    return (
+        f"Subscribed to {sub['project_name']} ({sub['project_id']}) — "
+        "you will be notified about task state changes in this project."
+    )
+
+
+def unsubscribe_view(store: Store, chat_id: int, arg: str) -> str:
+    """Format the ``/unsubscribe <project>`` reply.
+
+    Resolves the project (case-insensitive name or integer id) and removes
+    the chat's subscription: a confirmation when a row was removed, a
+    "not subscribed" notice when there was nothing to remove, and the
+    ``/tasks`` not-found text for an unresolvable argument.
+    """
+    project = _resolve_project(store, arg)
+    if project is None:
+        return f"Project '{arg}' not found. Use /projects to list projects."
+    result = store.unsubscribe_project(chat_id, project["id"])
+    if result["removed"]:
+        return f"Unsubscribed from {project['name']} ({project['id']})."
+    return f"You are not subscribed to {project['name']} ({project['id']})."
+
+
+def format_notification(change: dict) -> str:
+    """One plain-text notification for a state-history change.
+
+    ``{project_name}: #{number} {title} — {from_state} → {to_state}
+    (/task {project_id} {number})``. The trailing ``/task`` reference
+    follows the ``/tasks`` drill-down convention and will work once the
+    task-view command lands.
+    """
+    return (
+        f"{change['project_name']}: #{change['number']} {change['title']} — "
+        f"{change['from_state']} → {change['to_state']} "
+        f"(/task {change['project_id']} {change['number']})"
+    )
+
+
+def make_dispatch(store: Store) -> Callable[..., Optional[str]]:
     """Build the message→reply dispatcher for a bot bound to ``store``.
 
-    Store-backed commands (today: ``/projects``, ``/tasks``) read the board
-    through ``store``; everything else falls back to the static
-    :func:`reply_for`. A failure reading the store yields a short error reply
-    instead of crashing the long-poll loop.
+    Store-backed commands (today: ``/projects``, ``/tasks``,
+    ``/subscribe``, ``/unsubscribe``) read or mutate the board through
+    ``store``; the subscription commands additionally need the sender's
+    chat id, hence ``dispatch(text, chat_id)``. Everything else falls back
+    to the static :func:`reply_for`. A failure reading or writing the store
+    yields a short error reply instead of crashing the long-poll loop.
     """
 
-    def dispatch(text: Optional[str]) -> Optional[str]:
+    def dispatch(text: Optional[str], chat_id: Optional[int] = None) -> Optional[str]:
         cmd = _command_token(text)
         if cmd == "/projects":
             try:
@@ -239,6 +317,20 @@ def make_dispatch(store: Store) -> Callable[[Optional[str]], Optional[str]]:
                 return tasks_view(store, _tasks_arg(text))
             except Exception:
                 return TASKS_ERROR_TEXT
+        if cmd == "/subscribe":
+            if chat_id is None:
+                return SUBSCRIBE_ERROR_TEXT
+            try:
+                return subscribe_view(store, chat_id, _tasks_arg(text))
+            except Exception:
+                return SUBSCRIBE_ERROR_TEXT
+        if cmd == "/unsubscribe":
+            if chat_id is None:
+                return UNSUBSCRIBE_ERROR_TEXT
+            try:
+                return unsubscribe_view(store, chat_id, _tasks_arg(text))
+            except Exception:
+                return UNSUBSCRIBE_ERROR_TEXT
         return reply_for(text)
 
     return dispatch
@@ -319,19 +411,55 @@ class BotAPI:
             await self._client.aclose()
 
 
+class Notifier:
+    """Push task state-change notifications to subscribed chats.
+
+    The cursor sits after the newest fully-notified ``state_history`` row.
+    :meth:`seed` pins it to the current maximum at startup, so only changes
+    made while the bot runs are notified — no replay storm on restart.
+    :meth:`check` is the per-poll-cycle hook: it fetches the changes
+    recorded since the cursor and, in id order, sends each one to every
+    chat subscribed to its project. The cursor advances only past a change
+    that reached all of its subscribers, so a failed send is retried on the
+    next cycle (chats that already received it get a duplicate — accepted,
+    a lost change would be worse).
+    """
+
+    def __init__(self, api: BotAPI, store: Store) -> None:
+        self._api = api
+        self._store = store
+        self._cursor: int = 0
+
+    def seed(self) -> None:
+        """Pin the cursor to the current history maximum (bot startup)."""
+        self._cursor = self._store.max_state_history_id()
+
+    async def check(self) -> None:
+        """Send the pending state changes to every subscribed chat."""
+        changes = self._store.new_state_changes(self._cursor)
+        for change in changes:
+            for chat_id in self._store.subscribed_chats(change["project_id"]):
+                await self._api.send_message(chat_id, format_notification(change))
+            self._cursor = change["id"]
+
+
 async def run_bot(
     api: BotAPI,
-    dispatch: Callable[[Optional[str]], Optional[str]],
+    dispatch: Callable[..., Optional[str]],
     stop_event: Optional[asyncio.Event] = None,
     poll_timeout: int = POLL_TIMEOUT,
     error_delay: float = 1.0,
+    on_cycle: Optional[Callable[[], Any]] = None,
 ) -> None:
     """Long-poll ``getUpdates`` and dispatch message handlers until stopped.
 
     The offset advances to ``update_id + 1`` after each processed update.
     Transient :class:`BotAPIError` failures are logged and retried after
-    ``error_delay``; they never stop the loop. Returns when ``stop_event`` is
-    set.
+    ``error_delay``; they never stop the loop. After each successful
+    ``getUpdates`` batch, ``on_cycle`` (the state-change notifier) runs;
+    its failures — Bot API or store — are logged to stderr and retried on
+    the next cycle, and on a failed poll it is skipped entirely. Returns
+    when ``stop_event`` is set.
     """
     offset: Optional[int] = None
     while True:
@@ -350,8 +478,8 @@ async def run_bot(
             message = update.get("message")
             try:
                 if message is not None:
-                    reply = dispatch(message.get("text"))
                     chat = message.get("chat") or {}
+                    reply = dispatch(message.get("text"), chat.get("id"))
                     if reply is not None and "id" in chat:
                         await api.send_message(chat["id"], reply)
             except BotAPIError as exc:
@@ -359,6 +487,11 @@ async def run_bot(
                 await asyncio.sleep(error_delay)
             if update_id is not None:
                 offset = update_id + 1
+        if on_cycle is not None:
+            try:
+                await on_cycle()
+            except Exception as exc:
+                print(f"yask: telegram notify failed: {exc}", file=sys.stderr)
 
 
 async def _amain(
@@ -380,6 +513,11 @@ async def _amain(
     conn = db.connect(data_dir / "yask.db")
     store = Store(conn)
 
+    # Seed the notification cursor to the current history maximum so only
+    # changes made while this process runs are pushed (no replay on restart).
+    notifier = Notifier(api, store)
+    notifier.seed()
+
     # Without an externally supplied stop event (production), SIGINT is the
     # stop trigger.
     loop = None
@@ -395,7 +533,13 @@ async def _amain(
             # thread): main() falls back to catching KeyboardInterrupt.
             pass
     try:
-        await run_bot(api, make_dispatch(store), stop_event=stop_event, poll_timeout=POLL_TIMEOUT)
+        await run_bot(
+            api,
+            make_dispatch(store),
+            stop_event=stop_event,
+            poll_timeout=POLL_TIMEOUT,
+            on_cycle=notifier.check,
+        )
     finally:
         if handler_installed:
             loop.remove_signal_handler(signal.SIGINT)

@@ -1023,6 +1023,107 @@ class Store:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def max_state_history_id(self) -> int:
+        """The largest ``state_history.id`` (0 when there is no history)."""
+        row = self.conn.execute("SELECT MAX(id) AS m FROM state_history").fetchone()
+        return row["m"] or 0
+
+    def new_state_changes(self, since_id: int) -> list[dict]:
+        """State changes recorded after ``since_id``, in history (id) order.
+
+        The Telegram bot's notification-cursor query. Returns one lean dict
+        per transition row — ``from_state IS NOT NULL`` excludes task
+        creations, which are not state changes — joined to the task and
+        project so a notification composes from a single row. Deleting a
+        task cascade-deletes its history rows, so the join never dangles.
+        """
+        rows = self.conn.execute(
+            "SELECT h.id, p.id AS project_id, p.name AS project_name, "
+            "t.number, t.title, h.from_state, h.to_state, h.changed_at "
+            "FROM state_history h "
+            "JOIN tasks t ON t.id = h.task_id "
+            "JOIN projects p ON p.id = t.project_id "
+            "WHERE h.id > ? AND h.from_state IS NOT NULL "
+            "ORDER BY h.id",
+            (since_id,),
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "project_id": r["project_id"],
+                "project_name": r["project_name"],
+                "number": r["number"],
+                "title": r["title"],
+                "from_state": r["from_state"],
+                "to_state": r["to_state"],
+                "changed_at": r["changed_at"],
+            }
+            for r in rows
+        ]
+
+    # -- telegram subscriptions ---------------------------------------------------
+
+    def subscribe_project(self, chat_id: int, project_id: int) -> dict:
+        """Subscribe ``chat_id`` to the project's state-change notifications.
+
+        Idempotent: a repeat keeps the existing row (and its
+        ``created_at``). Raises ``NotFound`` for an unknown project.
+        """
+        proj = self._get_project(project_id)
+        now = self._now()
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO telegram_subscriptions"
+                "(chat_id, project_id, created_at) VALUES (?, ?, ?)",
+                (chat_id, project_id, now),
+            )
+        row = self.conn.execute(
+            "SELECT chat_id, project_id, created_at "
+            "FROM telegram_subscriptions WHERE chat_id = ? AND project_id = ?",
+            (chat_id, project_id),
+        ).fetchone()
+        return {
+            "chat_id": row["chat_id"],
+            "project_id": row["project_id"],
+            "project_name": proj["name"],
+            "created_at": row["created_at"],
+        }
+
+    def unsubscribe_project(self, chat_id: int, project_id: int) -> dict:
+        """Remove the chat's subscription; report whether one was removed."""
+        self._get_project(project_id)
+        with self.conn:
+            cur = self.conn.execute(
+                "DELETE FROM telegram_subscriptions "
+                "WHERE chat_id = ? AND project_id = ?",
+                (chat_id, project_id),
+            )
+        return {"applied": True, "removed": cur.rowcount > 0}
+
+    def list_subscriptions(self, chat_id: int) -> list[dict]:
+        """The chat's subscriptions, joined to the project name, in name order."""
+        rows = self.conn.execute(
+            "SELECT p.id, p.name, s.created_at "
+            "FROM telegram_subscriptions s "
+            "JOIN projects p ON p.id = s.project_id "
+            "WHERE s.chat_id = ? ORDER BY p.name COLLATE NOCASE",
+            (chat_id,),
+        ).fetchall()
+        return [
+            {"project_id": r["id"], "project_name": r["name"], "created_at": r["created_at"]}
+            for r in rows
+        ]
+
+    def subscribed_chats(self, project_id: int) -> list[int]:
+        """Chat ids subscribed to the project (the notifier's fan-out list)."""
+        self._get_project(project_id)
+        rows = self.conn.execute(
+            "SELECT chat_id FROM telegram_subscriptions "
+            "WHERE project_id = ? ORDER BY chat_id",
+            (project_id,),
+        ).fetchall()
+        return [r["chat_id"] for r in rows]
+
     # -- attachments --------------------------------------------------------------------
 
     ALLOWED_ATTACHMENT_TYPES = {

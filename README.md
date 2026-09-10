@@ -102,8 +102,13 @@ Runs the bot as a separate process: long-polls the Bot API with the token
 from `TELEGRAM_BOT_TOKEN` (get one from @BotFather) and answers `/start`,
 `/help`, `/projects` (the list of projects with their per-state task counts)
 and `/tasks [project]` (the tasks in the active states — Todo, Planning,
-In progress and Review — grouped by project and state) — more board commands
-are on the way. Reads the same data directory as the other subcommands.
+In progress and Review — grouped by project and state). A chat can
+`/subscribe [project]` to receive notifications about every task state
+change in that project, and `/unsubscribe [project]` to stop them —
+subscriptions are per chat and per project and persist across restarts; the
+bot detects changes by polling `state_history`, so latency is at most one
+poll interval (~30 s). More board commands are on the way. Reads the same
+data directory as the other subcommands.
 
 ## Project layout
 

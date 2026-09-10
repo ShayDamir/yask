@@ -258,3 +258,155 @@ def test_list_in_progress_ordering(store, project):
 def test_list_in_progress_unknown_project(store):
     with pytest.raises(NotFound):
         store.list_in_progress(999)
+
+
+# --- telegram subscriptions ---------------------------------------------------
+
+
+def test_subscribe_project(store):
+    pid = store.create_project("alpha")["id"]
+    sub = store.subscribe_project(7, pid)
+    assert sub["chat_id"] == 7
+    assert sub["project_id"] == pid
+    assert sub["project_name"] == "alpha"
+    assert sub["created_at"]
+
+
+def test_subscribe_project_unknown_raises(store):
+    with pytest.raises(NotFound):
+        store.subscribe_project(7, 999)
+
+
+def test_subscribe_project_idempotent(store):
+    pid = store.create_project("alpha")["id"]
+    first = store.subscribe_project(7, pid)
+    second = store.subscribe_project(7, pid)
+    # the repeat keeps the existing row and its original created_at
+    assert second == first
+    assert store.list_subscriptions(7) == [
+        {"project_id": pid, "project_name": "alpha", "created_at": first["created_at"]}
+    ]
+
+
+def test_unsubscribe_project(store):
+    pid = store.create_project("alpha")["id"]
+    store.subscribe_project(7, pid)
+    assert store.unsubscribe_project(7, pid) == {"applied": True, "removed": True}
+    # nothing left to remove
+    assert store.unsubscribe_project(7, pid) == {"applied": True, "removed": False}
+
+
+def test_unsubscribe_project_unknown_raises(store):
+    with pytest.raises(NotFound):
+        store.unsubscribe_project(7, 999)
+
+
+def test_list_subscriptions_per_chat_in_name_order(store):
+    zeta = store.create_project("zeta")["id"]
+    alpha = store.create_project("alpha")["id"]
+    z_sub = store.subscribe_project(7, zeta)
+    a_sub = store.subscribe_project(7, alpha)
+    store.subscribe_project(8, zeta)  # a different chat
+
+    subs = store.list_subscriptions(7)
+    # name order, project name joined, only this chat's rows
+    assert subs == [
+        {"project_id": alpha, "project_name": "alpha", "created_at": a_sub["created_at"]},
+        {"project_id": zeta, "project_name": "zeta", "created_at": z_sub["created_at"]},
+    ]
+    assert store.list_subscriptions(8) == [
+        {"project_id": zeta, "project_name": "zeta", "created_at": z_sub["created_at"]}
+    ]
+    assert store.list_subscriptions(99) == []
+
+
+def test_subscribed_chats(store):
+    zeta = store.create_project("zeta")["id"]
+    alpha = store.create_project("alpha")["id"]
+    store.subscribe_project(7, alpha)
+    store.subscribe_project(-100, zeta)  # groups/supergroups have negative ids
+    store.subscribe_project(3, alpha)
+    assert store.subscribed_chats(alpha) == [3, 7]
+    assert store.subscribed_chats(zeta) == [-100]
+    empty = store.create_project("empty")["id"]
+    assert store.subscribed_chats(empty) == []
+    with pytest.raises(NotFound):
+        store.subscribed_chats(999)
+
+
+def test_subscription_rows_follow_project_cascade(store):
+    pid = store.create_project("alpha")["id"]
+    store.subscribe_project(7, pid)
+    store.conn.execute("DELETE FROM projects WHERE id = ?", (pid,))
+    assert store.list_subscriptions(7) == []
+    assert store.conn.execute(
+        "SELECT COUNT(*) AS c FROM telegram_subscriptions"
+    ).fetchone()["c"] == 0
+
+
+# --- state-change detection (the notification cursor) --------------------------
+
+
+def test_max_state_history_id(store):
+    assert store.max_state_history_id() == 0
+    pid = store.create_project("alpha")["id"]
+    t = store.create_task(pid, "t")
+    store.move_task(pid, t["number"], "Todo", confirm=True)
+    # the creation row comes first, the move row is the newest
+    history = store.get_history(pid, t["number"])
+    assert store.max_state_history_id() == history[-1]["id"]
+
+
+def test_new_state_changes(store):
+    assert store.new_state_changes(0) == []
+
+    alpha = store.create_project("alpha")["id"]
+    beta = store.create_project("beta")["id"]
+
+    # creation is not a state change (from_state NULL): excluded
+    store.create_task(alpha, "created only")
+    moved = store.create_task(alpha, "moved")
+    store.move_task(alpha, moved["number"], "Todo", confirm=True)
+    blocked = store.create_task(alpha, "blocked")
+    store.move_task(alpha, blocked["number"], "Blocked")
+    archived = store.create_task(alpha, "archived")
+    store.archive_task(alpha, archived["number"], confirm=True)
+    store.restore_task(alpha, archived["number"], confirm=True)
+    beta_task = store.create_task(beta, "beta moved")
+    store.move_task(beta, beta_task["number"], "Todo", confirm=True)
+
+    changes = store.new_state_changes(0)
+    # every transition is present, in history (id) order; per-project fields
+    # stay isolated
+    assert [
+        (c["project_name"], c["project_id"], c["number"], c["from_state"], c["to_state"])
+        for c in changes
+    ] == [
+        ("alpha", alpha, moved["number"], "Backlog", "Todo"),
+        ("alpha", alpha, blocked["number"], "Backlog", "Blocked"),
+        ("alpha", alpha, archived["number"], "Backlog", "Archived"),
+        ("alpha", alpha, archived["number"], "Archived", "Backlog"),
+        ("beta", beta, beta_task["number"], "Backlog", "Todo"),
+    ]
+    # lean dict fields
+    first = changes[0]
+    assert set(first) == {
+        "id",
+        "project_id",
+        "project_name",
+        "number",
+        "title",
+        "from_state",
+        "to_state",
+        "changed_at",
+    }
+    assert first["title"] == "moved"
+    # ordered by id (strictly increasing)
+    assert [c["id"] for c in changes] == sorted(c["id"] for c in changes)
+    # since_id filters to the changes recorded after it
+    mid = changes[0]["id"]
+    tail = store.new_state_changes(mid)
+    assert [c["id"] for c in tail] == [c["id"] for c in changes[1:]]
+    assert all(c["id"] > mid for c in tail)
+    # nothing after the newest change
+    assert store.new_state_changes(changes[-1]["id"]) == []
