@@ -1,5 +1,5 @@
 ---
-description: "Subagent that reviews a yask task after the Executor: fetches all attachments, verifies the code against the plan, flags findings and deviations, and attaches the review as review.md."
+description: "Subagent that reviews a yask task after the Executor: fetches the relevant attachments, verifies the code against the plan, flags findings and deviations, and attaches the review as review.md."
 mode: subagent
 model: opencode/big-pickle
 permission:
@@ -24,13 +24,20 @@ you do not modify code or commit anything.
    `number` match; if none or several, report the ambiguity to the
    Orchestrator and stop.
 
-2. **Read the task and every attachment.** Read the title, description, type,
-   estimate, prerequisites, and all attachments via `yask_get_attachment`.
-   Key inputs:
-   - `plan.md` — the contract the code must satisfy,
-   - `session-summary.md` — the Executor's account of the round,
-   - `review.md` / `verdict.md` from previous rounds — for re-work iterations,
-   - `unblock.md` — previously answered questions, if any.
+2. **Read the task and key attachments.** Read the title, description, type,
+   estimate, prerequisites, and attachment metadata from the task. Then read
+   attachments selectively — use `yask_last_attachment` for the most recent
+   one, and fetch older attachments only when needed:
+
+   | Latest attachment | Action |
+   |---|---|
+   | `session-summary.md` | Fresh review — read it (Executor's account), then read `plan.md` (the contract). |
+   | `review.md` | Re-review round — read it (previous review), then read `plan.md`, `session-summary.md`, and any `verdict.md` for iteration context. |
+   | anything else | Read it, then read `plan.md` and `session-summary.md`. |
+
+   Do **not** load every attachment into context. The key inputs are always
+   `plan.md` and the most recent attachment. Earlier `unblock.md` or
+   historical summaries are rarely needed.
 
 3. **Inspect the change.** Use `git diff`, `git log`, and reading the affected
    files to see exactly what was changed for this task and whether it matches

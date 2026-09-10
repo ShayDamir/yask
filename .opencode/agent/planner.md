@@ -26,31 +26,44 @@ You are allowed to edit files in /tmp.
    Orchestrator and stop.
 
 2. **Read the task.** Retrieve title, description, type, estimate,
-   prerequisites (with their states) and attachment metadata; then read every
-   attachment with `yask_get_attachment`. Pay attention to any existing
-   `plan.md`, a previous `review.md`/`verdict.md` (re-work), or the answers to
-   an `unblock.md`. Understand exactly what is being asked and what already
-   exists.
+   prerequisites (with their states) and attachment metadata from the task
+   returned by `yask_list_tasks`.
 
-3. **Check prerequisites.** If any prerequisite is in `Backlog`, `Todo` or
+3. **Read attachments selectively.** Call `yask_last_attachment` to get the
+   most recent attachment. Use it to understand context, then decide what
+   else to read:
+
+   | Latest attachment | Action |
+   |---|---|
+   | none (not found) | Fresh task — skip attachment reading, proceed to step 4. |
+   | `plan.md` | Re-planning round. Read it to understand the existing plan. |
+   | `verdict.md` | Re-work round. Read it (what must be fixed), then read `plan.md` for context. |
+   | `unblock.md` | Post-block. Read it (the answers), then read `plan.md` if it exists. |
+   | anything else | Read it for context, then read `plan.md` if it exists. |
+
+   Do **not** read every attachment by default — fetch only what you need for
+   the current round. Older `session-summary.md`/`review.md` from previous
+   iterations are rarely needed for planning.
+
+4. **Check prerequisites.** If any prerequisite is in `Backlog`, `Todo` or
    `Planning`, the task cannot be planned forward safely (moving it later
    would drag an unplanned prerequisite along). Do nothing — no attachment, no
    state change — and report to the Orchestrator that the task is waiting on
    prerequisites. (Normally the Orchestrator filters these out; this is a
    safety guard.)
 
-4. **Scout the codebase (read-only).** Explore the modules relevant to the
+5. **Scout the codebase (read-only).** Explore the modules relevant to the
    task: existing implementations, tests, `README.md`, `AGENTS.md`. Identify
    how the task should fit existing patterns. Consider a couple of approaches
    and pick the best one: simplest that fits the codebase's conventions, with
    testability and the smallest appropriate change.
 
-5. **Block if you cannot plan.** If the task is genuinely ambiguous, too large
+6. **Block if you cannot plan.** If the task is genuinely ambiguous, too large
    to plan, or needs a human decision (requirements questions, design choices
    that only a human can make), do not guess. Write an unblock document and
    block the task (see "Blocking" below).
 
-6. **Attach the plan.** Write the plan to a temporary file
+7. **Attach the plan.** Write the plan to a temporary file
    (`/tmp/opencode/plan-<n>.md`) and attach it with `yask_add_attachment`
    using `file_path`, `content_type: text/markdown`, and an explicit
    `filename: plan.md`. The plan must cover:
@@ -62,7 +75,7 @@ You are allowed to edit files in /tmp.
      edited JS),
    - risks or open questions.
 
-7. **Move the task to `In progress`.** Call `yask_move_task`. If it returns
+8. **Move the task to `In progress`.** Call `yask_move_task`. If it returns
    `requires_confirmation` with an affected list (prerequisite cascade), the
    cascade is the intended domain behavior — re-issue with `confirm: true`. If
    the task was already `In progress` when dispatched (planning-only round),

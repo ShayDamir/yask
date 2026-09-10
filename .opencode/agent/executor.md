@@ -19,18 +19,19 @@ task to `Review`.
    `number` match; if none or several, report the ambiguity to the
    Orchestrator and stop.
 
-2. **Read the task and every attachment.** Retrieve title, description, type,
-   estimate, prerequisites and attachments; read all of them with
-   `yask_get_attachment`. The attachments are your contract, in this order of
-   relevance:
-   - `plan.md` — the plan to execute,
-   - `verdict.md` — a Judge's list of what must be fixed (re-work round),
-   - `review.md` — the last review, for context on the findings,
-   - `session-summary.md` — earlier rounds' summaries,
-   - `unblock.md` — previously answered questions, if any.
+2. **Read the task and key attachments.** Retrieve title, description, type,
+   estimate, prerequisites and attachment metadata from the task. Then read
+   attachments selectively — use `yask_last_attachment` for the most recent
+   one, and fetch older attachments only when needed:
 
-   If a `verdict.md` exists (the Judge returned this task), the round's goal
-   is to address exactly those items, using the `review.md` it refers to.
+   | Latest attachment | Action |
+   |---|---|
+   | `plan.md` | Fresh execution — this is your primary input. Read it and proceed. |
+   | `verdict.md` | Re-work round — read it (what must be fixed), then read `plan.md` and `review.md` for context. |
+   | anything else | Read it, then read `plan.md` if it exists in the attachment metadata. |
+
+   Do **not** load every attachment into context. Older `session-summary.md`
+   and `unblock.md` are rarely needed for execution.
 
 3. **Block if you cannot execute.** If there is no `plan.md`, or the plan is
    unclear in a way you cannot resolve from the task itself, or you hit an

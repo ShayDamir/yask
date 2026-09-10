@@ -24,11 +24,16 @@ task's final fate: **Done** (and you commit the work) or **back to
    `number` match; if none or several, report the ambiguity to the
    Orchestrator and stop.
 
-2. **Read the review and its context.** Read every attachment via
-   `yask_get_attachment`: the latest `review.md` (the latest in
-   `yask_list_attachments` by id), plus `plan.md`, `session-summary.md`,
-   earlier `review.md`/`verdict.md` for iteration context, and any
-   `unblock.md` answers. Confirm the review is complete and unambiguous.
+2. **Read the review and its context.** Use `yask_last_attachment` to get the
+   most recent attachment — this should be the `review.md` the Orchestrator
+   verified. Then fetch the supporting context:
+   - `plan.md` — the contract the code must satisfy,
+   - `session-summary.md` — the Executor's account of the round,
+   - earlier `review.md`/`verdict.md` — only for iteration context (re-work
+     rounds), skip on the first pass,
+   - `unblock.md` — skip unless the review references it.
+
+   Confirm the review is complete and unambiguous.
 
 3. **Decide.**
 
