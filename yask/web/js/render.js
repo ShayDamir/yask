@@ -269,12 +269,24 @@ function renderColumn(colState, roots, actions, filterLabel, opts = {}) {
           dataset: { state: colState },
           onclick: (e) => {
             e.stopPropagation();
-            actions.onAdd(colState);
+            (opts.onAdd || actions.onAdd)(colState);
           },
         }, "+")
       : null;
   const head = h("div", { class: "column-head" }, h("span", {}, colState), h("span", { class: "count" }, String(roots.length)), addBtn);
   return h("div", { class: `column${colState === ARCHIVED ? " archived" : ""}` }, head, body);
+}
+
+// Add-task button that nests a new task inside a specific epic (#35). Reused
+// by renderEpicBoard for both the empty-epic prompt and, via renderColumn's
+// onAdd override, the Backlog column header.
+function addToEpicBtn(epic, actions) {
+  return h("button", {
+    class: "btn",
+    title: `Add a new task to epic #${epic.number}`,
+    "aria-label": `Add a new task to epic #${epic.number}`,
+    onclick: () => actions.onAddToEpic(epic.number),
+  }, `Add task to epic #${epic.number}`);
 }
 
 // Locate an Epic (by its task number) anywhere in the nested tree; epics may
@@ -306,7 +318,13 @@ export function renderEpicBoard(project, epicNumber, actions, { showArchived, fi
   let children = epic.children || [];
   if (filterLabel) children = children.filter((c) => subtreeHasLabel(c, filterLabel));
   if (!children.length) {
-    board.append(h("div", { class: "empty-column", style: "flex:1;text-align:center" }, "This epic has no tasks yet."));
+    const emptyWrap = h(
+      "div",
+      { class: "empty-column", style: "flex:1;text-align:center" },
+      h("span", {}, "This epic has no tasks yet."),
+      addToEpicBtn(epic, actions)
+    );
+    board.append(emptyWrap);
     return;
   }
   const columns = [...STATES];
@@ -317,10 +335,19 @@ export function renderEpicBoard(project, epicNumber, actions, { showArchived, fi
     byState.get(c.state).push(c);
   }
   for (const colState of columns) {
-    // Passing showAdd: false suppresses the "+" button — task creation stays at
-    // project scope (adding to an epic is a follow-up). renderCard already
-    // handles regular tasks and nested epics, so nothing else is needed there.
-    board.append(renderColumn(colState, byState.get(colState) || [], actions, filterLabel, { showAdd: false }));
+    // The Backlog column shows the "+" (renderColumn only draws it there),
+    // wired to the epic-aware handler so the new task is nested under this
+    // epic (#35). Other columns keep the add button suppressed, as on the
+    // normal board.
+    board.append(
+      renderColumn(
+        colState,
+        byState.get(colState) || [],
+        actions,
+        filterLabel,
+        { showAdd: true, onAdd: () => actions.onAddToEpic(epic.number) }
+      )
+    );
   }
 }
 

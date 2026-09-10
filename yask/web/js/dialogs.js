@@ -179,8 +179,16 @@ export async function openAttachmentViewer(task, att) {
 
 // -- new task -------------------------------------------------------------------
 
-export function openNewTaskModal(project, state, onCreated) {
+export function openNewTaskModal(project, state, onCreated, epicNumber = null) {
   const pid = project.id;
+  // Epic context (#35): resolve the epic so the modal heading + parent field
+  // can reference it. Falls back to null for the normal (project-scope) flow.
+  const epic = epicNumber
+    ? flattenTasks(project.tasks).find((t) => t.number === Number(epicNumber))
+    : null;
+  const heading = epic
+    ? `New task in epic #${epic.number}`
+    : `New task in ${state}`;
   const titleInput = h("input", { type: "text", id: "nt-title", placeholder: "Task title" });
   const types = project.task_types || [];
   // Default to the last type created in this project (see #6), else Task, else the first type.
@@ -258,13 +266,16 @@ export function openNewTaskModal(project, state, onCreated) {
         const isEpic = types.find((t) => t.name === typeSelect.value)?.is_epic;
         const est = isEpic ? null : estInput.value === "" ? null : Number(estInput.value);
         try {
-          // new tasks always land in the Backlog (#1); no state field
-          await api.createTask(pid, {
+          // new tasks always land in the Backlog (#1); no state field.
+          // When creating inside an epic (#35), nest it under that epic.
+          const payload = {
             title,
             type: typeSelect.value,
             estimate: est,
             description: isStory ? description : "",
-          });
+          };
+          if (epic) payload.parent_number = Number(epicNumber);
+          await api.createTask(pid, payload);
           setLastType(pid, typeSelect.value);
           modal.close();
           if (onCreated) onCreated();
@@ -273,7 +284,7 @@ export function openNewTaskModal(project, state, onCreated) {
         }
       },
     },
-    h("h2", {}, `New task in ${state}`),
+    h("h2", {}, heading),
     h("div", { class: "field" }, titleInput),
     h(
       "div",

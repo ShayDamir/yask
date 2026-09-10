@@ -257,6 +257,11 @@ const actions = {
       toast(`Created task in ${colState}`, "success");
       refresh();
     }),
+  onAddToEpic: (epicNumber) =>
+    openNewTaskModal(state.project, null, () => {
+      toast(`Created task in epic #${epicNumber}`, "success");
+      refresh();
+    }, epicNumber),
   onMove: (task, toState) => doMove(task, toState),
   onArchive: (task) => doArchive(task),
   onRestore: (task) => doRestore(task),
