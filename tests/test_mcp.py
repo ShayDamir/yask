@@ -240,6 +240,27 @@ def test_last_attachment_unknown_task(store, project):
     assert "not found" in data["error"]
 
 
+def test_last_attachment_number_differs_from_id(store, project):
+    """last_attachment must work when task number ≠ internal id (multi-project)."""
+    pid_a = project["id"]
+    t_a = store.create_task(pid_a, "task_a")
+    pid_b = store.create_project("proj_b")["id"]
+    t_b = store.create_task(pid_b, "task_b")
+    assert t_b["id"] != t_b["number"], "guard: id must differ from number"
+
+    store.add_attachment(pid_a, t_a["number"], "a_file.md", "text/markdown", b"aaa")
+    store.add_attachment(pid_b, t_b["number"], "b_file.md", "text/markdown", b"bbb")
+
+    res = call(
+        store, "last_attachment",
+        project=store._get_project(pid_b)["name"],
+        number=t_b["number"],
+    )
+    data = json.loads(texts(res)[0].text)
+    assert data["filename"] == "b_file.md"
+    assert data["text"] == "bbb"
+
+
 def test_last_attachment_is_registered(store, project):
     server = build_server(store)
 

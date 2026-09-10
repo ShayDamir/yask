@@ -1041,10 +1041,10 @@ class Store:
         )
 
     def last_attachment(self, project_id: int, number: int) -> tuple[dict, bytes]:
-        self._get_task(project_id, number)
+        row = self._get_task(project_id, number)
         a = self.conn.execute(
             "SELECT * FROM attachments WHERE task_id = ? ORDER BY id DESC LIMIT 1",
-            (number,),
+            (row["id"],),
         ).fetchone()
         if a is None:
             raise NotFound(f"no attachments on task #{number}")

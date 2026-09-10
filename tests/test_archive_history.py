@@ -171,6 +171,32 @@ def test_attachment_delete(store, project):
         store.get_attachment(meta["id"])
 
 
+def test_last_attachment_uses_internal_task_id(store, project):
+    """last_attachment must query by internal id, not public number.
+
+    Creates two projects so that task numbers diverge from internal ids:
+    project A gets task #1 (id 1), then project B gets task #1 (id 2).
+    Attaching different files to each task and calling last_attachment for
+    B's task must return B's file, not A's (the old code would return A's
+    because it used the public number 1 to query task_id).
+    """
+    from yask.store import NotFound
+
+    pid_a = project["id"]
+    t_a = store.create_task(pid_a, "task_a")
+    # Create a second project — its first task has number 1 but internal id 2
+    pid_b = store.create_project("proj_b")["id"]
+    t_b = store.create_task(pid_b, "task_b")
+    assert t_b["id"] != t_b["number"], "guard: internal id must differ from public number"
+
+    store.add_attachment(pid_a, t_a["number"], "a_file.md", "text/markdown", b"a content")
+    store.add_attachment(pid_b, t_b["number"], "b_file.md", "text/markdown", b"b content")
+
+    meta, data = store.last_attachment(pid_b, t_b["number"])
+    assert meta["filename"] == "b_file.md"
+    assert data == b"b content"
+
+
 def test_description_field_optional(store, project):
     pid = project["id"]
     t = store.create_task(pid, "t", description="a plain description")
