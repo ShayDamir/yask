@@ -612,6 +612,31 @@ def test_projects_button_no_active_tasks(store):
     assert script.edited == []
 
 
+def test_callback_p_store_failure_replies_and_recovers(store, monkeypatch):
+    """A store failure on a p: press replies with the error text, no crash."""
+    pid = store.create_project("yask")["id"]
+
+    def boom(project_id):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "get_project", boom)
+    script = run_bot_until_stop(
+        Script(
+            [[callback_update(321, f"p:{pid}", chat_id=11), message_update(322, "/start")]]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the press is answered (no toast), the failure produces an error reply,
+    # and the loop survives: the follow-up message is still answered
+    assert script.answered == [{"callback_query_id": "cbq-321"}]
+    assert len(script.sent) == 2
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"] == telegram_bot.TASKS_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+    assert script.offsets == [None, 323]
+
+
 # --- /tasks (store-backed dispatch) ----------------------------------------
 
 
@@ -2230,6 +2255,40 @@ def test_callback_dispatch_unknown_project_p(store):
     )
 
 
+def test_callback_t_store_failure_replies_and_recovers(store, monkeypatch):
+    """A store failure on a t: press replies with the error text, no crash."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working", "Story", estimate=3.0)
+    store.move_task(pid, t["number"], "In progress", confirm=True)
+
+    def boom(project_id, number):
+        raise RuntimeError("simulated store failure")
+
+    # get_history is the call the press reaches after the (succeeding)
+    # project/task lookups — the press must not leak its failure
+    monkeypatch.setattr(store, "get_history", boom)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    callback_update(323, f"t:{pid}:{t['number']}", chat_id=11),
+                    message_update(324, "/start"),
+                ]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the press is answered (no toast), the failure produces an error reply,
+    # and the loop survives: the follow-up message is still answered
+    assert script.answered == [{"callback_query_id": "cbq-323"}]
+    assert len(script.sent) == 2
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"] == telegram_bot.TASK_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+    assert script.offsets == [None, 325]
+
+
 # --- a: payload (the /task view's per-attachment buttons) -------------------
 
 
@@ -2331,6 +2390,40 @@ def test_callback_dispatch_attachment_not_found(store):
     )
 
 
+def test_callback_a_store_failure_replies_and_recovers(store, monkeypatch):
+    """A store failure on an a: press replies with the error text, no crash."""
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+
+    def boom(project_id, number, attachment_id):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "get_task_attachment", boom)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    callback_update(
+                        325, f"a:{pid}:{t['number']}:{d['plan']['id']}", chat_id=13
+                    ),
+                    message_update(326, "/start"),
+                ]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the press is answered (no toast), the failure produces an error reply
+    # (no file is sent), and the loop survives
+    assert script.answered == [{"callback_query_id": "cbq-325"}]
+    assert len(script.sent) == 2
+    assert script.sent[0]["chat_id"] == 13
+    assert script.sent[0]["text"] == telegram_bot.ATTACHMENT_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+    assert script.sent_files == []
+    assert script.offsets == [None, 327]
+
+
 # --- s:/u: payload (the /task view's subscribe toggle) ----------------------
 
 
@@ -2408,6 +2501,72 @@ def test_callback_dispatch_unsubscribe_toggle(store):
     rows = e["reply_markup"]["inline_keyboard"]
     assert rows[:2] == detail["reply_markup"]["inline_keyboard"][:2]
     assert rows[-1] == [{"text": "Subscribe", "callback_data": f"s:{pid}"}]
+
+
+def test_callback_s_store_failure_replies_and_recovers(store, monkeypatch):
+    """A store failure on an s: press replies with the error text, no crash."""
+    pid = store.create_project("yask")["id"]
+
+    def boom(chat_id, project_id):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "subscribe_project", boom)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    callback_update(327, f"s:{pid}", chat_id=11),
+                    message_update(328, "/start"),
+                ]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the press is answered (no toast), the failure produces an error reply
+    # (no in-place edit), and the loop survives
+    assert script.answered == [{"callback_query_id": "cbq-327"}]
+    assert len(script.sent) == 2
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"] == telegram_bot.SUBSCRIBE_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+    assert store.list_subscriptions(11) == []
+    assert script.edited == []
+    assert script.offsets == [None, 329]
+
+
+def test_callback_u_store_failure_replies_and_recovers(store, monkeypatch):
+    """A store failure on a u: press replies with the error text, no crash."""
+    pid = store.create_project("yask")["id"]
+    store.subscribe_project(11, pid)
+
+    def boom(chat_id, project_id):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "unsubscribe_project", boom)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    callback_update(329, f"u:{pid}", chat_id=11),
+                    message_update(330, "/start"),
+                ]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the press is answered (no toast), the failure produces an error reply
+    # (no in-place edit), and the loop survives
+    assert script.answered == [{"callback_query_id": "cbq-329"}]
+    assert len(script.sent) == 2
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"] == telegram_bot.UNSUBSCRIBE_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+    # the failed unsubscribe leaves the store row in place
+    assert [s["project_id"] for s in store.list_subscriptions(11)] == [pid]
+    assert script.edited == []
+    assert script.offsets == [None, 331]
 
 
 def test_callback_dispatch_toggle_stale_keyboard(store):

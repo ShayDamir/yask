@@ -863,7 +863,11 @@ def make_callback_dispatch(
     and integer fields); an unknown project, task or attachment gets an
     informative text reply (the same wording as the corresponding
     command's not-found reply); any other shape returns None for the
-    out-of-date toast.
+    out-of-date toast. A non-NotFound store failure in any family (a
+    locked or corrupted DB) yields the family's error-text reply — the
+    same convention as :func:`make_dispatch` — instead of propagating out
+    of :func:`run_bot`'s per-update handler (which catches only
+    BotAPIError) and killing the long-poll process.
     """
 
     def callback_dispatch(callback_query: dict) -> Optional[CallbackAction]:
@@ -884,9 +888,15 @@ def make_callback_dispatch(
                         "Use /projects to list projects."
                     )
                 )
+            except Exception:
+                return CallbackAction(reply=TASKS_ERROR_TEXT)
             # The same view typing "/tasks <id>" would send (including its
             # own t: keyboard when the project has active tasks).
-            return CallbackAction(reply=tasks_view(store, str(project_id)))
+            try:
+                view = tasks_view(store, str(project_id))
+            except Exception:
+                return CallbackAction(reply=TASKS_ERROR_TEXT)
+            return CallbackAction(reply=view)
         if len(parts) == 3 and parts[0] == "t":
             try:
                 project_id = int(parts[1])
@@ -902,13 +912,20 @@ def make_callback_dispatch(
                         "Use /projects to list projects."
                     )
                 )
+            except Exception:
+                return CallbackAction(reply=TASK_ERROR_TEXT)
             try:
                 task = store.get_task(project_id, number)
             except NotFound:
                 return CallbackAction(
                     reply=f"Task #{number} not found in {project['name']}."
                 )
-            history = store.get_history(project_id, number)
+            except Exception:
+                return CallbackAction(reply=TASK_ERROR_TEXT)
+            try:
+                history = store.get_history(project_id, number)
+            except Exception:
+                return CallbackAction(reply=TASK_ERROR_TEXT)
             # The detail reply carries its own keyboard only when the
             # button's chat is known (an inaccessible message arrives with
             # no chat → the plain text, as before): the toggle button
@@ -917,10 +934,13 @@ def make_callback_dispatch(
             chat_id = (message.get("chat") or {}).get("id")
             subscribed = False
             if chat_id is not None:
-                subscribed = any(
-                    s["project_id"] == project_id
-                    for s in store.list_subscriptions(chat_id)
-                )
+                try:
+                    subscribed = any(
+                        s["project_id"] == project_id
+                        for s in store.list_subscriptions(chat_id)
+                    )
+                except Exception:
+                    return CallbackAction(reply=TASK_ERROR_TEXT)
             return CallbackAction(
                 reply=format_task_view(task, project, history, chat_id, subscribed)
             )
@@ -941,12 +961,16 @@ def make_callback_dispatch(
                         "Use /projects to list projects."
                     )
                 )
+            except Exception:
+                return CallbackAction(reply=ATTACHMENT_ERROR_TEXT)
             try:
                 task = store.get_task(project_id, number)
             except NotFound:
                 return CallbackAction(
                     reply=f"Task #{number} not found in {project['name']}."
                 )
+            except Exception:
+                return CallbackAction(reply=ATTACHMENT_ERROR_TEXT)
             try:
                 meta, data = store.get_task_attachment(
                     project_id, number, attachment_id
@@ -960,6 +984,8 @@ def make_callback_dispatch(
                         "attachments."
                     )
                 )
+            except Exception:
+                return CallbackAction(reply=ATTACHMENT_ERROR_TEXT)
             return CallbackAction(
                 reply=FileReply(
                     filename=meta["filename"],
@@ -970,6 +996,11 @@ def make_callback_dispatch(
             )
         if len(parts) == 2 and parts[0] in ("s", "u") and parts[1].isdigit():
             project_id = int(parts[1])
+            # The family's error text, per prefix (a failed press of the
+            # subscribe toggle reports a subscribe failure, etc.).
+            error_text = (
+                SUBSCRIBE_ERROR_TEXT if parts[0] == "s" else UNSUBSCRIBE_ERROR_TEXT
+            )
             try:
                 project = store.get_project(project_id)
             except NotFound:
@@ -979,6 +1010,8 @@ def make_callback_dispatch(
                         "Use /projects to list projects."
                     )
                 )
+            except Exception:
+                return CallbackAction(reply=error_text)
             message = callback_query.get("message") or {}
             # A subscription is per chat: an inaccessible message (no chat)
             # cannot be toggled → the out-of-date toast.
@@ -986,11 +1019,17 @@ def make_callback_dispatch(
             if chat_id is None:
                 return None
             if parts[0] == "s":
-                store.subscribe_project(chat_id, project_id)
+                try:
+                    store.subscribe_project(chat_id, project_id)
+                except Exception:
+                    return CallbackAction(reply=error_text)
                 subscribed = True
                 answer = f"Subscribed to {project['name']}"
             else:
-                store.unsubscribe_project(chat_id, project_id)
+                try:
+                    store.unsubscribe_project(chat_id, project_id)
+                except Exception:
+                    return CallbackAction(reply=error_text)
                 subscribed = False
                 answer = f"Unsubscribed from {project['name']}"
             # In-place re-render: a toggle leaves the message text unchanged
