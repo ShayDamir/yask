@@ -28,6 +28,50 @@ def message_update(update_id, text, chat_id=7):
     return {"update_id": update_id, "message": message}
 
 
+def parse_multipart(request):
+    """Split a multipart/form-data request into ``(fields, files)``.
+
+    ``fields`` maps field names to their string values; ``files`` maps file
+    field names to ``(filename, bytes)``. As deep as the bot's uploads
+    need: plain fields plus one file per request, CRLF line endings (httpx's
+    multipart format).
+    """
+    content_type = request.headers["content-type"]
+    boundary = next(
+        part.strip()[len("boundary="):].strip('"')
+        for part in content_type.split(";")
+        if part.strip().startswith("boundary=")
+    )
+    fields = {}
+    files = {}
+    for part in request.content.split(b"--" + boundary.encode()):
+        if part.startswith(b"\r\n"):
+            part = part[2:]
+        if part.endswith(b"\r\n"):
+            part = part[:-2]
+        if part in (b"", b"--"):
+            continue
+        head, _, payload = part.partition(b"\r\n\r\n")
+        name = None
+        filename = None
+        for line in head.split(b"\r\n"):
+            if not line.lower().startswith(b"content-disposition:"):
+                continue
+            for token in line.split(b";"):
+                token = token.strip()
+                if token.startswith(b'name="'):
+                    name = token[6:-1].decode()
+                elif token.startswith(b'filename="'):
+                    filename = token[10:-1].decode()
+        if name is None:
+            continue
+        if filename is not None:
+            files[name] = (filename, payload)
+        else:
+            fields[name] = payload.decode()
+    return fields, files
+
+
 class Script:
     """Canned Bot API responses plus request recording.
 
@@ -36,6 +80,9 @@ class Script:
     entries are exhausted, getUpdates returns empty results and sets ``stop``
     (when configured), so a bot run always terminates. ``fail_once_with``
     raises once on the first request to simulate a transport failure.
+    ``sent_files`` records multipart file uploads (sendDocument/sendPhoto):
+    one dict per upload with the method, chat id, caption, filename and
+    bytes.
     """
 
     def __init__(self, get_updates, get_me_ok=True, fail_once_with=None):
@@ -44,6 +91,7 @@ class Script:
         self.fail_once_with = fail_once_with
         self.failed_once = False
         self.sent = []
+        self.sent_files = []
         self.offsets = []
         self.stop = None
 
@@ -52,6 +100,22 @@ class Script:
             self.failed_once = True
             raise self.fail_once_with
         method = request.url.path.rsplit("/", 1)[-1]
+        if method in ("sendDocument", "sendPhoto"):
+            fields, files = parse_multipart(request)
+            field = "document" if method == "sendDocument" else "photo"
+            filename, data = files[field]
+            self.sent_files.append(
+                {
+                    "method": method,
+                    "chat_id": int(fields["chat_id"]),
+                    "caption": fields.get("caption"),
+                    "filename": filename,
+                    "data": data,
+                }
+            )
+            return httpx.Response(
+                200, json={"ok": True, "result": {"message_id": 99}}
+            )
         body = json.loads(request.content)
         if method == "getMe":
             if self.get_me_ok:
@@ -548,6 +612,482 @@ def test_tasks_store_failure_replies_and_recovers(store, monkeypatch):
 
 def test_help_mentions_tasks():
     assert "/tasks" in telegram_bot.HELP_TEXT
+
+
+# --- /task (store-backed dispatch) -------------------------------------------
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 100  # 108 bytes
+
+
+def seed_task_view(store):
+    """Seed a yask project with one fully-equipped task (the /task tests).
+
+    Epic #1 contains task "working" (a Story with estimate, description and
+    an attachment pair); "prereq one" sits in Review and "prereq two" ends up
+    pulled to In progress by "working"'s moves. Returns ids, attachment
+    metadata and the exact attachment bytes.
+    """
+    pid = store.create_project("yask")["id"]
+    epic = store.create_task(pid, "epic", "Epic")
+    p1 = store.create_task(pid, "prereq one")
+    store.move_task(pid, p1["number"], "Review", confirm=True)
+    p2 = store.create_task(pid, "prereq two")
+    t = store.create_task(
+        pid,
+        "working",
+        "Story",
+        estimate=3.0,
+        description="The task at hand.",
+        parent_number=epic["number"],
+    )
+    store.set_prerequisites(pid, t["number"], [p1["number"], p2["number"]])
+    store.move_task(pid, t["number"], "Todo", confirm=True)
+    store.move_task(pid, t["number"], "In progress", confirm=True)
+    plan_bytes = b"# Plan\n" + b"x" * 7793  # 7800 bytes → "7.6 KB"
+    plan = store.add_attachment(
+        pid, t["number"], "plan.md", "text/markdown", plan_bytes
+    )
+    img = store.add_attachment(pid, t["number"], "img.png", "image/png", PNG)
+    return {
+        "pid": pid,
+        "epic": epic,
+        "p1": p1,
+        "p2": p2,
+        "t": t,
+        "plan": plan,
+        "img": img,
+        "plan_bytes": plan_bytes,
+    }
+
+
+def expected_task_text(store, d):
+    """The exact /task detail reply for the seed_task_view task."""
+    pid, t = d["pid"], d["t"]
+    history = store.get_history(pid, t["number"])
+    assert len(history) == 3
+    return (
+        f"#{t['number']} working — Story\n"
+        "State: In progress\n"
+        "Estimate: 3\n"
+        f"Parent: #{d['epic']['number']}\n"
+        "Description:\n"
+        "The task at hand.\n"
+        "Prerequisites:\n"
+        f"  #{d['p1']['number']} prereq one — Review\n"
+        f"  #{d['p2']['number']} prereq two — In progress\n"
+        "Attachments:\n"
+        f"  {d['plan']['id']}. plan.md (7.6 KB) — /attachment yask "
+        f"{t['number']} {d['plan']['id']}\n"
+        f"  {d['img']['id']}. img.png (108 B) — /attachment yask "
+        f"{t['number']} {d['img']['id']}\n"
+        "History:\n"
+        f"  {history[0]['changed_at']} — created (web)\n"
+        f"  {history[1]['changed_at']} — Backlog → Todo (web)\n"
+        f"  {history[2]['changed_at']} — Todo → In progress (web)"
+    )
+
+
+def test_task_by_number_exact(store):
+    d = seed_task_view(store)
+    script = run_bot_until_stop(
+        Script([[message_update(231, f"/task yask {d['t']['number']}")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 7
+    assert script.sent[0]["text"] == expected_task_text(store, d)
+
+
+def test_task_by_title_case_insensitive(store):
+    d = seed_task_view(store)
+    script = run_bot_until_stop(
+        Script([[message_update(232, "/task yask WORKING")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    assert script.sent[0]["text"] == expected_task_text(store, d)
+
+
+def test_task_title_two_matches_disambiguates(store):
+    pid = store.create_project("yask")["id"]
+    t1 = store.create_task(pid, "fix bug")
+    store.move_task(pid, t1["number"], "Todo", confirm=True)
+    t2 = store.create_task(pid, "fix bug")
+    script = run_bot_until_stop(
+        Script([[message_update(233, "/task yask fix bug")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Several tasks in yask match 'fix bug':\n"
+        f"  #{t1['number']} fix bug — Todo\n"
+        f"  #{t2['number']} fix bug — Backlog\n"
+        "Use /task yask <number>."
+    )
+
+
+def test_task_unknown_number_and_title(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "working")
+    script = run_bot_until_stop(
+        Script([[message_update(234, "/task yask 99")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == "Task #99 not found in yask."
+    script = run_bot_until_stop(
+        Script([[message_update(235, "/task yask nope")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == "Task 'nope' not found in yask."
+
+
+def test_task_unknown_project(store):
+    store.create_project("yask")
+    script = run_bot_until_stop(
+        Script([[message_update(236, "/task nope 1")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Project 'nope' not found. Use /projects to list projects."
+    )
+    script = run_bot_until_stop(
+        Script([[message_update(237, "/task 999 1")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Project '999' not found. Use /projects to list projects."
+    )
+
+
+def test_task_numeric_title_fallback(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "alpha")
+    t = store.create_task(pid, "2024")
+    script = run_bot_until_stop(
+        Script([[message_update(238, "/task yask 2024")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    # no task #2024 — the all-digit reference falls back to the title
+    assert script.sent[0]["text"].startswith(f"#{t['number']} 2024 — Task\n")
+
+
+def test_task_number_wins_over_same_title(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "2024")
+    two = store.create_task(pid, "real two")
+    script = run_bot_until_stop(
+        Script([[message_update(239, "/task yask 2")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"].startswith(
+        f"#{two['number']} real two — Task\n"
+    )
+
+
+def test_task_project_and_title_with_spaces(store):
+    pid = store.create_project("my big project")["id"]
+    store.create_task(pid, "other")
+    t = store.create_task(pid, "fix the bug")
+    script = run_bot_until_stop(
+        Script([[message_update(240, "/task my big project fix the bug")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    # longest-prefix project resolution: "my big project" + title "fix the bug"
+    assert script.sent[0]["text"].startswith(f"#{t['number']} fix the bug — Task\n")
+
+
+def test_task_archived_by_number_not_by_title(store):
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "doomed")
+    store.archive_task(pid, t["number"], confirm=True)
+    script = run_bot_until_stop(
+        Script([[message_update(241, f"/task yask {t['number']}")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"].startswith(f"#{t['number']} doomed — Task\n")
+    assert "State: Archived" in script.sent[0]["text"]
+    # the title search excludes archived tasks
+    script = run_bot_until_stop(
+        Script([[message_update(242, "/task yask doomed")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == "Task 'doomed' not found in yask."
+
+
+def test_task_with_bot_mention(store):
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    script = run_bot_until_stop(
+        Script([[message_update(243, f"/task@yask_test_bot yask {t['number']}")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"].startswith(f"#{t['number']} working — Task\n")
+
+
+def test_task_usage_texts(store):
+    store.create_project("yask")
+    script = run_bot_until_stop(
+        Script([[message_update(244, "/task")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == telegram_bot.TASK_USAGE_TEXT
+    # a project with no task reference after it gets the usage text too
+    script = run_bot_until_stop(
+        Script([[message_update(245, "/task yask")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == telegram_bot.TASK_USAGE_TEXT
+
+
+def test_task_long_description_truncated(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "chatty", description="x" * 4000)
+    script = run_bot_until_stop(
+        Script([[message_update(246, "/task yask chatty")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    text = script.sent[0]["text"]
+    assert "… (truncated, 4000 chars total)" in text
+    # capped at exactly 2500 description chars
+    assert "x" * 2500 in text
+    assert "x" * 2501 not in text
+    # the whole reply stays under Telegram's message cap
+    assert len(text) <= 4096
+
+
+def test_task_history_capped_at_ten(store):
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "moving")
+    for s in [
+        "Todo", "Planning", "In progress", "Review", "Done",
+        "Backlog", "Todo", "Planning", "In progress", "Review", "Done",
+    ]:
+        store.move_task(pid, t["number"], s)
+    history = store.get_history(pid, t["number"])
+    assert len(history) == 12
+    script = run_bot_until_stop(
+        Script([[message_update(247, f"/task yask {t['number']}")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    lines = script.sent[0]["text"].split("\n")
+    idx = lines.index("History:")
+    assert lines[idx:] == (
+        ["History:", f"  … {12 - telegram_bot.HISTORY_MAX} earlier transitions"]
+        + [
+            f"  {h['changed_at']} — {h['from_state']} → {h['to_state']} "
+            f"({h['source']})"
+            for h in history[-telegram_bot.HISTORY_MAX:]
+        ]
+    )
+
+
+def test_tasks_drill_down_to_task_view(store):
+    """The /task reference emitted by /tasks must resolve to the detail view."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(
+        pid, "drill down", "Story", estimate=2.0, description="the point"
+    )
+    store.move_task(pid, t["number"], "In progress", confirm=True)
+    # the reference exactly as /tasks emits it (the cross-task contract)
+    first_reply = telegram_bot.tasks_view(store, str(pid))
+    ref = first_reply.splitlines()[-1].rsplit(" — ", 1)[-1]
+    assert ref == f"/task {pid} {t['number']}"
+    script = run_bot_until_stop(
+        Script(
+            [
+                [message_update(248, "/tasks")],
+                [message_update(249, ref)],
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 2
+    task_line = f"    #{t['number']} drill down — /task {pid} {t['number']}"
+    assert script.sent[0]["text"].splitlines()[-1] == task_line
+    # re-sending the reference yields the detail view
+    assert script.sent[1]["text"].startswith(f"#{t['number']} drill down — Story\n")
+    assert "State: In progress" in script.sent[1]["text"]
+    assert "Estimate: 2" in script.sent[1]["text"]
+
+
+def test_task_store_failure_replies_and_recovers(store, monkeypatch):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "working")
+
+    def boom(project_id, number):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "get_task", boom)
+    script = run_bot_until_stop(
+        Script([[message_update(250, "/task yask 1"), message_update(251, "/start")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    # the failure produces a reply, not a crash; the next message is still
+    # answered
+    assert len(script.sent) == 2
+    assert script.sent[0]["text"] == telegram_bot.TASK_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+
+
+def test_help_mentions_task_and_attachment():
+    assert "/task" in telegram_bot.HELP_TEXT
+    assert "/attachment" in telegram_bot.HELP_TEXT
+
+
+# --- /attachment (store-backed dispatch) -------------------------------------
+
+
+def test_attachment_markdown_sent_as_document(store):
+    d = seed_task_view(store)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    message_update(
+                        261, f"/attachment yask {d['t']['number']} {d['plan']['id']}"
+                    )
+                ]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent == []  # a file, not a text message
+    assert len(script.sent_files) == 1
+    f = script.sent_files[0]
+    assert f["method"] == "sendDocument"
+    assert f["chat_id"] == 7
+    assert f["filename"] == "plan.md"
+    assert f["data"] == d["plan_bytes"]
+    assert f["caption"] == f"#{d['t']['number']} working — plan.md"
+
+
+def test_attachment_image_sent_as_photo(store):
+    d = seed_task_view(store)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    message_update(
+                        262, f"/attachment yask {d['t']['number']} {d['img']['id']}"
+                    )
+                ]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent == []
+    assert len(script.sent_files) == 1
+    f = script.sent_files[0]
+    assert f["method"] == "sendPhoto"
+    assert f["chat_id"] == 7
+    assert f["filename"] == "img.png"
+    assert f["data"] == PNG
+    assert f["caption"] == f"#{d['t']['number']} working — img.png"
+
+
+def test_attachment_by_task_title(store):
+    d = seed_task_view(store)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    message_update(
+                        263, f"/attachment yask working {d['plan']['id']}"
+                    )
+                ]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent == []
+    assert len(script.sent_files) == 1
+    assert script.sent_files[0]["filename"] == "plan.md"
+    assert script.sent_files[0]["data"] == d["plan_bytes"]
+
+
+def test_attachment_usage_and_not_found_texts(store):
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    meta = store.add_attachment(
+        pid, t["number"], "a.md", "text/markdown", b"a"
+    )
+    # no argument
+    script = run_bot_until_stop(
+        Script([[message_update(264, "/attachment")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == telegram_bot.ATTACHMENT_USAGE_TEXT
+    # a project with no task reference after it
+    script = run_bot_until_stop(
+        Script([[message_update(265, "/attachment yask")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == telegram_bot.ATTACHMENT_USAGE_TEXT
+    # unknown task
+    script = run_bot_until_stop(
+        Script([[message_update(266, f"/attachment yask 99 {meta['id']}")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == "Task #99 not found in yask."
+    # unknown project (name and id)
+    script = run_bot_until_stop(
+        Script([[message_update(267, "/attachment nope 1 1")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Project 'nope' not found. Use /projects to list projects."
+    )
+    script = run_bot_until_stop(
+        Script([[message_update(268, "/attachment 999 1 1")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Project '999' not found. Use /projects to list projects."
+    )
+    assert script.sent_files == []
+
+
+def test_attachment_foreign_id_not_found(store):
+    pid = store.create_project("yask")["id"]
+    a = store.create_task(pid, "a")
+    b = store.create_task(pid, "b")
+    meta = store.add_attachment(pid, a["number"], "a.md", "text/markdown", b"a")
+    script = run_bot_until_stop(
+        Script(
+            [[message_update(269, f"/attachment yask {b['number']} {meta['id']}")]],
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent_files == []
+    assert script.sent[0]["text"] == (
+        f"Attachment {meta['id']} not found on task #{b['number']} (yask). "
+        f"Use /task yask {b['number']} to list the task's attachments."
+    )
+
+
+def test_attachment_store_failure_replies_and_recovers(store, monkeypatch):
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    store.add_attachment(pid, t["number"], "a.md", "text/markdown", b"a")
+
+    def boom(project_id, number, attachment_id):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "get_task_attachment", boom)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    message_update(270, f"/attachment yask {t['number']} 1"),
+                    message_update(271, "/start"),
+                ]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 2
+    assert script.sent[0]["text"] == telegram_bot.ATTACHMENT_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+    assert script.sent_files == []
 
 
 # --- /subscribe, /unsubscribe (store-backed dispatch) ------------------------

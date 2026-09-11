@@ -209,6 +209,27 @@ class Store:
             for r in rows
         ]
 
+    def find_tasks_by_title(self, project_id: int, title: str) -> list[dict]:
+        """Exact, case-insensitive task-title lookup (the bot's ``/task`` view).
+
+        Returns lean ``{"number", "title", "state"}`` dicts for every visible
+        task of ``project_id`` whose title matches ``title`` (case-insensitive),
+        in number order. Archived tasks are excluded — a title search only
+        reaches the visible board; an explicit number lookup still finds
+        archived tasks. Raises ``NotFound`` for an unknown project id.
+        """
+        self._get_project(project_id)
+        rows = self.conn.execute(
+            "SELECT number, title, state FROM tasks "
+            "WHERE project_id = ? AND state != ? AND title = ? COLLATE NOCASE "
+            "ORDER BY number",
+            (project_id, db.ARCHIVED_STATE, title),
+        ).fetchall()
+        return [
+            {"number": r["number"], "title": r["title"], "state": r["state"]}
+            for r in rows
+        ]
+
     def create_project(self, name: str) -> dict:
         name = (name or "").strip()
         if not name:
@@ -1187,6 +1208,34 @@ class Store:
         ).fetchone()
         if a is None:
             raise NotFound(f"attachment {attachment_id} not found")
+        return (
+            {
+                "filename": a["filename"],
+                "content_type": a["content_type"],
+                "size": len(a["data"]),
+                "created_at": a["created_at"],
+            },
+            bytes(a["data"]),
+        )
+
+    def get_task_attachment(
+        self, project_id: int, number: int, attachment_id: int
+    ) -> tuple[dict, bytes]:
+        """One attachment of one task, scoped to that task (the bot's
+        ``/attachment`` command).
+
+        Returns the same meta shape as :meth:`get_attachment` plus the
+        bytes. Raises ``NotFound`` when the task or the attachment does not
+        exist, or when the attachment belongs to a different task — a
+        copied or typo'd id can never leak a foreign attachment.
+        """
+        row = self._get_task(project_id, number)
+        a = self.conn.execute(
+            "SELECT * FROM attachments WHERE id = ? AND task_id = ?",
+            (attachment_id, row["id"]),
+        ).fetchone()
+        if a is None:
+            raise NotFound(f"attachment {attachment_id} not found on task #{number}")
         return (
             {
                 "filename": a["filename"],

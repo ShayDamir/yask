@@ -4,9 +4,14 @@ Run via ``yask telegram``: validates the bot token (``TELEGRAM_BOT_TOKEN``)
 with ``getMe``, opens the yask store, then long-polls the Bot API with
 ``getUpdates`` and answers incoming messages. Today the bot answers
 ``/start``, ``/help``, ``/projects`` (the project list with per-state task
-counts) and ``/tasks`` (the tasks in the active states — Todo, Planning,
-In progress and Review — grouped by project and state); all board reads go
-through the store. A chat can ``/subscribe <project>`` to receive task
+counts), ``/tasks`` (the tasks in the active states — Todo, Planning,
+In progress and Review — grouped by project and state),
+``/task <project> <number|title>`` (one task's details — state, estimate,
+description, prerequisites, attachments and recent history — the task
+found by number or by case-insensitive title) and ``/attachment
+<project> <task> <id>`` (sends one of the task's attachments to the chat
+as a file, via ``sendDocument``/``sendPhoto``); all board reads go through
+the store. A chat can ``/subscribe <project>`` to receive task
 state-change notifications for that project (``/unsubscribe <project>`` to
 stop; subscriptions are per chat, per project, and persist in the same
 SQLite database). While the bot runs, the :class:`Notifier` polls
@@ -26,13 +31,14 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import httpx
 
 from . import db
-from .store import Store
+from .store import NotFound, Store
 
 # Bot API base URL. Overridable for tests/future (no env override needed now).
 DEFAULT_BASE_URL = "https://api.telegram.org"
@@ -56,6 +62,8 @@ HELP_TEXT = (
     "/help — this help\n"
     "/projects — list of projects with per-state task counts\n"
     "/tasks [project] — tasks in Todo, Planning, In progress and Review\n"
+    "/task <project> <number|title> — task details (state, description, prereqs, attachments, history)\n"
+    "/attachment <project> <task> <id> — send me a task's attachment as a file\n"
     "/subscribe [project] — subscribe to task state-change notifications\n"
     "/unsubscribe [project] — stop notifications for a project\n\n"
     "I read the yask board that this process was started with\n"
@@ -67,6 +75,8 @@ UNKNOWN_HINT = "I don't understand that. Try /help to see what I can do."
 # Store-backed command failed: reply, don't crash the poll loop.
 PROJECTS_ERROR_TEXT = "I could not read the board right now. Please try again."
 TASKS_ERROR_TEXT = "I could not read the board right now. Please try again."
+TASK_ERROR_TEXT = "I could not read the board right now. Please try again."
+ATTACHMENT_ERROR_TEXT = "I could not read the board right now. Please try again."
 SUBSCRIBE_ERROR_TEXT = (
     "I could not change your subscription right now. Please try again."
 )
@@ -74,10 +84,28 @@ UNSUBSCRIBE_ERROR_TEXT = (
     "I could not change your subscription right now. Please try again."
 )
 
+TASK_USAGE_TEXT = (
+    "Usage: /task <project> <number|title>\n"
+    "Shows one task's details: state, estimate, description, prerequisites,\n"
+    "attachments and recent history.\n"
+    "Example: /task yask 4 or /task yask fix the bug"
+)
+
+ATTACHMENT_USAGE_TEXT = (
+    "Usage: /attachment <project> <task> <attachment-id>\n"
+    "Sends one of the task's attachments to this chat as a file.\n"
+    "List a task's attachments with /task <project> <number|title>."
+)
+
+# Telegram caps a message at 4096 chars; the task view stays well under it
+# by capping the description and the visible history.
+DESCRIPTION_MAX = 2500
+HISTORY_MAX = 10
+
 # Static command table. Store-backed commands (today: /projects, /tasks,
-# /subscribe, /unsubscribe) live in make_dispatch; state-change
-# notifications are pushed by the Notifier on every poll cycle. Later
-# features (task detail) extend the dispatch layer without changing the
+# /task, /attachment, /subscribe, /unsubscribe) live in make_dispatch;
+# state-change notifications are pushed by the Notifier on every poll
+# cycle. Later features extend the dispatch layer without changing the
 # poll loop.
 COMMANDS: dict[str, str] = {
     "/start": START_TEXT,
@@ -152,6 +180,21 @@ def project_view(store: Store) -> str:
     return "\n".join(lines)
 
 
+def _arg_words(text: Optional[str]) -> Optional[list[str]]:
+    """Argument words for a command: everything after the first word.
+
+    The words following the leading command token (any ``@botname`` mention
+    is part of that token and discarded), or ``None`` when the message has
+    no arguments: not a string, blank, or just the command itself.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    words = text.strip().split()
+    if len(words) < 2:
+        return None
+    return words[1:]
+
+
 def _tasks_arg(text: Optional[str]) -> Optional[str]:
     """Argument words for ``/tasks``: everything after the command token.
 
@@ -159,12 +202,38 @@ def _tasks_arg(text: Optional[str]) -> Optional[str]:
     work; returns ``None`` when the message is just the command. The command
     token (and any ``@botname`` mention) is discarded.
     """
-    if not isinstance(text, str) or not text.strip():
+    words = _arg_words(text)
+    if words is None:
         return None
-    words = text.strip().split()
-    if len(words) < 2:
-        return None
-    return " ".join(words[1:])
+    return " ".join(words)
+
+
+def _split_project(
+    store: Store, words: list[str]
+) -> tuple[Optional[dict], list[str]]:
+    """Split argument words into a project reference and the rest.
+
+    Walks the words longest-prefix first and resolves each prefix as a
+    project (case-insensitive name, then integer id — the same rules as
+    ``/tasks``); the longest prefix that resolves wins, and everything after
+    it is the remaining argument words. When no prefix resolves, the first
+    word is kept as the failed reference so the not-found reply can quote
+    it: ``(None, [words[0]])``.
+    """
+    for i in range(len(words), 0, -1):
+        project = _resolve_project(store, " ".join(words[:i]))
+        if project is not None:
+            return project, words[i:]
+    return None, [words[0]]
+
+
+def _human_size(n: int) -> str:
+    """A byte count in B/KB/MB (one decimal from KB up)."""
+    if n < 1024:
+        return f"{n} B"
+    if n < 1024 * 1024:
+        return f"{n / 1024:.1f} KB"
+    return f"{n / 1024 / 1024:.1f} MB"
 
 
 def _resolve_project(store: Store, arg: str) -> Optional[dict]:
@@ -234,6 +303,179 @@ def tasks_view(store: Store, project_arg: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class FileReply:
+    """A reply that is a file, not a text message.
+
+    ``run_bot`` sends it to the chat as a photo (``image/*`` content types)
+    or a document, with ``caption`` riding along; the dispatch layer never
+    touches the Bot API itself.
+    """
+
+    filename: str
+    data: bytes
+    content_type: str
+    caption: str
+
+    @property
+    def is_image(self) -> bool:
+        return self.content_type.startswith("image/")
+
+
+def format_task_view(task: dict, project: dict, history: list[dict]) -> str:
+    """The ``/task`` detail reply for one task.
+
+    A header line in the ``/tasks`` task-line style (``#n title — type``),
+    then the sections that have data: state, estimate (``%g``), parent,
+    description (truncated at :data:`DESCRIPTION_MAX` with a total-length
+    note), prerequisites, attachments (each with its ``/attachment``
+    drill-down reference) and the most recent :data:`HISTORY_MAX` history
+    rows (with an earlier-count note). Creation rows (``from_state`` is
+    NULL) render as ``created``.
+    """
+    lines = [f"#{task['number']} {task['title']} — {task['type']}"]
+    lines.append(f"State: {task['state']}")
+    if task["estimate"] is not None:
+        lines.append(f"Estimate: {task['estimate']:g}")
+    if task["parent_number"] is not None:
+        lines.append(f"Parent: #{task['parent_number']}")
+    description = task["description"] or ""
+    if description.strip():
+        lines.append("Description:")
+        if len(description) > DESCRIPTION_MAX:
+            description = (
+                f"{description[:DESCRIPTION_MAX]}"
+                f"… (truncated, {len(task['description'])} chars total)"
+            )
+        lines.append(description)
+    if task["prerequisites"]:
+        lines.append("Prerequisites:")
+        for p in task["prerequisites"]:
+            lines.append(f"  #{p['number']} {p['title']} — {p['state']}")
+    if task["attachments"]:
+        lines.append("Attachments:")
+        for a in task["attachments"]:
+            lines.append(
+                f"  {a['id']}. {a['filename']} ({_human_size(a['size'])}) — "
+                f"/attachment {project['name']} {task['number']} {a['id']}"
+            )
+    if history:
+        lines.append("History:")
+        if len(history) > HISTORY_MAX:
+            lines.append(f"  … {len(history) - HISTORY_MAX} earlier transitions")
+        for h in history[-HISTORY_MAX:]:
+            if h["from_state"] is None:
+                lines.append(f"  {h['changed_at']} — created ({h['source']})")
+            else:
+                lines.append(
+                    f"  {h['changed_at']} — {h['from_state']} → {h['to_state']} "
+                    f"({h['source']})"
+                )
+    return "\n".join(lines)
+
+
+def _resolve_task(store: Store, project: dict, ref: str) -> Union[str, dict]:
+    """Resolve a task reference of ``project``: number first, then title.
+
+    An all-digit reference looks up the task number first (a real number
+    always wins); when no such task exists it falls back to the title
+    search, so a task literally titled "2024" is still findable. Otherwise
+    the reference is an exact, case-insensitive title match (archived tasks
+    excluded): zero matches is a not-found reply, several matches a
+    disambiguation list with numbers, one match the task itself. Returns
+    the serialized task dict or a ready-to-send reply string.
+    """
+    if ref.isdigit():
+        try:
+            return store.get_task(project["id"], int(ref))
+        except NotFound:
+            pass  # the task may be titled with digits
+    matches = store.find_tasks_by_title(project["id"], ref)
+    if not matches:
+        if ref.isdigit():
+            return f"Task #{ref} not found in {project['name']}."
+        return f"Task '{ref}' not found in {project['name']}."
+    if len(matches) > 1:
+        lines = [f"Several tasks in {project['name']} match '{ref}':"]
+        lines.extend(f"  #{m['number']} {m['title']} — {m['state']}" for m in matches)
+        lines.append(f"Use /task {project['name']} <number>.")
+        return "\n".join(lines)
+    return store.get_task(project["id"], matches[0]["number"])
+
+
+def task_view(store: Store, arg: Optional[str]) -> str:
+    """Format the ``/task <project> <number|title>`` reply.
+
+    The argument mixes a project reference and a task reference, either of
+    which may contain spaces; :func:`_split_project` resolves the longest
+    project prefix, the rest is the task (number or case-insensitive
+    title). No argument, or no task reference after the project, gets the
+    usage text; an unresolvable project gets the not-found reply pointing
+    at ``/projects``.
+    """
+    if arg is None or not arg.strip():
+        return TASK_USAGE_TEXT
+    words = arg.split()
+    project, rest = _split_project(store, words)
+    if project is None:
+        return (
+            f"Project '{words[0]}' not found. Use /projects to list projects."
+        )
+    if not rest:
+        return TASK_USAGE_TEXT
+    task = _resolve_task(store, project, " ".join(rest))
+    if not isinstance(task, dict):
+        return task
+    history = store.get_history(project["id"], task["number"])
+    return format_task_view(task, project, history)
+
+
+def attachment_view(store: Store, arg: Optional[str]) -> Union[str, FileReply]:
+    """Resolve ``/attachment <project> <task> <attachment-id>``.
+
+    Project by longest prefix, task by number or title (a disambiguation
+    list when the title is ambiguous — never a file send), then the
+    attachment id (the last word) is looked up scoped to that task. Returns
+    a :class:`FileReply` to send as a file, or a usage / not-found text.
+    """
+    if arg is None or not arg.strip():
+        return ATTACHMENT_USAGE_TEXT
+    words = arg.split()
+    project, rest = _split_project(store, words)
+    if project is None:
+        return (
+            f"Project '{words[0]}' not found. Use /projects to list projects."
+        )
+    if len(rest) < 2:
+        return ATTACHMENT_USAGE_TEXT
+    id_ref, task_ref = rest[-1], " ".join(rest[:-1])
+    task = _resolve_task(store, project, task_ref)
+    if not isinstance(task, dict):
+        return task
+    if not id_ref.isdigit():
+        return (
+            f"Attachment '{id_ref}' not found on task #{task['number']} "
+            f"({project['name']}). Use /task {project['name']} {task['number']} "
+            "to list the task's attachments."
+        )
+    try:
+        meta, data = store.get_task_attachment(
+            project["id"], task["number"], int(id_ref)
+        )
+    except NotFound:
+        return (
+            f"Attachment {id_ref} not found on task #{task['number']} "
+            f"({project['name']}). Use /task {project['name']} {task['number']} "
+            "to list the task's attachments."
+        )
+    return FileReply(
+        filename=meta["filename"],
+        data=data,
+        content_type=meta["content_type"],
+        caption=f"#{task['number']} {task['title']} — {meta['filename']}",
+    )
+
+
 def subscribe_view(store: Store, chat_id: int, arg: Optional[str] = None) -> str:
     """Format the ``/subscribe [project]`` reply.
 
@@ -284,8 +526,8 @@ def format_notification(change: dict) -> str:
 
     ``{project_name}: #{number} {title} — {from_state} → {to_state}
     (/task {project_id} {number})``. The trailing ``/task`` reference
-    follows the ``/tasks`` drill-down convention and will work once the
-    task-view command lands.
+    follows the ``/tasks`` drill-down convention and is answered by the
+    ``/task`` command.
     """
     return (
         f"{change['project_name']}: #{change['number']} {change['title']} — "
@@ -294,18 +536,22 @@ def format_notification(change: dict) -> str:
     )
 
 
-def make_dispatch(store: Store) -> Callable[..., Optional[str]]:
+def make_dispatch(store: Store) -> Callable[..., Optional[Union[str, FileReply]]]:
     """Build the message→reply dispatcher for a bot bound to ``store``.
 
-    Store-backed commands (today: ``/projects``, ``/tasks``,
-    ``/subscribe``, ``/unsubscribe``) read or mutate the board through
-    ``store``; the subscription commands additionally need the sender's
-    chat id, hence ``dispatch(text, chat_id)``. Everything else falls back
-    to the static :func:`reply_for`. A failure reading or writing the store
+    Store-backed commands (today: ``/projects``, ``/tasks``, ``/task``,
+    ``/attachment``, ``/subscribe``, ``/unsubscribe``) read the board
+    through ``store``; the subscription commands additionally need the
+    sender's chat id, hence ``dispatch(text, chat_id)``. Everything else
+    falls back to the static :func:`reply_for`. A failure reading the store
     yields a short error reply instead of crashing the long-poll loop.
+    ``/task`` and ``/attachment`` resolve to a text reply or a
+    :class:`FileReply` (the attachment bytes for a file send).
     """
 
-    def dispatch(text: Optional[str], chat_id: Optional[int] = None) -> Optional[str]:
+    def dispatch(
+        text: Optional[str], chat_id: Optional[int] = None
+    ) -> Optional[Union[str, FileReply]]:
         cmd = _command_token(text)
         if cmd == "/projects":
             try:
@@ -317,6 +563,16 @@ def make_dispatch(store: Store) -> Callable[..., Optional[str]]:
                 return tasks_view(store, _tasks_arg(text))
             except Exception:
                 return TASKS_ERROR_TEXT
+        if cmd == "/task":
+            try:
+                return task_view(store, _tasks_arg(text))
+            except Exception:
+                return TASK_ERROR_TEXT
+        if cmd == "/attachment":
+            try:
+                return attachment_view(store, _tasks_arg(text))
+            except Exception:
+                return ATTACHMENT_ERROR_TEXT
         if cmd == "/subscribe":
             if chat_id is None:
                 return SUBSCRIBE_ERROR_TEXT
@@ -337,7 +593,8 @@ def make_dispatch(store: Store) -> Callable[..., Optional[str]]:
 
 
 class BotAPI:
-    """Minimal Telegram Bot API client: getMe, getUpdates, sendMessage.
+    """Minimal Telegram Bot API client: getMe, getUpdates, sendMessage,
+    sendDocument, sendPhoto.
 
     Accepts an ``httpx.AsyncClient`` for tests (e.g. with
     ``httpx.MockTransport``); production uses a default client that
@@ -358,10 +615,37 @@ class BotAPI:
     async def _call(self, method: str, **params: Any) -> Any:
         url = f"{self._base_url}/bot{self._token}/{method}"
         try:
-            response = await self._post(url, params)
-            data = response.json()
+            response = await self._post(url, json=params)
         except httpx.HTTPError as exc:
             raise BotAPIError(f"telegram request failed: {exc}") from exc
+        return self._parse(response)
+
+    async def _call_multipart(
+        self,
+        method: str,
+        fields: dict,
+        file_field: str,
+        filename: str,
+        data: bytes,
+        content_type: str,
+    ) -> Any:
+        url = f"{self._base_url}/bot{self._token}/{method}"
+        files = {file_field: (filename, data, content_type)}
+        try:
+            response = await self._post(url, fields=fields, files=files)
+        except httpx.HTTPError as exc:
+            raise BotAPIError(f"telegram request failed: {exc}") from exc
+        return self._parse(response)
+
+    @staticmethod
+    def _parse(response: httpx.Response) -> Any:
+        """Extract ``result`` from a Bot API response body.
+
+        Raises :class:`BotAPIError` on a non-JSON body or an ``ok:false``
+        payload (with the API error code when present).
+        """
+        try:
+            data = response.json()
         except ValueError as exc:
             raise BotAPIError(
                 f"telegram returned a non-JSON response (HTTP {response.status_code})"
@@ -373,12 +657,18 @@ class BotAPI:
             )
         return data.get("result")
 
-    async def _post(self, url: str, params: dict) -> httpx.Response:
-        response = await self._client.post(url, json=params)
+    async def _post(
+        self,
+        url: str,
+        json: Optional[dict] = None,
+        fields: Optional[dict] = None,
+        files: Optional[dict] = None,
+    ) -> httpx.Response:
+        response = await self._client.post(url, json=json, data=fields, files=files)
         if response.status_code == 429:
             # Rate limited: back off as requested (capped) and retry once.
             await asyncio.sleep(self._retry_after(response))
-            response = await self._client.post(url, json=params)
+            response = await self._client.post(url, json=json, data=fields, files=files)
         return response
 
     @staticmethod
@@ -404,6 +694,38 @@ class BotAPI:
 
     async def send_message(self, chat_id: int, text: str) -> dict:
         result = await self._call("sendMessage", chat_id=chat_id, text=text)
+        return result if isinstance(result, dict) else {}
+
+    async def send_document(
+        self,
+        chat_id: int,
+        filename: str,
+        data: bytes,
+        content_type: str,
+        caption: Optional[str] = None,
+    ) -> dict:
+        fields: dict[str, Any] = {"chat_id": chat_id}
+        if caption:
+            fields["caption"] = caption
+        result = await self._call_multipart(
+            "sendDocument", fields, "document", filename, data, content_type
+        )
+        return result if isinstance(result, dict) else {}
+
+    async def send_photo(
+        self,
+        chat_id: int,
+        filename: str,
+        data: bytes,
+        content_type: str,
+        caption: Optional[str] = None,
+    ) -> dict:
+        fields: dict[str, Any] = {"chat_id": chat_id}
+        if caption:
+            fields["caption"] = caption
+        result = await self._call_multipart(
+            "sendPhoto", fields, "photo", filename, data, content_type
+        )
         return result if isinstance(result, dict) else {}
 
     async def aclose(self) -> None:
@@ -445,7 +767,7 @@ class Notifier:
 
 async def run_bot(
     api: BotAPI,
-    dispatch: Callable[..., Optional[str]],
+    dispatch: Callable[..., Optional[Union[str, FileReply]]],
     stop_event: Optional[asyncio.Event] = None,
     poll_timeout: int = POLL_TIMEOUT,
     error_delay: float = 1.0,
@@ -454,12 +776,15 @@ async def run_bot(
     """Long-poll ``getUpdates`` and dispatch message handlers until stopped.
 
     The offset advances to ``update_id + 1`` after each processed update.
-    Transient :class:`BotAPIError` failures are logged and retried after
-    ``error_delay``; they never stop the loop. After each successful
-    ``getUpdates`` batch, ``on_cycle`` (the state-change notifier) runs;
-    its failures — Bot API or store — are logged to stderr and retried on
-    the next cycle, and on a failed poll it is skipped entirely. Returns
-    when ``stop_event`` is set.
+    A string reply is sent with ``sendMessage``; a :class:`FileReply` is
+    sent with ``sendPhoto`` (image content types) or ``sendDocument``, so
+    failed file sends are caught by the same error handling as failed
+    messages. Transient :class:`BotAPIError` failures are logged and
+    retried after ``error_delay``; they never stop the loop. After each
+    successful ``getUpdates`` batch, ``on_cycle`` (the state-change
+    notifier) runs; its failures — Bot API or store — are logged to stderr
+    and retried on the next cycle, and on a failed poll it is skipped
+    entirely. Returns when ``stop_event`` is set.
     """
     offset: Optional[int] = None
     while True:
@@ -481,7 +806,25 @@ async def run_bot(
                     chat = message.get("chat") or {}
                     reply = dispatch(message.get("text"), chat.get("id"))
                     if reply is not None and "id" in chat:
-                        await api.send_message(chat["id"], reply)
+                        if isinstance(reply, FileReply):
+                            if reply.is_image:
+                                await api.send_photo(
+                                    chat["id"],
+                                    reply.filename,
+                                    reply.data,
+                                    reply.content_type,
+                                    reply.caption,
+                                )
+                            else:
+                                await api.send_document(
+                                    chat["id"],
+                                    reply.filename,
+                                    reply.data,
+                                    reply.content_type,
+                                    reply.caption,
+                                )
+                        else:
+                            await api.send_message(chat["id"], reply)
             except BotAPIError as exc:
                 print(f"yask: telegram dispatch failed: {exc}", file=sys.stderr)
                 await asyncio.sleep(error_delay)

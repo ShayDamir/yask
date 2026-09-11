@@ -260,6 +260,68 @@ def test_list_in_progress_unknown_project(store):
         store.list_in_progress(999)
 
 
+def test_find_tasks_by_title_case_insensitive_and_number_order(store):
+    pid = store.create_project("yask")["id"]
+    a = store.create_task(pid, "Fix the bug")
+    store.move_task(pid, a["number"], "Todo", confirm=True)
+    store.create_task(pid, "other")
+    c = store.create_task(pid, "fix the BUG")
+    out = store.find_tasks_by_title(pid, "fIx tHe BuG")
+    assert out == [
+        {"number": a["number"], "title": "Fix the bug", "state": "Todo"},
+        {"number": c["number"], "title": "fix the BUG", "state": "Backlog"},
+    ]
+
+
+def test_find_tasks_by_title_archived_excluded_and_isolated(store):
+    a = store.create_project("alpha")["id"]
+    b = store.create_project("beta")["id"]
+    visible = store.create_task(a, "shared")
+    gone = store.create_task(a, "shared")
+    store.archive_task(a, gone["number"], confirm=True)
+    other = store.create_task(b, "shared")
+    # archived excluded; beta's same-title task does not leak
+    assert store.find_tasks_by_title(a, "shared") == [
+        {"number": visible["number"], "title": "shared", "state": "Backlog"}
+    ]
+    assert store.find_tasks_by_title(b, "shared") == [
+        {"number": other["number"], "title": "shared", "state": "Backlog"}
+    ]
+
+
+def test_find_tasks_by_title_no_match_and_unknown_project(store, project):
+    store.create_task(project["id"], "something else")
+    assert store.find_tasks_by_title(project["id"], "missing") == []
+    with pytest.raises(NotFound):
+        store.find_tasks_by_title(999, "missing")
+
+
+def test_get_task_attachment_meta_and_bytes(store, project):
+    pid = project["id"]
+    t = store.create_task(pid, "t")
+    meta = store.add_attachment(
+        pid, t["number"], "plan.md", "text/markdown", b"# Plan"
+    )
+    got, data = store.get_task_attachment(pid, t["number"], meta["id"])
+    assert data == b"# Plan"
+    base, _ = store.get_attachment(meta["id"])
+    assert got == base
+
+
+def test_get_task_attachment_scoped_to_task(store):
+    a = store.create_project("alpha")["id"]
+    b = store.create_project("beta")["id"]
+    ta = store.create_task(a, "a")
+    tb = store.create_task(b, "b")
+    meta = store.add_attachment(a, ta["number"], "a.md", "text/markdown", b"a")
+    # an id belonging to a different task is not found
+    with pytest.raises(NotFound):
+        store.get_task_attachment(b, tb["number"], meta["id"])
+    # unknown ids are not found
+    with pytest.raises(NotFound):
+        store.get_task_attachment(b, tb["number"], 999)
+
+
 # --- telegram subscriptions ---------------------------------------------------
 
 

@@ -100,9 +100,13 @@ yask telegram --data DIR    # or: YASK_DATA=DIR yask telegram
 
 Runs the bot as a separate process: long-polls the Bot API with the token
 from `TELEGRAM_BOT_TOKEN` (get one from @BotFather) and answers `/start`,
-`/help`, `/projects` (the list of projects with their per-state task counts)
-and `/tasks [project]` (the tasks in the active states — Todo, Planning,
-In progress and Review — grouped by project and state). A chat can
+`/help`, `/projects` (the list of projects with their per-state task counts),
+`/tasks [project]` (the tasks in the active states — Todo, Planning,
+In progress and Review — grouped by project and state), `/task
+<project> <number|title>` (one task's details — state, estimate,
+description, prerequisites, attachments and recent history — the task
+found by number or by title) and `/attachment <project> <task> <id>`
+(sends a task's attachment to the chat as a file). A chat can
 `/subscribe [project]` to receive notifications about every task state
 change in that project, and `/unsubscribe [project]` to stop them —
 subscriptions are per chat and per project and persist across restarts; the
