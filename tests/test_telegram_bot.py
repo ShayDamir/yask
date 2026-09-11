@@ -6,6 +6,7 @@ never called.
 
 import asyncio
 import json
+import time
 
 import httpx
 import pytest
@@ -299,6 +300,62 @@ def test_run_bot_preset_stop_returns_without_polling():
     asyncio.run(telegram_bot.run_bot(api, dispatch, stop_event=stop))
     assert script.offsets == []  # no getUpdates after the flag was set
     assert script.sent == []
+
+
+def test_stop_event_interrupts_in_flight_poll():
+    """A set stop_event ends the bot mid long-poll, not after it returns.
+
+    The mock getUpdates handler holds the request (a 60s server-side poll
+    hold), so without the fix run_bot stays inside the in-flight poll until
+    the handler unwinds. The stop event is set while the poll is in flight;
+    the bot task must end within 10s (the unfixed code hangs until the
+    60s hold expires, and the fixed one returns in milliseconds).
+    """
+    poll_in_flight = asyncio.Event()
+    seen = []
+
+    async def handler(request):
+        method = request.url.path.rsplit("/", 1)[-1]
+        seen.append(method)
+        if method == "getUpdates":
+            poll_in_flight.set()
+            await asyncio.sleep(60)  # the server-side long-poll hold
+            return httpx.Response(200, json={"ok": True, "result": []})
+        raise AssertionError(f"unexpected Bot API method: {method}")
+
+    client = make_client(handler)
+    api = telegram_bot.BotAPI(BOT_TOKEN, client=client)
+    stop = asyncio.Event()
+
+    def dispatch(text, chat_id=None):
+        return telegram_bot.reply_for(text)
+
+    async def go():
+        bot_task = asyncio.ensure_future(
+            telegram_bot.run_bot(
+                api, dispatch, stop_event=stop, poll_timeout=30
+            )
+        )
+        try:
+            await poll_in_flight.wait()
+            t0 = time.monotonic()
+            stop.set()
+            await asyncio.wait_for(bot_task, timeout=10)
+            return time.monotonic() - t0
+        finally:
+            if not bot_task.done():
+                bot_task.cancel()
+                try:
+                    await bot_task
+                except asyncio.CancelledError:
+                    pass
+            await client.aclose()
+
+    elapsed = asyncio.run(go())
+    assert elapsed < 5
+    # exactly one getUpdates was issued and nothing was sent (no replies,
+    # no notifications)
+    assert seen == ["getUpdates"]
 
 
 def test_poll_429_backs_off_and_recovers():

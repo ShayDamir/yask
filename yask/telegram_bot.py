@@ -29,6 +29,7 @@ never call real Telegram.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import signal
 import sys
 from dataclasses import dataclass
@@ -784,14 +785,36 @@ async def run_bot(
     successful ``getUpdates`` batch, ``on_cycle`` (the state-change
     notifier) runs; its failures — Bot API or store — are logged to stderr
     and retried on the next cycle, and on a failed poll it is skipped
-    entirely. Returns when ``stop_event`` is set.
+    entirely. Returns when ``stop_event`` is set; a set ``stop_event``
+    interrupts an in-flight ``getUpdates`` — the poll request is cancelled
+    and the loop returns immediately instead of waiting for the long poll
+    to come back — and a cancelled poll does not advance the offset.
     """
     offset: Optional[int] = None
     while True:
         if stop_event is not None and stop_event.is_set():
             return
+        poll = asyncio.ensure_future(
+            api.get_updates(offset=offset, timeout=poll_timeout)
+        )
+        stop_wait = (
+            asyncio.ensure_future(stop_event.wait()) if stop_event is not None else None
+        )
         try:
-            updates = await api.get_updates(offset=offset, timeout=poll_timeout)
+            await asyncio.wait(
+                {poll, stop_wait} if stop_wait is not None else {poll},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for task in (poll, stop_wait):
+                if task is not None and not task.done():
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+        if poll.cancelled():
+            return  # stop event fired while the poll was in flight
+        try:
+            updates = poll.result()
         except BotAPIError as exc:
             print(f"yask: telegram poll failed: {exc}", file=sys.stderr)
             if stop_event is not None and stop_event.is_set():
