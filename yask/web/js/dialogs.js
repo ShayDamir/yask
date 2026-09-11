@@ -706,3 +706,158 @@ export function openEditorModal(project, task, actions) {
   setTimeout(() => titleInput.focus(), 0);
   return modal;
 }
+
+// -- telegram users (the bot's password allowlist) ------------------------------
+
+export function openTelegramUsersModal() {
+  const listEl = h("div", { class: "tg-user-list" });
+  const render = async () => {
+    clear(listEl);
+    let users;
+    try {
+      users = await api.listTelegramUsers();
+    } catch (err) {
+      listEl.append(
+        h("span", { style: "color:var(--text-dim)" }, `Could not load users: ${err.message}`)
+      );
+      return;
+    }
+    if (!users.length) {
+      listEl.append(
+        h("span", { style: "color:var(--text-dim);font-size:max(12px,var(--min-font))" },
+          "No users yet. Add one below.")
+      );
+      return;
+    }
+    for (const u of users) {
+      // inline password rotation (mirrors the label-color pattern): the
+      // field is empty until a new password is typed; passwords are only
+      // ever sent, never displayed (the API never returns them).
+      const pwInput = h("input", {
+        type: "password",
+        placeholder: "new password",
+        autocomplete: "new-password",
+      });
+      const saveBtn = h("button", { class: "btn ghost", type: "button" }, "Save");
+      saveBtn.addEventListener("click", async () => {
+        const pw = pwInput.value;
+        if (!pw) {
+          toast("Enter a new password", "info");
+          return;
+        }
+        saveBtn.disabled = true;
+        try {
+          await api.setTelegramUserPassword(u.chat_id, pw);
+          pwInput.value = "";
+          toast(`Password updated for chat ${u.chat_id}`, "success");
+          render();
+        } catch (err) {
+          toastError(err);
+        } finally {
+          saveBtn.disabled = false;
+        }
+      });
+      const delBtn = h("button", {
+        class: "btn ghost tg-del",
+        type: "button",
+        title: `Remove Telegram user ${u.chat_id}`,
+        "aria-label": `Remove Telegram user ${u.chat_id}`,
+      }, "✕");
+      delBtn.addEventListener("click", async () => {
+        const ok = await confirmDialog({
+          title: `Remove Telegram user ${u.chat_id}?`,
+          message: "This chat loses bot access immediately.",
+          confirmLabel: "Remove",
+          danger: true,
+        });
+        if (!ok) return;
+        try {
+          await api.removeTelegramUser(u.chat_id);
+          toast(`Removed chat ${u.chat_id}`, "success");
+          render();
+        } catch (err) {
+          toastError(err);
+        }
+      });
+      listEl.append(
+        h(
+          "div",
+          { class: "tg-user-row" },
+          h("span", { class: "tg-chat-id" }, String(u.chat_id)),
+          h("span", { class: "tg-ts" },
+            `added ${fmtTime(u.created_at)} · updated ${fmtTime(u.updated_at)}`),
+          pwInput,
+          saveBtn,
+          delBtn
+        )
+      );
+    }
+  };
+  render();
+
+  const chatIdInput = h("input", {
+    type: "number",
+    id: "tg-add-chat",
+    min: "1",
+    step: "1",
+    placeholder: "chat id",
+  });
+  const addPwInput = h("input", {
+    type: "password",
+    id: "tg-add-pw",
+    placeholder: "password",
+    autocomplete: "new-password",
+  });
+  const addBtn = h("button", { class: "btn", type: "button", id: "tg-add-btn" }, "Add");
+  const add = async () => {
+    const chatId = Number(chatIdInput.value);
+    const password = addPwInput.value;
+    if (!Number.isInteger(chatId) || chatId <= 0) {
+      toast("Enter a valid chat id (a positive integer)", "info");
+      return;
+    }
+    if (!password) {
+      toast("Enter a password", "info");
+      return;
+    }
+    addBtn.disabled = true;
+    try {
+      await api.addTelegramUser(chatId, password);
+      toast(`Added chat ${chatId}`, "success");
+      chatIdInput.value = "";
+      addPwInput.value = "";
+      render();
+    } catch (err) {
+      toastError(err);
+    } finally {
+      addBtn.disabled = false;
+    }
+  };
+  addBtn.addEventListener("click", add);
+  for (const el of [chatIdInput, addPwInput]) {
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        add();
+      }
+    });
+  }
+
+  const body = h(
+    "div",
+    {},
+    h("h2", {}, "Telegram users"),
+    h("p", { class: "hint" },
+      "Permitted Telegram chats and their passwords. Find a user's chat id with the bot's /whoami command."),
+    listEl,
+    h("div", { class: "section-title" }, "Add user"),
+    h(
+      "div",
+      { class: "field-row tg-add-form" },
+      h("div", { class: "field" }, h("label", {}, "Chat id"), chatIdInput),
+      h("div", { class: "field" }, h("label", {}, "Password"), addPwInput),
+      h("div", { class: "field" }, h("label", {}, "\u00a0"), addBtn)
+    )
+  );
+  return openModal(body);
+}

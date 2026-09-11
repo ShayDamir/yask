@@ -113,6 +113,15 @@ class ProjectRolesIn(BaseModel):
     names: list[str]
 
 
+class TelegramUserIn(BaseModel):
+    chat_id: int
+    password: str
+
+
+class TelegramUserPasswordIn(BaseModel):
+    password: str
+
+
 # -- app factory -------------------------------------------------------------
 
 
@@ -332,6 +341,28 @@ def create_app(db_path: str | Path) -> FastAPI:
     @app.delete("/api/projects/{project_id}/roles/{name}")
     def api_delete_role(project_id: int, name: str):
         return handle(lambda: store().remove_project_role(project_id, name))
+
+    # -- telegram users (bot authentication allowlist)
+
+    @app.get("/api/telegram-users")
+    def api_list_telegram_users():
+        return handle(lambda: store().list_telegram_users())
+
+    @app.post("/api/telegram-users", status_code=201)
+    def api_add_telegram_user(body: TelegramUserIn):
+        return handle(
+            lambda: store().add_telegram_user(body.chat_id, body.password)
+        )
+
+    @app.put("/api/telegram-users/{chat_id}")
+    def api_set_telegram_user_password(chat_id: int, body: TelegramUserPasswordIn):
+        return handle(
+            lambda: store().set_telegram_user_password(chat_id, body.password)
+        )
+
+    @app.delete("/api/telegram-users/{chat_id}")
+    def api_remove_telegram_user(chat_id: int):
+        return handle(lambda: store().remove_telegram_user(chat_id))
 
     # -- task types
 

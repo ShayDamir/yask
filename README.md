@@ -114,6 +114,17 @@ bot detects changes by polling `state_history`, so latency is at most one
 poll interval (~30 s). More board commands are on the way. Reads the same
 data directory as the other subcommands.
 
+**Authentication.** Board commands are password-gated. Permitted users — a
+Telegram chat id plus a password, stored only as a salted scrypt hash — are
+managed in the web UI (topbar → ✈ "Telegram bot users"), not via Telegram.
+A user asks the bot `/whoami` to learn their chat id, the administrator
+enters it in the web UI with a password, and the user unlocks the board
+with `/login <password>` — for the life of the bot process (a restart logs
+every chat out). Until a chat is authenticated, the board commands and all
+inline buttons answer with an auth-required notice and no board data, and
+state-change notifications are not delivered to it; `/start`, `/help`,
+`/login` and `/whoami` stay available to everyone.
+
 ## Project layout
 
 - `yask/store.py` — all domain logic (projects, numbering, epic trees,

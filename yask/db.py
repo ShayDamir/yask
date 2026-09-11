@@ -1,8 +1,9 @@
 """SQLite schema and connection management for yask.
 
 The whole world lives in a single SQLite file. All domain state — projects,
-tasks, their types, prerequisites, state history, attachments and Telegram
-subscriptions — is stored here. Attachments are kept as BLOBs so the
+tasks, their types, prerequisites, state history, attachments, Telegram
+subscriptions and the Telegram bot's permitted-user allowlist (hashed
+passwords only) — is stored here. Attachments are kept as BLOBs so the
 database is fully self-contained.
 """
 
@@ -107,6 +108,13 @@ CREATE TABLE IF NOT EXISTS telegram_subscriptions (
 );
 CREATE INDEX IF NOT EXISTS idx_telegram_subscriptions_project
     ON telegram_subscriptions(project_id);
+
+CREATE TABLE IF NOT EXISTS telegram_users (
+    chat_id       INTEGER PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
 """
 
 # Seed task types. Epic is the single compound type.

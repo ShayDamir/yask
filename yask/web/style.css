@@ -583,6 +583,28 @@ textarea { resize: vertical; min-height: 70px; width: 100%; }
 .viewer-md a { color: var(--accent); }
 .viewer-img { max-width: 100%; border-radius: var(--radius); border: 1px solid var(--border); }
 
+/* telegram users dialog (the bot's password allowlist) */
+.tg-user-list {
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 240px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: var(--radius); padding: 8px;
+}
+.tg-user-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 4px; border-radius: 5px; font-size: max(13px, var(--min-font));
+}
+.tg-user-row:hover { background: var(--bg-hover); }
+.tg-user-row .tg-chat-id { font-weight: 600; min-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tg-user-row .tg-ts { color: var(--text-dim); font-size: max(11px, var(--min-font)); flex: 1; min-width: 0; }
+.tg-user-row input[type="password"] {
+  width: 130px; padding: 4px 8px;
+  border: 1px solid var(--border); border-radius: 5px;
+  background: var(--bg); color: var(--text); font-size: max(13px, var(--min-font));
+}
+.tg-user-row .tg-del { color: var(--danger); }
+.tg-add-form input[type="number"], .tg-add-form input[type="password"] { width: 100%; }
+.tg-add-form .field:last-child { flex: 0; }
+
 /* ---- toasts ------------------------------------------------------------------ */
 
 #toast-root {

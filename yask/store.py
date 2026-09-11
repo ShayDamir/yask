@@ -23,7 +23,10 @@ Notable domain rules (see README.md):
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
+import secrets
 import sqlite3
 from typing import Any
 
@@ -32,6 +35,56 @@ from . import db
 _UNSET = object()
 
 _HEX_RE = re.compile(r"^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+
+
+# -- password hashing (the Telegram bot's user allowlist) ----------------------
+#
+# Only the stdlib is used: scrypt with a per-user 16-byte salt. The stored
+# form carries its own parameters so verification never depends on ambient
+# defaults: ``scrypt$<n>$<r>$<p>$<salt-hex>$<hash-hex>``.
+
+
+SCRYPT_N = 2 ** 15
+SCRYPT_R = 8
+SCRYPT_P = 1
+SALT_BYTES = 16
+# OpenSSL's implicit scrypt ceiling is 32 MB, which n=2**15, r=8 sits right
+# at — pass an explicit headroom so hashing works on any build.
+SCRYPT_MAXMEM = 64 * 1024 * 1024
+
+
+def _hash_password(password: str) -> str:
+    """Salted scrypt hash of ``password`` (``scrypt$n$r$p$salt$hash``)."""
+    salt = secrets.token_bytes(SALT_BYTES)
+    digest = hashlib.scrypt(
+        password.encode("utf-8"),
+        salt=salt,
+        n=SCRYPT_N,
+        r=SCRYPT_R,
+        p=SCRYPT_P,
+        maxmem=SCRYPT_MAXMEM,
+    )
+    return f"scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}${salt.hex()}${digest.hex()}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    """Constant-time check of ``password`` against a stored hash string.
+
+    A malformed ``stored`` value (wrong shape, bad hex) is simply a mismatch.
+    """
+    parts = stored.split("$")
+    if len(parts) != 6 or parts[0] != "scrypt":
+        return False
+    try:
+        n, r, p = int(parts[1]), int(parts[2]), int(parts[3])
+        salt = bytes.fromhex(parts[4])
+        expected = bytes.fromhex(parts[5])
+        digest = hashlib.scrypt(
+            password.encode("utf-8"), salt=salt, n=n, r=r, p=p, maxmem=SCRYPT_MAXMEM
+        )
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(digest, expected)
 
 
 class YaskError(Exception):
@@ -1158,6 +1211,88 @@ class Store:
             (project_id,),
         ).fetchall()
         return [r["chat_id"] for r in rows]
+
+    # -- telegram user allowlist (bot authentication) ----------------------------------
+
+    def _get_telegram_user_row(self, chat_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM telegram_users WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+
+    def add_telegram_user(self, chat_id: int, password: str) -> dict:
+        """Permit a Telegram chat to authenticate to the bot.
+
+        ``chat_id`` must be a positive integer and ``password`` non-empty;
+        the password is stored only as a salted scrypt hash, never in plain
+        form. A chat that is already permitted is a conflict — use
+        :meth:`set_telegram_user_password` to rotate its password. The
+        returned dict never carries the hash.
+        """
+        if not isinstance(chat_id, int) or isinstance(chat_id, bool) or chat_id <= 0:
+            raise ValidationError("chat id must be a positive integer")
+        if password is None or not password.strip():
+            raise ValidationError("password must not be empty")
+        if self._get_telegram_user_row(chat_id) is not None:
+            raise Conflict(f"telegram user {chat_id} already exists")
+        now = self._now()
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO telegram_users(chat_id, password_hash, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?)",
+                (chat_id, _hash_password(password), now, now),
+            )
+        return {"chat_id": chat_id, "created_at": now, "updated_at": now}
+
+    def list_telegram_users(self) -> list[dict]:
+        """All permitted Telegram chats, in chat-id order.
+
+        The password hash is an internal secret: the serialization exposes
+        only ``chat_id``, ``created_at`` and ``updated_at``.
+        """
+        rows = self.conn.execute(
+            "SELECT chat_id, created_at, updated_at "
+            "FROM telegram_users ORDER BY chat_id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_telegram_user_password(self, chat_id: int, password: str) -> dict:
+        """Replace a permitted chat's password (re-hashed, ``updated_at`` bumped)."""
+        if password is None or not password.strip():
+            raise ValidationError("password must not be empty")
+        row = self._get_telegram_user_row(chat_id)
+        if row is None:
+            raise NotFound(f"telegram user {chat_id} not found")
+        now = self._now()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE telegram_users SET password_hash = ?, updated_at = ? "
+                "WHERE chat_id = ?",
+                (_hash_password(password), now, chat_id),
+            )
+        return {
+            "chat_id": chat_id,
+            "created_at": row["created_at"],
+            "updated_at": now,
+        }
+
+    def remove_telegram_user(self, chat_id: int) -> dict:
+        """Revoke a chat's permission to authenticate."""
+        if self._get_telegram_user_row(chat_id) is None:
+            raise NotFound(f"telegram user {chat_id} not found")
+        with self.conn:
+            self.conn.execute("DELETE FROM telegram_users WHERE chat_id = ?", (chat_id,))
+        return {"applied": True, "removed": True}
+
+    def verify_telegram_user(self, chat_id: int, password: str) -> bool:
+        """Whether ``chat_id`` is permitted and ``password`` is its password.
+
+        Returns ``False`` both for an unknown chat and for a wrong password —
+        callers (the bot) must not be able to tell the two apart.
+        """
+        row = self._get_telegram_user_row(chat_id)
+        if row is None:
+            return False
+        return _verify_password(password or "", row["password_hash"])
 
     # -- attachments --------------------------------------------------------------------
 

@@ -111,6 +111,14 @@ const api = {
     req("PUT", `/api/projects/${pid}/roles`, { names }),
   removeProjectRole: (pid, name) =>
     req("DELETE", `/api/projects/${pid}/roles/${encodeURIComponent(name)}`),
+
+  // telegram users (the bot's password allowlist)
+  listTelegramUsers: () => req("GET", "/api/telegram-users"),
+  addTelegramUser: (chatId, password) =>
+    req("POST", "/api/telegram-users", { chat_id: chatId, password }),
+  setTelegramUserPassword: (chatId, password) =>
+    req("PUT", `/api/telegram-users/${chatId}`, { password }),
+  removeTelegramUser: (chatId) => req("DELETE", `/api/telegram-users/${chatId}`),
 };
 
 export default api;

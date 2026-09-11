@@ -3,7 +3,7 @@
 import api from "./api.js";
 import { renderBoard, renderEpicBoard, renderSearchResults, renderSidebar, ARCHIVED } from "./render.js";
 import { initDnd } from "./dnd.js";
-import { openEditorModal, openNewTaskModal, confirmDialog } from "./dialogs.js";
+import { openEditorModal, openNewTaskModal, confirmDialog, openTelegramUsersModal } from "./dialogs.js";
 import { initTheme } from "./theme.js";
 import { initFontSize } from "./fontsize.js";
 import { toast, toastError } from "./toast.js";
@@ -456,6 +456,10 @@ function init() {
       toastError(err);
     }
   });
+
+  // Global dialog: the bot's permitted users are per-instance, not
+  // per-project, so the button lives in the topbar.
+  $("telegram-users").addEventListener("click", () => openTelegramUsersModal());
 
   $("new-project-form").addEventListener("submit", async (e) => {
     e.preventDefault();

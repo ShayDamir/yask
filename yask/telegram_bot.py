@@ -3,8 +3,17 @@
 Run via ``yask telegram``: validates the bot token (``TELEGRAM_BOT_TOKEN``)
 with ``getMe``, opens the yask store, then long-polls the Bot API with
 ``getUpdates`` (subscribing to messages and inline-keyboard callbacks) and
-answers incoming messages. Today the bot answers
-``/start``, ``/help``, ``/projects`` (the project list with per-state task
+answers incoming messages. Board access is password-authenticated: the
+permitted chats (a chat id plus a password, stored only as a salted hash in
+the store's ``telegram_users`` table and managed from the web UI) may
+``/login <password>`` once per bot process run (a restart logs every chat
+out); until a chat has authenticated, the board commands and every
+inline-keyboard callback answer with an auth-required notice and no board
+data, and state-change notifications are not delivered to it. The ungated
+commands are ``/start``, ``/help``, ``/login`` and ``/whoami`` (the chat's
+own id — the identifier the administrator enters in the web UI). Today the
+authenticated bot answers
+``/projects`` (the project list with per-state task
 counts, with one inline button per project), ``/tasks`` (the tasks in the
 active states — Todo, Planning, In progress and Review — grouped by
 project and state, with one inline button per task),
@@ -70,6 +79,9 @@ MAX_RETRY_AFTER = 30.0
 START_TEXT = (
     "Hello! I am the yask Telegram bot.\n\n"
     "I am connected to a yask kanban board and answer commands about it.\n\n"
+    "Board commands require authentication: /login <password> first (your\n"
+    "yask administrator permits your chat in the web UI; /whoami shows\n"
+    "your chat id).\n\n"
     "Use /help to see what I can do."
 )
 
@@ -77,6 +89,8 @@ HELP_TEXT = (
     "Commands:\n"
     "/start — introduction\n"
     "/help — this help\n"
+    "/login <password> — authenticate this chat (required for board commands)\n"
+    "/whoami — show this chat's id (give it to the yask administrator)\n"
     "/projects — list of projects with per-state task counts\n"
     "/tasks [project] — tasks in Todo, Planning, In progress and Review\n"
     "/task <project> <number|title> — task details (state, description, prereqs, attachments, history)\n"
@@ -85,6 +99,25 @@ HELP_TEXT = (
     "/unsubscribe [project] — stop notifications for a project\n\n"
     "I read the yask board that this process was started with\n"
     "(yask telegram --data DIR). More commands are on the way."
+)
+
+# Board access is gated: unauthenticated chats get this instead of any
+# board data (commands and inline-keyboard callbacks alike).
+AUTH_REQUIRED_TEXT = (
+    "This command requires authentication. Use /login <password>."
+)
+
+LOGIN_USAGE_TEXT = "Usage: /login <password>"
+
+LOGIN_OK_TEXT = "Authenticated. You can now use the board."
+
+# Unknown chat and wrong password are indistinguishable on purpose: the
+# bot must not reveal which chat ids exist in the allowlist.
+LOGIN_FAIL_TEXT = "Authentication failed. Check your password and try again."
+
+WHOAMI_TEXT = (
+    "Your chat id is {chat_id}. "
+    "Give it to your yask administrator to get access."
 )
 
 UNKNOWN_HINT = "I don't understand that. Try /help to see what I can do."
@@ -132,11 +165,12 @@ HISTORY_MAX = 10
 # satisfies), so 64 chars is a compact, safe display choice.
 NOTIFICATION_BUTTON_TEXT_MAX = 64
 
-# Static command table. Store-backed commands (today: /projects, /tasks,
-# /task, /attachment, /subscribe, /unsubscribe) live in make_dispatch;
-# state-change notifications are pushed by the Notifier on every poll
-# cycle. Later features extend the dispatch layer without changing the
-# poll loop.
+# Static command table. Store-backed commands (today: /login, /whoami,
+# /projects, /tasks, /task, /attachment, /subscribe, /unsubscribe) live in
+# make_dispatch — the first two because they need the store and the auth
+# state, the rest because they read the board; state-change notifications
+# are pushed by the Notifier on every poll cycle. Later features extend
+# the dispatch layer without changing the poll loop.
 COMMANDS: dict[str, str] = {
     "/start": START_TEXT,
     "/help": HELP_TEXT,
@@ -157,6 +191,41 @@ class BotAPIError(Exception):
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return self.description
+
+
+class Auth:
+    """The chats that have logged in during this bot process run.
+
+    The allowlist (who *may* authenticate, with which password) lives in
+    the store's ``telegram_users`` table — managed from the web UI, stored
+    only as salted hashes. This object only tracks which of those chats
+    have actually ``/login``-ed since the process started: sessions are
+    deliberately per run, so a bot restart logs every chat out (no tokens
+    or expiry bookkeeping in the database).
+    """
+
+    def __init__(self) -> None:
+        self._authenticated: set[int] = set()
+
+    def is_authenticated(self, chat_id: Optional[int]) -> bool:
+        """Whether this chat has logged in during this process run."""
+        if chat_id is None:
+            return False
+        return chat_id in self._authenticated
+
+    def authenticate(self, chat_id: Optional[int], password: str, store: Store) -> bool:
+        """Check the chat's password against the store's allowlist.
+
+        On success the chat is marked authenticated for this run. A ``None``
+        chat (no sender) and an unknown chat or wrong password all return
+        ``False`` — the bot cannot tell the cases apart.
+        """
+        if chat_id is None:
+            return False
+        if store.verify_telegram_user(chat_id, password):
+            self._authenticated.add(chat_id)
+            return True
+        return False
 
 
 def _command_token(text: Optional[str]) -> Optional[str]:
@@ -769,25 +838,67 @@ def format_notification(change: dict) -> KeyboardReply:
     return KeyboardReply(text, {"inline_keyboard": [[button]]})
 
 
-def make_dispatch(store: Store) -> Callable[..., Optional[Reply]]:
+def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Optional[Reply]]:
     """Build the message→reply dispatcher for a bot bound to ``store``.
 
-    Store-backed commands (today: ``/projects``, ``/tasks``, ``/task``,
-    ``/attachment``, ``/subscribe``, ``/unsubscribe``) read the board
-    through ``store``; the subscription commands additionally need the
-    sender's chat id, hence ``dispatch(text, chat_id)``. Everything else
-    falls back to the static :func:`reply_for`. A failure reading the store
-    yields a short error reply instead of crashing the long-poll loop.
-    ``/task`` and ``/attachment`` resolve to a text reply or a
-    :class:`FileReply` (the attachment bytes for a file send); a
-    :class:`KeyboardReply` is the same text-plus-keyboard shape for
-    inline-keyboard views.
+    Store-backed commands (today: ``/login``, ``/whoami``, ``/projects``,
+    ``/tasks``, ``/task``, ``/attachment``, ``/subscribe``,
+    ``/unsubscribe``) read the board through ``store``; the subscription
+    commands additionally need the sender's chat id, hence
+    ``dispatch(text, chat_id)``. Everything else falls back to the static
+    :func:`reply_for`. A failure reading the store yields a short error
+    reply instead of crashing the long-poll loop. ``/task`` and
+    ``/attachment`` resolve to a text reply or a :class:`FileReply` (the
+    attachment bytes for a file send); a :class:`KeyboardReply` is the same
+    text-plus-keyboard shape for inline-keyboard views.
+
+    Board access is gated by ``auth`` (an :class:`Auth`; the production
+    bot always passes one): the board commands answer unauthenticated
+    chats with :data:`AUTH_REQUIRED_TEXT` and no board data. ``/login``
+    (success/failure indistinguishable for unknown chats) and ``/whoami``
+    (the sender's own chat id) are ungated. Without an ``auth`` the
+    commands are open (the legacy, unauthenticated behavior).
     """
+
+    def _authed(chat_id: Optional[int]) -> bool:
+        return auth is None or auth.is_authenticated(chat_id)
 
     def dispatch(
         text: Optional[str], chat_id: Optional[int] = None
     ) -> Optional[Reply]:
         cmd = _command_token(text)
+        if cmd == "/login":
+            if chat_id is None:
+                return None  # no sender to authenticate
+            args = _arg_words(text)
+            if not args:
+                return LOGIN_USAGE_TEXT
+            # The password is everything after the command token, so a
+            # password may contain (single) spaces. A store failure (locked
+            # or corrupted DB) answers a plain failure, like the other
+            # store-backed commands.
+            try:
+                ok = (
+                    auth.authenticate(chat_id, " ".join(args), store)
+                    if auth is not None
+                    else True
+                )
+            except Exception:
+                ok = False
+            return LOGIN_OK_TEXT if ok else LOGIN_FAIL_TEXT
+        if cmd == "/whoami":
+            if chat_id is None:
+                return None  # no sender whose id could be shown
+            return WHOAMI_TEXT.format(chat_id=chat_id)
+        if cmd in (
+            "/projects",
+            "/tasks",
+            "/task",
+            "/attachment",
+            "/subscribe",
+            "/unsubscribe",
+        ) and not _authed(chat_id):
+            return AUTH_REQUIRED_TEXT
         if cmd == "/projects":
             try:
                 return project_view(store)
@@ -829,6 +940,7 @@ def make_dispatch(store: Store) -> Callable[..., Optional[Reply]]:
 
 def make_callback_dispatch(
     store: Store,
+    auth: Optional[Auth] = None,
 ) -> Callable[[dict], Optional[CallbackAction]]:
     """Build the callback_query→action dispatcher for a bot bound to ``store``.
 
@@ -868,12 +980,30 @@ def make_callback_dispatch(
     same convention as :func:`make_dispatch` — instead of propagating out
     of :func:`run_bot`'s per-update handler (which catches only
     BotAPIError) and killing the long-poll process.
+
+    Board access is gated by ``auth`` (an :class:`Auth`; the production
+    bot always passes one): the callback's chat id (from the original
+    message's ``chat.id``) is resolved up front, and a missing or
+    unauthenticated chat gets ``AUTH_REQUIRED_TEXT`` as both toast and
+    reply for every payload family — in particular no attachment bytes are
+    ever sent to an unauthenticated chat. Without an ``auth`` the presses
+    are open (the legacy, unauthenticated behavior).
     """
 
     def callback_dispatch(callback_query: dict) -> Optional[CallbackAction]:
         data = callback_query.get("data")
         if not isinstance(data, str):
             return None
+        # Board access: the chat the button was pressed in (the original
+        # message's chat.id) must have logged in for this run.
+        if auth is not None:
+            message = callback_query.get("message") or {}
+            chat_id = (message.get("chat") or {}).get("id")
+            if not auth.is_authenticated(chat_id):
+                return CallbackAction(
+                    answer_text=AUTH_REQUIRED_TEXT,
+                    reply=AUTH_REQUIRED_TEXT,
+                )
         parts = data.split(":")
         if len(parts) == 2 and parts[0] == "p":
             if not parts[1].isdigit():
@@ -1270,11 +1400,23 @@ class Notifier:
     subscribers, so a failed send is retried on the next cycle (chats that
     already received it get a duplicate — accepted, a lost change would be
     worse).
+
+    Notifications leak task titles and states, so when an :class:`Auth` is
+    passed, each change fans out only to subscribed chats that are
+    *currently* authenticated; a subscriber that has logged out misses
+    changes made while logged out (the cursor still advances — a lost
+    change would be a leak, a replay a surprise).
     """
 
-    def __init__(self, api: BotAPI, store: Store) -> None:
+    def __init__(
+        self,
+        api: BotAPI,
+        store: Store,
+        auth: Optional[Auth] = None,
+    ) -> None:
         self._api = api
         self._store = store
+        self._auth = auth
         self._cursor: int = 0
 
     def seed(self) -> None:
@@ -1286,6 +1428,8 @@ class Notifier:
         changes = self._store.new_state_changes(self._cursor)
         for change in changes:
             for chat_id in self._store.subscribed_chats(change["project_id"]):
+                if self._auth is not None and not self._auth.is_authenticated(chat_id):
+                    continue  # no board data for unauthenticated chats
                 await _send_reply(self._api, chat_id, format_notification(change))
             self._cursor = change["id"]
 
@@ -1467,9 +1611,12 @@ async def _amain(
     conn = db.connect(data_dir / "yask.db")
     store = Store(conn)
 
+    # Per-run login state: a restart logs every chat out.
+    auth = Auth()
+
     # Seed the notification cursor to the current history maximum so only
     # changes made while this process runs are pushed (no replay on restart).
-    notifier = Notifier(api, store)
+    notifier = Notifier(api, store, auth)
     notifier.seed()
 
     # Without an externally supplied stop event (production), SIGINT is the
@@ -1489,11 +1636,11 @@ async def _amain(
     try:
         await run_bot(
             api,
-            make_dispatch(store),
+            make_dispatch(store, auth),
             stop_event=stop_event,
             poll_timeout=POLL_TIMEOUT,
             on_cycle=notifier.check,
-            callback_dispatch=make_callback_dispatch(store),
+            callback_dispatch=make_callback_dispatch(store, auth),
         )
     finally:
         if handler_installed:
