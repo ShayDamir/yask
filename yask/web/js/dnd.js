@@ -108,7 +108,9 @@ export function initDnd(actions) {
         after: undefined,
       };
       const children = [...colBody.children].filter(
-        (el) => el.classList.contains("card") || el.classList.contains("drop-slot")
+        (el) =>
+          (el.classList.contains("card") && !el.classList.contains("dragging")) ||
+          el.classList.contains("drop-slot")
       );
       const slotIdx = children.indexOf(slot);
       if (slotIdx >= 0) {

@@ -130,6 +130,34 @@ def test_reorder_within_column_stable(store, project):
     assert order == [nums[1], nums[2], nums[0], nums[3]]
 
 
+def test_reorder_self_reference_is_noop(store, project):
+    """Reordering relative to itself is a clean no-op (#51), not a 500."""
+    pid = project["id"]
+    nums = [store.create_task(pid, f"t{i}")["number"] for i in range(4)]
+    before = store.get_task(pid, nums[0])
+    out = store.reorder_task(pid, nums[0], after_number=nums[0])
+    assert out["number"] == nums[0]
+    out = store.reorder_task(pid, nums[0], before_number=nums[0])
+    assert out["number"] == nums[0]
+    # column order unchanged, and a no-op performs no writes
+    order = [t["number"] for t in store.list_tasks(pid)]
+    assert order == nums
+    assert store.get_task(pid, nums[0])["updated_at"] == before["updated_at"]
+    # both before and after set is still a validation error, even self-set
+    with pytest.raises(ValidationError):
+        store.reorder_task(pid, nums[0], before_number=nums[0], after_number=nums[0])
+
+
+def test_move_task_self_position_reference_rejected(store, project):
+    """A self position reference in a move is a 4xx ValidationError, not a 500."""
+    pid = project["id"]
+    a = store.create_task(pid, "a")
+    with pytest.raises(ValidationError):
+        store.move_task(pid, a["number"], "Todo", after_number=a["number"])
+    with pytest.raises(ValidationError):
+        store.move_task(pid, a["number"], "Todo", before_number=a["number"])
+
+
 def test_project_overviews_empty_store(store):
     assert store.list_project_overviews() == []
 

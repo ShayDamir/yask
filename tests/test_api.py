@@ -92,6 +92,20 @@ def test_move_confirmation_flow(client, pid):
     assert client.get(f"/api/projects/{pid}/tasks/2").json()["state"] == "Todo"
 
 
+def test_reorder_self_reference_noop_api(client, pid):
+    """A self-referencing reorder is a clean 200 no-op, not a 500 (#51)."""
+    client.post(f"/api/projects/{pid}/tasks", json={"title": "first"})
+    client.post(f"/api/projects/{pid}/tasks", json={"title": "second"})
+    r = client.post(f"/api/projects/{pid}/tasks/1/reorder", json={"after_number": 1})
+    assert r.status_code == 200
+    assert r.json()["number"] == 1
+    r = client.post(f"/api/projects/{pid}/tasks/1/reorder", json={"before_number": 1})
+    assert r.status_code == 200
+    # column order unchanged
+    order = [t["number"] for t in client.get(f"/api/projects/{pid}/tasks").json()]
+    assert order == [1, 2]
+
+
 def test_archive_and_delete_flow(client, pid):
     client.post(f"/api/projects/{pid}/tasks", json={"title": "e", "type": "Epic"})
     client.post(f"/api/projects/{pid}/tasks", json={"title": "s", "parent_number": 1})

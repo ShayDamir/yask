@@ -342,6 +342,13 @@ class Store:
             raise ValidationError(
                 f"task #{ref['number']} is not in the target position scope"
             )
+        if ref["id"] not in ids:
+            # The ref is in scope but excluded: it is one of the tasks moved
+            # in this action and cannot be its own position reference.
+            raise ValidationError(
+                f"task #{ref['number']} is moved in this action and cannot be "
+                "used as a position reference"
+            )
         idx = ids.index(ref["id"])
         return idx if before_number is not None else idx + 1
 
@@ -1020,6 +1027,13 @@ class Store:
     ) -> dict:
         row = self._get_task(project_id, number)
         state, parent_id = row["state"], row["parent_id"]
+        # Reordering relative to itself is a no-op ("dropped it where it
+        # already was"). Only meaningful when exactly one of before/after is
+        # given; the both-set case still falls through to validation below.
+        if (before_number is None) != (after_number is None) and (
+            before_number or after_number
+        ) == number:
+            return self.get_task(project_id, number)
         idx = self._position_index(
             project_id, state, parent_id, before_number, after_number,
             exclude_ids={row["id"]},
