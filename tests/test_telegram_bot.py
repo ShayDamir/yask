@@ -554,6 +554,8 @@ def test_tasks_empty_board(store):
     assert len(script.sent) == 1
     assert script.sent[0]["chat_id"] == 7
     assert script.sent[0]["text"] == "Tasks in progress:\n(none)"
+    # no tasks → no keyboard (the Bot API rejects an empty inline_keyboard)
+    assert "reply_markup" not in script.sent[0]
 
 
 def test_tasks_populated_board_exact(store):
@@ -588,23 +590,33 @@ def test_tasks_populated_board_exact(store):
         dispatch=telegram_bot.make_dispatch(store),
     )
     assert len(script.sent) == 1
-    # exact text: name order, state grouping/order, id prefixes, per-task
-    # drill-down links, and the excluded states absent
+    # exact text: name order, state grouping/order, id prefixes, and the
+    # excluded states absent
     assert script.sent[0]["text"] == (
         "Tasks in progress:\n"
         f"{alpha}. alpha\n"
         "  Todo:\n"
-        f"    #2 todo 1 — /task {alpha} 2\n"
+        f"    #2 todo 1\n"
         "  Planning:\n"
-        f"    #3 planning 1 — /task {alpha} 3\n"
+        f"    #3 planning 1\n"
         "  In progress:\n"
-        f"    #4 working — /task {alpha} 4\n"
+        f"    #4 working\n"
         "  Review:\n"
-        f"    #5 review 1 — /task {alpha} 5\n"
+        f"    #5 review 1\n"
         f"{zeta}. zeta\n"
         "  In progress:\n"
-        f"    #1 z working — /task {zeta} 1"
+        f"    #1 z working"
     )
+    # one button per task, in reading order (the t: callback payloads)
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#2 todo 1", "callback_data": f"t:{alpha}:2"}],
+            [{"text": "#3 planning 1", "callback_data": f"t:{alpha}:3"}],
+            [{"text": "#4 working", "callback_data": f"t:{alpha}:4"}],
+            [{"text": "#5 review 1", "callback_data": f"t:{alpha}:5"}],
+            [{"text": "#1 z working", "callback_data": f"t:{zeta}:1"}],
+        ]
+    }
 
 
 def test_tasks_filter_by_id_and_name(store):
@@ -624,8 +636,13 @@ def test_tasks_filter_by_id_and_name(store):
         "Tasks in progress:\n"
         f"{alpha}. alpha\n"
         "  In progress:\n"
-        f"    #1 alpha working — /task {alpha} 1"
+        f"    #1 alpha working"
     )
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 alpha working", "callback_data": f"t:{alpha}:1"}]
+        ]
+    }
 
     # by project id
     script = run_bot_until_stop(
@@ -636,8 +653,13 @@ def test_tasks_filter_by_id_and_name(store):
         "Tasks in progress:\n"
         f"{zeta}. zeta\n"
         "  In progress:\n"
-        f"    #1 zeta working — /task {zeta} 1"
+        f"    #1 zeta working"
     )
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 zeta working", "callback_data": f"t:{zeta}:1"}]
+        ]
+    }
 
 
 def test_tasks_filter_name_with_spaces(store):
@@ -652,8 +674,13 @@ def test_tasks_filter_name_with_spaces(store):
         "Tasks in progress:\n"
         f"{pid}. my big project\n"
         "  In progress:\n"
-        f"    #1 working — /task {pid} 1"
+        f"    #1 working"
     )
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 working", "callback_data": f"t:{pid}:1"}]
+        ]
+    }
 
 
 def test_tasks_filter_zero_active(store):
@@ -673,6 +700,8 @@ def test_tasks_filter_zero_active(store):
         dispatch=telegram_bot.make_dispatch(store),
     )
     assert script.sent[0]["text"] == "Tasks in progress:\n(none)"
+    # no tasks → no keyboard (the Bot API rejects an empty inline_keyboard)
+    assert "reply_markup" not in script.sent[0]
 
 
 def test_tasks_unknown_project(store):
@@ -684,6 +713,7 @@ def test_tasks_unknown_project(store):
     assert script.sent[0]["text"] == (
         "Project 'nope' not found. Use /projects to list projects."
     )
+    assert "reply_markup" not in script.sent[0]
     # unknown by id
     script = run_bot_until_stop(
         Script([[message_update(132, "/tasks 999")]]),
@@ -692,6 +722,7 @@ def test_tasks_unknown_project(store):
     assert script.sent[0]["text"] == (
         "Project '999' not found. Use /projects to list projects."
     )
+    assert "reply_markup" not in script.sent[0]
 
 
 def test_tasks_with_bot_mention(store):
@@ -700,6 +731,7 @@ def test_tasks_with_bot_mention(store):
         dispatch=telegram_bot.make_dispatch(store),
     )
     assert script.sent[0]["text"] == "Tasks in progress:\n(none)"
+    assert "reply_markup" not in script.sent[0]
 
 
 def test_tasks_unknown_command_still_gets_hint(store):
@@ -726,6 +758,7 @@ def test_tasks_store_failure_replies_and_recovers(store, monkeypatch):
     # answered
     assert len(script.sent) == 2
     assert script.sent[0]["text"] == telegram_bot.TASKS_ERROR_TEXT
+    assert "reply_markup" not in script.sent[0]
     assert script.sent[1]["text"] == telegram_bot.START_TEXT
 
 
@@ -1000,32 +1033,44 @@ def test_task_history_capped_at_ten(store):
 
 
 def test_tasks_drill_down_to_task_view(store):
-    """The /task reference emitted by /tasks must resolve to the detail view."""
+    """Pressing a /tasks button must open the task's detail view."""
     pid = store.create_project("yask")["id"]
     t = store.create_task(
         pid, "drill down", "Story", estimate=2.0, description="the point"
     )
     store.move_task(pid, t["number"], "In progress", confirm=True)
-    # the reference exactly as /tasks emits it (the cross-task contract)
-    first_reply = telegram_bot.tasks_view(store, str(pid))
-    ref = first_reply.splitlines()[-1].rsplit(" — ", 1)[-1]
-    assert ref == f"/task {pid} {t['number']}"
-    script = run_bot_until_stop(
-        Script(
-            [
-                [message_update(248, "/tasks")],
-                [message_update(249, ref)],
-            ]
-        ),
+    # the button exactly as /tasks emits it (the cross-task contract):
+    # label "#<n> <title>", payload "t:<pid>:<n>"
+    first = run_bot_until_stop(
+        Script([[message_update(248, "/tasks")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert len(script.sent) == 2
-    task_line = f"    #{t['number']} drill down — /task {pid} {t['number']}"
-    assert script.sent[0]["text"].splitlines()[-1] == task_line
-    # re-sending the reference yields the detail view
-    assert script.sent[1]["text"].startswith(f"#{t['number']} drill down — Story\n")
-    assert "State: In progress" in script.sent[1]["text"]
-    assert "Estimate: 2" in script.sent[1]["text"]
+    rows = first.sent[0]["reply_markup"]["inline_keyboard"]
+    assert rows == [
+        [
+            {
+                "text": f"#{t['number']} drill down",
+                "callback_data": f"t:{pid}:{t['number']}",
+            }
+        ]
+    ]
+    payload = rows[0][0]["callback_data"]
+    script = run_bot_until_stop(
+        Script([[callback_update(249, payload, chat_id=11)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the press is answered (no toast) and the detail view goes out as a
+    # new message to the button's chat
+    assert script.answered == [{"callback_query_id": "cbq-249"}]
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"].startswith(
+        f"#{t['number']} drill down — Story\n"
+    )
+    assert "State: In progress" in script.sent[0]["text"]
+    assert "Estimate: 2" in script.sent[0]["text"]
+    assert script.edited == []
 
 
 def test_task_store_failure_replies_and_recovers(store, monkeypatch):
@@ -1852,7 +1897,100 @@ def test_callback_missing_message_skips_edit():
 
 
 def test_make_callback_dispatch_skeleton(store):
-    # the #44 baseline: no payload handlers yet, so every callback is
-    # answered with the out-of-date toast and nothing else happens
+    # the #44 baseline, now with the t: handler: non-``t:`` payloads are
+    # still unhandled (the out-of-date toast answers them) while a valid
+    # ``t:`` payload is handled
     dispatch = telegram_bot.make_callback_dispatch(store)
-    assert dispatch(callback_update(1, "p:1")) is None
+    assert dispatch(callback_update(1, "p:1")["callback_query"]) is None
+    pid = store.create_project("alpha")["id"]
+    t = store.create_task(pid, "working")
+    action = dispatch(callback_update(2, f"t:{pid}:{t['number']}")["callback_query"])
+    assert action is not None
+    assert action.answer_text is None
+    assert action.edit is None
+    assert action.reply == telegram_bot.format_task_view(
+        store.get_task(pid, t["number"]),
+        store.get_project(pid),
+        store.get_history(pid, t["number"]),
+    )
+
+
+def test_callback_dispatch_task_detail_round_trip(store):
+    """A button press through run_bot: answered, detail sent, offset moves."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working", "Story", estimate=3.0)
+    store.move_task(pid, t["number"], "In progress", confirm=True)
+    script = run_bot_until_stop(
+        Script([[callback_update(302, f"t:{pid}:{t['number']}", chat_id=11)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # answered without a toast; the detail view goes out as a new message
+    assert script.answered == [{"callback_query_id": "cbq-302"}]
+    assert len(script.sent) == 1
+    sent = script.sent[0]
+    assert sent["chat_id"] == 11
+    assert sent["text"].startswith(f"#{t['number']} working — Story\n")
+    assert "State: In progress" in sent["text"]
+    assert "Estimate: 3" in sent["text"]
+    # the detail's own buttons (attachments, subscribe) land in #47
+    assert "reply_markup" not in sent
+    assert script.edited == []
+    assert script.offsets == [None, 303]
+
+
+def test_callback_dispatch_unknown_task(store):
+    pid = store.create_project("alpha")["id"]
+    dispatch = telegram_bot.make_callback_dispatch(store)
+    action = dispatch(callback_update(303, f"t:{pid}:42")["callback_query"])
+    assert action is not None
+    assert action.answer_text is None
+    assert action.edit is None
+    assert action.reply == "Task #42 not found in alpha."
+
+
+def test_callback_dispatch_unknown_project(store):
+    store.create_project("alpha")
+    dispatch = telegram_bot.make_callback_dispatch(store)
+    action = dispatch(callback_update(304, "t:999:1")["callback_query"])
+    assert action is not None
+    assert action.answer_text is None
+    assert action.edit is None
+    assert (
+        action.reply
+        == "Project '999' not found. Use /projects to list projects."
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["t:1", "t:1:4:9", "t:x:4", "t:", "p:1", "stale:payload"],
+)
+def test_callback_dispatch_unhandled_payloads(store, payload):
+    # wrong family (p: is reserved for #46), wrong arity, or non-numeric
+    # fields: nothing to do → run_bot answers with the out-of-date toast
+    dispatch = telegram_bot.make_callback_dispatch(store)
+    assert dispatch(callback_update(305, payload)["callback_query"]) is None
+
+
+def test_callback_dispatch_unhandled_payload_toast(store):
+    store.create_project("alpha")
+    script = run_bot_until_stop(
+        Script(
+            [
+                [callback_update(306, "t:x:4")],
+                [message_update(307, "/start")],
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert script.answered == [
+        {
+            "callback_query_id": "cbq-306",
+            "text": telegram_bot.UNKNOWN_CALLBACK_TEXT,
+        }
+    ]
+    # nothing is sent for the callback; the loop survives (next message OK)
+    assert [m["text"] for m in script.sent] == [telegram_bot.START_TEXT]
+    assert script.offsets == [None, 307, 308]

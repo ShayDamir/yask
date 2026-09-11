@@ -6,7 +6,8 @@ with ``getMe``, opens the yask store, then long-polls the Bot API with
 answers incoming messages. Today the bot answers
 ``/start``, ``/help``, ``/projects`` (the project list with per-state task
 counts), ``/tasks`` (the tasks in the active states — Todo, Planning,
-In progress and Review — grouped by project and state),
+In progress and Review — grouped by project and state, with one inline
+button per task),
 ``/task <project> <number|title>`` (one task's details — state, estimate,
 description, prerequisites, attachments and recent history — the task
 found by number or by case-insensitive title) and ``/attachment
@@ -19,8 +20,9 @@ SQLite database). Inline-keyboard callbacks (``callback_query`` updates)
 are answered through a second dispatch layer,
 :func:`make_callback_dispatch`: every callback is answered (the client's
 progress bar hangs until it is answered) and an unrecognized payload gets
-a toast instead of a crash; the payload handlers (Epic #43) extend that
-factory. While the bot runs, the :class:`Notifier` polls
+a toast instead of a crash; the ``t:`` payload (the per-task buttons of
+``/tasks``) opens the task's detail view as a new message. While the bot
+runs, the :class:`Notifier` polls
 ``state_history`` after each successful ``getUpdates`` batch and pushes a
 plain-text message per transition to every subscribed chat; latency is at
 most one poll interval. Later features of the Telegram interface (Epic #27)
@@ -264,22 +266,25 @@ def _resolve_project(store: Store, arg: str) -> Optional[dict]:
     return None
 
 
-def _task_state_lines(project_id: int, tasks: list[dict]) -> list[str]:
-    """The state sub-groups and task lines for one project's active tasks."""
-    lines = []
+def _task_sections(tasks: list[dict]) -> list[tuple[str, list[dict]]]:
+    """The non-empty state groups of one project's active tasks.
+
+    ``(state, tasks)`` pairs in canonical state order (:data:`db.
+    IN_PROGRESS_STATES`, empty states skipped); within a state the tasks
+    keep their ``sort_order`` (the ``list_in_progress`` order). The single
+    ordered structure the ``/tasks`` text lines and the inline-keyboard
+    rows are both derived from, so button order can never diverge from
+    reading order.
+    """
+    sections = []
     for state in db.IN_PROGRESS_STATES:
         in_state = [t for t in tasks if t["state"] == state]
-        if not in_state:
-            continue
-        lines.append(f"  {state}:")
-        for t in in_state:
-            lines.append(
-                f"    #{t['number']} {t['title']} — /task {project_id} {t['number']}"
-            )
-    return lines
+        if in_state:
+            sections.append((state, in_state))
+    return sections
 
 
-def tasks_view(store: Store, project_arg: Optional[str] = None) -> str:
+def tasks_view(store: Store, project_arg: Optional[str] = None) -> Reply:
     """Format the ``/tasks [project]`` reply.
 
     Without an argument, lists every project (in name order, the same order
@@ -289,33 +294,52 @@ def tasks_view(store: Store, project_arg: Optional[str] = None) -> str:
     resolved project with no active tasks — shows ``(none)`` under the
     header; an unresolvable argument yields a not-found reply pointing at
     ``/projects``.
+
+    When at least one task is listed the reply is a
+    :class:`KeyboardReply`: the task lines read ``#<n> <title>`` and the
+    same tasks, in reading order, become one inline-keyboard row each with
+    label ``#<n> <title>`` and ``callback_data``
+    ``t:<project-id>:<number>`` (the task-detail button, answered by
+    :func:`make_callback_dispatch`). A reply with no tasks is a plain
+    ``str`` — the Bot API rejects an empty inline keyboard, and there are
+    no tap targets anyway.
     """
     if project_arg is None:
-        sections = []
+        projects = []
         for p in store.list_projects():
             tasks = store.list_in_progress(p["id"])
             if tasks:
-                sections.append((p, tasks))
-        if not sections:
+                projects.append((p, tasks))
+        if not projects:
             return "Tasks in progress:\n(none)"
-        lines = ["Tasks in progress:"]
-        for p, tasks in sections:
-            lines.append(f"{p['id']}. {p['name']}")
-            lines.extend(_task_state_lines(p["id"], tasks))
-        return "\n".join(lines)
+    else:
+        project = _resolve_project(store, project_arg)
+        if project is None:
+            return (
+                f"Project '{project_arg}' not found. Use /projects to list projects."
+            )
+        tasks = store.list_in_progress(project["id"])
+        if not tasks:
+            return "Tasks in progress:\n(none)"
+        projects = [(project, tasks)]
 
-    project = _resolve_project(store, project_arg)
-    if project is None:
-        return (
-            f"Project '{project_arg}' not found. Use /projects to list projects."
-        )
-    tasks = store.list_in_progress(project["id"])
-    if not tasks:
-        return "Tasks in progress:\n(none)"
     lines = ["Tasks in progress:"]
-    lines.append(f"{project['id']}. {project['name']}")
-    lines.extend(_task_state_lines(project["id"], tasks))
-    return "\n".join(lines)
+    rows = []
+    for p, tasks in projects:
+        lines.append(f"{p['id']}. {p['name']}")
+        for state, in_state in _task_sections(tasks):
+            lines.append(f"  {state}:")
+            for t in in_state:
+                lines.append(f"    #{t['number']} {t['title']}")
+                rows.append(
+                    [
+                        {
+                            "text": f"#{t['number']} {t['title']}",
+                            "callback_data": f"t:{p['id']}:{t['number']}",
+                        }
+                    ]
+                )
+    return KeyboardReply("\n".join(lines), {"inline_keyboard": rows})
 
 
 # An inline-keyboard payload for a reply: the JSON object the Bot API takes
@@ -678,13 +702,50 @@ def make_callback_dispatch(
     through (fields ``id``, ``data``, ``message``, ``from``,
     ``chat_instance``) and the factory returns a
     :class:`CallbackAction` (or None for "nothing to do" — answered with
-    the out-of-date toast by ``run_bot``). Today it has no payload
-    handlers; the ``p:``/``t:``/``a:``/``s:``/``u:`` handlers (Epic #43)
-    extend this factory's body without touching the poll loop.
+    the out-of-date toast by ``run_bot``).
+
+    There is one payload family today: ``t:<project-id>:<number>`` (the
+    per-task buttons of the ``/tasks`` view). A strictly shaped payload
+    (``:``-separated into exactly three parts, prefix ``t``, both fields
+    parsing as integers) opens that task's detail view — ``get_task`` +
+    ``get_history`` + ``format_task_view`` — as a new message: no toast,
+    no in-place edit of the list (the detail view's own buttons land in
+    #47). An unknown project or task gets an informative text reply (the
+    same wording as the ``/tasks`` and ``/task`` not-found replies); any
+    other shape returns None for the out-of-date toast. The remaining
+    payload families (``p:``/``a:``/``s:``/``u:``, Epic #43) extend this
+    factory's body without touching the poll loop.
     """
 
     def callback_dispatch(callback_query: dict) -> Optional[CallbackAction]:
-        return None  # no payload handlers yet — #45–#48 extend this
+        data = callback_query.get("data")
+        if not isinstance(data, str):
+            return None
+        parts = data.split(":")
+        if len(parts) != 3 or parts[0] != "t":
+            return None
+        try:
+            project_id = int(parts[1])
+            number = int(parts[2])
+        except ValueError:
+            return None
+        try:
+            project = store.get_project(project_id)
+        except NotFound:
+            return CallbackAction(
+                reply=(
+                    f"Project '{project_id}' not found. "
+                    "Use /projects to list projects."
+                )
+            )
+        try:
+            task = store.get_task(project_id, number)
+        except NotFound:
+            return CallbackAction(
+                reply=f"Task #{number} not found in {project['name']}."
+            )
+        history = store.get_history(project_id, number)
+        return CallbackAction(reply=format_task_view(task, project, history))
 
     return callback_dispatch
 
