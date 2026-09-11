@@ -5,9 +5,9 @@ with ``getMe``, opens the yask store, then long-polls the Bot API with
 ``getUpdates`` (subscribing to messages and inline-keyboard callbacks) and
 answers incoming messages. Today the bot answers
 ``/start``, ``/help``, ``/projects`` (the project list with per-state task
-counts), ``/tasks`` (the tasks in the active states — Todo, Planning,
-In progress and Review — grouped by project and state, with one inline
-button per task),
+counts, with one inline button per project), ``/tasks`` (the tasks in the
+active states — Todo, Planning, In progress and Review — grouped by
+project and state, with one inline button per task),
 ``/task <project> <number|title>`` (one task's details — state, estimate,
 description, prerequisites, attachments and recent history — the task
 found by number or by case-insensitive title) and ``/attachment
@@ -20,10 +20,12 @@ SQLite database). Inline-keyboard callbacks (``callback_query`` updates)
 are answered through a second dispatch layer,
 :func:`make_callback_dispatch`: every callback is answered (the client's
 progress bar hangs until it is answered) and an unrecognized payload gets
-a toast instead of a crash; the ``t:`` payload (the per-task buttons of
-``/tasks``) opens the task's detail view as a new message. While the bot
-runs, the :class:`Notifier` polls
-``state_history`` after each successful ``getUpdates`` batch and pushes a
+a toast instead of a crash; the ``p:`` payload (the per-project buttons of
+``/projects``) opens the project's task list view as a new message and the
+``t:`` payload (the per-task buttons of ``/tasks``) opens the task's
+detail view as a new message. While the bot runs, the
+:class:`Notifier` polls ``state_history`` after each successful
+``getUpdates`` batch and pushes a
 plain-text message per transition to every subscribed chat; latency is at
 most one poll interval. Later features of the Telegram interface (Epic #27)
 extend the dispatch layer on top of the store passed in here.
@@ -174,19 +176,27 @@ def reply_for(text: Optional[str]) -> Optional[str]:
     return COMMANDS.get(cmd, UNKNOWN_HINT)
 
 
-def project_view(store: Store) -> str:
+def project_view(store: Store) -> Reply:
     """Format the ``/projects`` reply.
 
     One line per project in name order, prefixed with the project's DB id
     (the id the web API and MCP tools use); each line lists the task counts
     of the states that have tasks, in canonical state order. A project with
-    no visible tasks is listed without a state segment; an empty board is
-    just ``Projects:`` and ``(none)``.
+    no visible tasks is listed without a state segment.
+
+    A non-empty board is a :class:`KeyboardReply`: the same projects, in
+    reading order, become one inline-keyboard row each with a single
+    button — label = the project name, ``callback_data`` =
+    ``p:<project-id>`` (the project drill-down button, answered by
+    :func:`make_callback_dispatch`). An empty board is just ``Projects:``
+    and ``(none)`` as a plain ``str`` — the Bot API rejects an empty
+    inline keyboard, and there are no tap targets anyway.
     """
     overviews = store.list_project_overviews()
     if not overviews:
         return "Projects:\n(none)"
     lines = ["Projects:"]
+    rows = []
     for ov in overviews:
         line = f"{ov['id']}. {ov['name']}"
         if ov["states"]:
@@ -194,7 +204,10 @@ def project_view(store: Store) -> str:
                 f"{state}: {n}" for state, n in ov["states"].items()
             )
         lines.append(line)
-    return "\n".join(lines)
+        rows.append(
+            [{"text": ov["name"], "callback_data": f"p:{ov['id']}"}]
+        )
+    return KeyboardReply("\n".join(lines), {"inline_keyboard": rows})
 
 
 def _arg_words(text: Optional[str]) -> Optional[list[str]]:
@@ -704,17 +717,20 @@ def make_callback_dispatch(
     :class:`CallbackAction` (or None for "nothing to do" — answered with
     the out-of-date toast by ``run_bot``).
 
-    There is one payload family today: ``t:<project-id>:<number>`` (the
-    per-task buttons of the ``/tasks`` view). A strictly shaped payload
-    (``:``-separated into exactly three parts, prefix ``t``, both fields
-    parsing as integers) opens that task's detail view — ``get_task`` +
-    ``get_history`` + ``format_task_view`` — as a new message: no toast,
-    no in-place edit of the list (the detail view's own buttons land in
-    #47). An unknown project or task gets an informative text reply (the
-    same wording as the ``/tasks`` and ``/task`` not-found replies); any
-    other shape returns None for the out-of-date toast. The remaining
-    payload families (``p:``/``a:``/``s:``/``u:``, Epic #43) extend this
-    factory's body without touching the poll loop.
+    There are two payload families today. ``p:<project-id>`` (the
+    per-project buttons of the ``/projects`` view) opens that project's
+    task list view — :func:`tasks_view` resolved by id, the same view the
+    user would get typing ``/tasks <id>`` — as a new message.
+    ``t:<project-id>:<number>`` (the per-task buttons of the ``/tasks``
+    view) opens that task's detail view — ``get_task`` + ``get_history`` +
+    ``format_task_view`` — as a new message: no toast, no in-place edit of
+    the list (the detail view's own buttons land in #47). Both are
+    strictly shaped payloads (``:``-separated with the right prefix,
+    arity and integer fields); an unknown project or task gets an
+    informative text reply (the same wording as the ``/tasks`` and ``/task``
+    not-found replies); any other shape returns None for the out-of-date
+    toast. The remaining payload families (``a:``/``s:``/``u:``, Epic #43)
+    extend this factory's body without touching the poll loop.
     """
 
     def callback_dispatch(callback_query: dict) -> Optional[CallbackAction]:
@@ -722,6 +738,22 @@ def make_callback_dispatch(
         if not isinstance(data, str):
             return None
         parts = data.split(":")
+        if len(parts) == 2 and parts[0] == "p":
+            if not parts[1].isdigit():
+                return None  # malformed → run_bot's out-of-date toast
+            project_id = int(parts[1])
+            try:
+                store.get_project(project_id)
+            except NotFound:
+                return CallbackAction(
+                    reply=(
+                        f"Project '{project_id}' not found. "
+                        "Use /projects to list projects."
+                    )
+                )
+            # The same view typing "/tasks <id>" would send (including its
+            # own t: keyboard when the project has active tasks).
+            return CallbackAction(reply=tasks_view(store, str(project_id)))
         if len(parts) != 3 or parts[0] != "t":
             return None
         try:

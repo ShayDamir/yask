@@ -465,6 +465,8 @@ def test_projects_empty_board(store):
     assert len(script.sent) == 1
     assert script.sent[0]["chat_id"] == 7
     assert script.sent[0]["text"] == "Projects:\n(none)"
+    # no projects → no keyboard (the Bot API rejects an empty inline_keyboard)
+    assert "reply_markup" not in script.sent[0]
 
 
 def test_projects_populated_board(store):
@@ -501,6 +503,17 @@ def test_projects_populated_board(store):
         f"{yask}. yask — Backlog: 3, Todo: 2, In progress: 1\n"
         f"{zeta}. zeta — Blocked: 2"
     )
+    # one button per project, in display order (the p: callback payloads)
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "side-project", "callback_data": f"p:{side}"}],
+            [{"text": "yask", "callback_data": f"p:{yask}"}],
+            [{"text": "zeta", "callback_data": f"p:{zeta}"}],
+        ]
+    }
+    # every payload is well under the Bot API's 64-byte callback_data limit
+    for row in script.sent[0]["reply_markup"]["inline_keyboard"]:
+        assert len(row[0]["callback_data"].encode("utf-8")) < 64
 
 
 def test_projects_with_bot_mention(store):
@@ -541,6 +554,62 @@ def test_projects_store_failure_replies_and_recovers(store, monkeypatch):
     assert len(script.sent) == 2
     assert script.sent[0]["text"] == telegram_bot.PROJECTS_ERROR_TEXT
     assert script.sent[1]["text"] == telegram_bot.START_TEXT
+
+
+def test_projects_button_opens_tasks_view(store):
+    """Pressing a /projects button must open the project's /tasks view."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    store.move_task(pid, t["number"], "In progress", confirm=True)
+    # the button exactly as /projects emits it (the cross-task contract):
+    # label = project name, payload "p:<pid>"
+    first = run_bot_until_stop(
+        Script([[message_update(93, "/projects")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    rows = first.sent[0]["reply_markup"]["inline_keyboard"]
+    assert rows == [[{"text": "yask", "callback_data": f"p:{pid}"}]]
+    payload = rows[0][0]["callback_data"]
+    script = run_bot_until_stop(
+        Script([[callback_update(94, payload, chat_id=11)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the press is answered (no toast) and the project's /tasks view goes
+    # out as a new message to the button's chat — the exact same view
+    # typing "/tasks <id>" would send (text lines plus the t: keyboard)
+    assert script.answered == [{"callback_query_id": "cbq-94"}]
+    assert len(script.sent) == 1
+    expected = telegram_bot.tasks_view(store, str(pid))
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"] == expected.text
+    assert script.sent[0]["reply_markup"] == expected.reply_markup
+    assert script.edited == []
+
+
+def test_projects_button_no_active_tasks(store):
+    """A project with only Backlog tasks answers with plain (none) text."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "backlog only")
+    first = run_bot_until_stop(
+        Script([[message_update(95, "/projects")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    payload = first.sent[0]["reply_markup"]["inline_keyboard"][0][0][
+        "callback_data"
+    ]
+    script = run_bot_until_stop(
+        Script([[callback_update(96, payload, chat_id=11)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert script.answered == [{"callback_query_id": "cbq-96"}]
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 11
+    # no active tasks → plain text, no keyboard
+    assert script.sent[0]["text"] == "Tasks in progress:\n(none)"
+    assert "reply_markup" not in script.sent[0]
+    assert script.edited == []
 
 
 # --- /tasks (store-backed dispatch) ----------------------------------------
@@ -1897,11 +1966,23 @@ def test_callback_missing_message_skips_edit():
 
 
 def test_make_callback_dispatch_skeleton(store):
-    # the #44 baseline, now with the t: handler: non-``t:`` payloads are
-    # still unhandled (the out-of-date toast answers them) while a valid
-    # ``t:`` payload is handled
+    # now with the p: and t: handlers: a well-formed ``p:`` payload is
+    # handled (a fresh store has no projects → the not-found reply), a
+    # non-``t:``/non-``p:`` payload is still unhandled (the out-of-date
+    # toast answers it), and a valid ``t:`` payload is handled
     dispatch = telegram_bot.make_callback_dispatch(store)
-    assert dispatch(callback_update(1, "p:1")["callback_query"]) is None
+    action = dispatch(callback_update(1, "p:1")["callback_query"])
+    assert action is not None
+    assert action.answer_text is None
+    assert action.edit is None
+    assert (
+        action.reply
+        == "Project '1' not found. Use /projects to list projects."
+    )
+    assert (
+        dispatch(callback_update(3, "stale:payload")["callback_query"])
+        is None
+    )
     pid = store.create_project("alpha")["id"]
     t = store.create_task(pid, "working")
     action = dispatch(callback_update(2, f"t:{pid}:{t['number']}")["callback_query"])
@@ -1962,13 +2043,26 @@ def test_callback_dispatch_unknown_project(store):
     )
 
 
+def test_callback_dispatch_unknown_project_p(store):
+    store.create_project("alpha")
+    dispatch = telegram_bot.make_callback_dispatch(store)
+    action = dispatch(callback_update(308, "p:999")["callback_query"])
+    assert action is not None
+    assert action.answer_text is None
+    assert action.edit is None
+    assert (
+        action.reply
+        == "Project '999' not found. Use /projects to list projects."
+    )
+
+
 @pytest.mark.parametrize(
     "payload",
-    ["t:1", "t:1:4:9", "t:x:4", "t:", "p:1", "stale:payload"],
+    ["t:1", "t:1:4:9", "t:x:4", "t:", "p:", "p:abc", "stale:payload"],
 )
 def test_callback_dispatch_unhandled_payloads(store, payload):
-    # wrong family (p: is reserved for #46), wrong arity, or non-numeric
-    # fields: nothing to do → run_bot answers with the out-of-date toast
+    # wrong family, wrong arity, or non-numeric fields: nothing to do →
+    # run_bot answers with the out-of-date toast
     dispatch = telegram_bot.make_callback_dispatch(store)
     assert dispatch(callback_update(305, payload)["callback_query"]) is None
 
