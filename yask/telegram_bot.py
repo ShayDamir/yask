@@ -29,9 +29,10 @@ view as a new message, the ``a:`` payload (the per-attachment buttons of the
 view) toggles the chat's subscription and flips the button in place. While
 the bot runs, the
 :class:`Notifier` polls ``state_history`` after each successful
-``getUpdates`` batch and pushes a
-plain-text message per transition to every subscribed chat; latency is at
-most one poll interval. Later features of the Telegram interface (Epic #27)
+``getUpdates`` batch and pushes a message per transition to every
+subscribed chat, each carrying one inline button (payload
+``t:<project-id>:<number>``) that opens the task's detail view; latency is
+at most one poll interval. Later features of the Telegram interface (Epic #27)
 extend the dispatch layer on top of the store passed in here.
 
 The bot talks to the Bot API directly with ``httpx`` (already a project
@@ -124,6 +125,12 @@ ATTACHMENT_USAGE_TEXT = (
 # by capping the description and the visible history.
 DESCRIPTION_MAX = 2500
 HISTORY_MAX = 10
+
+# Display cap for the state-change notification's button label. Telegram
+# documents no limit on inline button text (only ``callback_data`` is
+# hard-capped at 64 bytes, which ``t:<project-id>:<number>`` always
+# satisfies), so 64 chars is a compact, safe display choice.
+NOTIFICATION_BUTTON_TEXT_MAX = 64
 
 # Static command table. Store-backed commands (today: /projects, /tasks,
 # /task, /attachment, /subscribe, /unsubscribe) live in make_dispatch;
@@ -722,19 +729,44 @@ def unsubscribe_view(store: Store, chat_id: int, arg: str) -> str:
     return f"You are not subscribed to {project['name']} ({project['id']})."
 
 
-def format_notification(change: dict) -> str:
-    """One plain-text notification for a state-history change.
+def _truncate_button_label(
+    label: str, max_len: int = NOTIFICATION_BUTTON_TEXT_MAX
+) -> str:
+    """A button label capped at ``max_len`` chars (char-based).
 
-    ``{project_name}: #{number} {title} — {from_state} → {to_state}
-    (/task {project_id} {number})``. The trailing ``/task`` reference
-    follows the ``/tasks`` drill-down convention and is answered by the
-    ``/task`` command.
+    The label goes out unchanged when it already fits; otherwise it is cut
+    to ``max_len - 1`` chars and suffixed with an ellipsis (``…``), so the
+    total length never exceeds ``max_len``.
     """
-    return (
+    if len(label) <= max_len:
+        return label
+    return f"{label[:max_len - 1]}…"
+
+
+def format_notification(change: dict) -> KeyboardReply:
+    """One notification message for a state-history change.
+
+    The text is ``{project_name}: #{number} {title} — {from_state} →
+    {to_state} (/task {project_id} {number})`` — the trailing ``/task``
+    reference follows the ``/tasks`` drill-down convention and is answered
+    by the ``/task`` command. The message carries one inline button: label
+    ``#<number> <title>`` (truncated to
+    :data:`NOTIFICATION_BUTTON_TEXT_MAX` chars), payload
+    ``t:<project_id>:<number>`` — answered by :func:`make_callback_dispatch`
+    (the ``t:`` handler), which opens the task's detail view. No
+    subscribe/unsubscribe toggle: the Notifier only fans out to subscribed
+    chats, so the receiving chat is subscribed by definition.
+    """
+    text = (
         f"{change['project_name']}: #{change['number']} {change['title']} — "
         f"{change['from_state']} → {change['to_state']} "
         f"(/task {change['project_id']} {change['number']})"
     )
+    button = {
+        "text": _truncate_button_label(f"#{change['number']} {change['title']}"),
+        "callback_data": f"t:{change['project_id']}:{change['number']}",
+    }
+    return KeyboardReply(text, {"inline_keyboard": [[button]]})
 
 
 def make_dispatch(store: Store) -> Callable[..., Optional[Reply]]:
@@ -1193,10 +1225,12 @@ class Notifier:
     made while the bot runs are notified — no replay storm on restart.
     :meth:`check` is the per-poll-cycle hook: it fetches the changes
     recorded since the cursor and, in id order, sends each one to every
-    chat subscribed to its project. The cursor advances only past a change
-    that reached all of its subscribers, so a failed send is retried on the
-    next cycle (chats that already received it get a duplicate — accepted,
-    a lost change would be worse).
+    chat subscribed to its project. Each notification carries one inline
+    button (``t:<project-id>:<number>``) that opens the task's detail view.
+    The cursor advances only past a change that reached all of its
+    subscribers, so a failed send is retried on the next cycle (chats that
+    already received it get a duplicate — accepted, a lost change would be
+    worse).
     """
 
     def __init__(self, api: BotAPI, store: Store) -> None:
@@ -1213,7 +1247,7 @@ class Notifier:
         changes = self._store.new_state_changes(self._cursor)
         for change in changes:
             for chat_id in self._store.subscribed_chats(change["project_id"]):
-                await self._api.send_message(chat_id, format_notification(change))
+                await _send_reply(self._api, chat_id, format_notification(change))
             self._cursor = change["id"]
 
 

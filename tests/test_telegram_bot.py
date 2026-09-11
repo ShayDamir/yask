@@ -1525,10 +1525,10 @@ class FakeAPI:
         self.sent = []
         self.fail_for = set(fail_for or ())
 
-    async def send_message(self, chat_id, text):
+    async def send_message(self, chat_id, text, reply_markup=None):
         if chat_id in self.fail_for:
             raise telegram_bot.BotAPIError("simulated send failure")
-        self.sent.append((chat_id, text))
+        self.sent.append((chat_id, text, reply_markup))
         return {"message_id": len(self.sent)}
 
 
@@ -1543,6 +1543,20 @@ def _notification(pid, t, title, to_state):
         f"yask: #{t['number']} {title} — Backlog → {to_state} "
         f"(/task {pid} {t['number']})"
     )
+
+
+def _notification_markup(pid, t, title):
+    """The single-button keyboard a notification message carries."""
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": f"#{t['number']} {title}",
+                    "callback_data": f"t:{pid}:{t['number']}",
+                }
+            ]
+        ]
+    }
 
 
 def test_notifier_seed_suppresses_pre_seed_history(store):
@@ -1562,11 +1576,12 @@ def test_notifier_sends_each_change_once(store):
     notifier = telegram_bot.Notifier(api, store)
     notifier.seed()
     t = _moved(store, pid)
+    markup = _notification_markup(pid, t, "working")
     asyncio.run(notifier.check())
-    assert api.sent == [(7, _notification(pid, t, "working", "Review"))]
+    assert api.sent == [(7, _notification(pid, t, "working", "Review"), markup)]
     # a second cycle sends nothing new
     asyncio.run(notifier.check())
-    assert api.sent == [(7, _notification(pid, t, "working", "Review"))]
+    assert api.sent == [(7, _notification(pid, t, "working", "Review"), markup)]
 
 
 def test_notifier_without_subscribers_sends_nothing(store):
@@ -1587,10 +1602,11 @@ def test_notifier_fans_out_to_all_subscribed_chats(store):
     notifier = telegram_bot.Notifier(api, store)
     notifier.seed()
     t = _moved(store, pid)
+    markup = _notification_markup(pid, t, "working")
     asyncio.run(notifier.check())
     assert api.sent == [
-        (-100, _notification(pid, t, "working", "Review")),
-        (7, _notification(pid, t, "working", "Review")),
+        (-100, _notification(pid, t, "working", "Review"), markup),
+        (7, _notification(pid, t, "working", "Review"), markup),
     ]
 
 
@@ -1614,10 +1630,15 @@ def test_notifier_covers_archive_and_restore(store):
     t = store.create_task(pid, "doomed")
     store.archive_task(pid, t["number"], confirm=True)
     store.restore_task(pid, t["number"], confirm=True)
+    markup = _notification_markup(pid, t, "doomed")
     asyncio.run(notifier.check())
     assert api.sent == [
-        (7, _notification(pid, t, "doomed", "Archived")),
-        (7, f"yask: #{t['number']} doomed — Archived → Backlog (/task {pid} {t['number']})"),
+        (7, _notification(pid, t, "doomed", "Archived"), markup),
+        (
+            7,
+            f"yask: #{t['number']} doomed — Archived → Backlog (/task {pid} {t['number']})",
+            markup,
+        ),
     ]
 
 
@@ -1630,15 +1651,94 @@ def test_notifier_failed_send_keeps_cursor_and_retries(store):
     notifier.seed()
     t = _moved(store, pid)
     expected = _notification(pid, t, "working", "Review")
+    markup = _notification_markup(pid, t, "working")
 
     with pytest.raises(telegram_bot.BotAPIError):
         asyncio.run(notifier.check())
     # fan-out stopped at the failing chat; the cursor did not advance
-    assert api.sent == [(1, expected)]
+    assert api.sent == [(1, expected, markup)]
     # recovery: the pending change is re-sent; chat 1 gets a duplicate
     api.fail_for = set()
     asyncio.run(notifier.check())
-    assert api.sent == [(1, expected), (1, expected), (2, expected)]
+    assert api.sent == [
+        (1, expected, markup),
+        (1, expected, markup),
+        (2, expected, markup),
+    ]
+
+
+def test_notification_message_carries_task_button(store):
+    pid = store.create_project("yask")["id"]
+    store.subscribe_project(7, pid)
+    api = FakeAPI()
+    notifier = telegram_bot.Notifier(api, store)
+    notifier.seed()
+    t = _moved(store, pid)
+    asyncio.run(notifier.check())
+    chat_id, text, markup = api.sent[0]
+    assert chat_id == 7
+    # the message text is unchanged; the button opens the task's detail view
+    assert text == _notification(pid, t, "working", "Review")
+    assert markup == {
+        "inline_keyboard": [
+            [
+                {
+                    "text": f"#{t['number']} working",
+                    "callback_data": f"t:{pid}:{t['number']}",
+                }
+            ]
+        ]
+    }
+
+
+def test_notification_button_opens_task_detail(store):
+    pid = store.create_project("yask")["id"]
+    store.subscribe_project(7, pid)
+    api = FakeAPI()
+    notifier = telegram_bot.Notifier(api, store)
+    notifier.seed()
+    t = _moved(store, pid)
+    asyncio.run(notifier.check())
+    # press the button the notification sent
+    _, _, markup = api.sent[0]
+    button = markup["inline_keyboard"][0][0]
+    assert button["callback_data"] == f"t:{pid}:{t['number']}"
+    action = telegram_bot.make_callback_dispatch(store)(
+        callback_update(401, button["callback_data"])["callback_query"]
+    )
+    # chat 7 is subscribed, so the detail view carries the toggle in its
+    # Unsubscribe state
+    assert action is not None
+    assert action.reply == telegram_bot.format_task_view(
+        store.get_task(pid, t["number"]),
+        store.get_project(pid),
+        store.get_history(pid, t["number"]),
+        chat_id=7,
+        subscribed=True,
+    )
+
+
+def test_notification_button_label_truncated(store):
+    long_title = "x" * 100  # well over the button label cap
+    pid = store.create_project("yask")["id"]
+    store.subscribe_project(7, pid)
+    api = FakeAPI()
+    notifier = telegram_bot.Notifier(api, store)
+    notifier.seed()
+    t = _moved(store, pid, long_title)
+    asyncio.run(notifier.check())
+    _, text, markup = api.sent[0]
+    # the message text keeps the full title
+    assert text == _notification(pid, t, long_title, "Review")
+    button = markup["inline_keyboard"][0][0]
+    cap = telegram_bot.NOTIFICATION_BUTTON_TEXT_MAX
+    full = f"#{t['number']} {long_title}"
+    # the label is cut to cap - 1 chars + ellipsis (total length == cap)
+    assert len(full) > cap
+    assert button["text"] == full[: cap - 1] + "…"
+    assert len(button["text"]) == cap
+    # the payload is unaffected by the truncation
+    assert button["callback_data"] == f"t:{pid}:{t['number']}"
 
 
 def test_run_bot_notifier_end_to_end(store):
@@ -1646,11 +1746,13 @@ def test_run_bot_notifier_end_to_end(store):
     t = store.create_task(pid, "working")
 
     # poll 1: /subscribe; poll 2: a second process (web UI / MCP) moves the
-    # task, and /start arrives with the same batch; poll 3 drains the script
+    # task, and /start arrives with the same batch; poll 3 presses the
+    # notification's task button; poll 4 drains the script
     script = Script(
         [
             [message_update(301, "/subscribe yask")],
             [message_update(302, "/start")],
+            [callback_update(303, f"t:{pid}:{t['number']}", chat_id=7)],
         ]
     )
     base_handler = script.handler
@@ -1675,21 +1777,38 @@ def test_run_bot_notifier_end_to_end(store):
                 poll_timeout=1,
                 error_delay=0.01,
                 on_cycle=notifier.check,
+                callback_dispatch=telegram_bot.make_callback_dispatch(store),
             )
         finally:
             await client.aclose()
 
     asyncio.run(go())
 
-    assert [m["chat_id"] for m in script.sent] == [7, 7, 7]
+    assert [m["chat_id"] for m in script.sent] == [7, 7, 7, 7]
     assert script.sent[0]["text"] == (
         f"Subscribed to yask ({pid}) — you will be notified about "
         "task state changes in this project."
     )
     assert script.sent[1]["text"] == telegram_bot.START_TEXT
-    # the notification arrives after the move, and the draining poll 3 adds
-    # no duplicate
+    # the notification arrives after the move with its task-detail button,
+    # and the draining poll 4 adds no duplicate
     assert script.sent[2]["text"] == _notification(pid, t, "working", "Review")
+    assert script.sent[2]["reply_markup"] == _notification_markup(
+        pid, t, "working"
+    )
+    # poll 3's button press sends the task detail view through the real
+    # (mocked) HTTP layer, with the view's own keyboard (chat 7 subscribed
+    # → the toggle in its Unsubscribe state)
+    expected_detail = telegram_bot.format_task_view(
+        store.get_task(pid, t["number"]),
+        store.get_project(pid),
+        store.get_history(pid, t["number"]),
+        chat_id=7,
+        subscribed=True,
+    )
+    assert isinstance(expected_detail, telegram_bot.KeyboardReply)
+    assert script.sent[3]["text"] == expected_detail.text
+    assert script.sent[3]["reply_markup"] == expected_detail.reply_markup
 
 
 # --- inline-keyboard callbacks (BotAPI + run_bot plumbing) -------------------
