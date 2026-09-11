@@ -21,9 +21,13 @@ are answered through a second dispatch layer,
 :func:`make_callback_dispatch`: every callback is answered (the client's
 progress bar hangs until it is answered) and an unrecognized payload gets
 a toast instead of a crash; the ``p:`` payload (the per-project buttons of
-``/projects``) opens the project's task list view as a new message and the
-``t:`` payload (the per-task buttons of ``/tasks``) opens the task's
-detail view as a new message. While the bot runs, the
+``/projects``) opens the project's task list view as a new message, the
+``t:`` payload (the per-task buttons of ``/tasks``) opens the task's detail
+view as a new message, the ``a:`` payload (the per-attachment buttons of the
+``/task`` view) sends the attachment to the chat as a file, and the
+``s:``/``u:`` payload (the subscribe/unsubscribe toggle of the ``/task``
+view) toggles the chat's subscription and flips the button in place. While
+the bot runs, the
 :class:`Notifier` polls ``state_history`` after each successful
 ``getUpdates`` batch and pushes a
 plain-text message per transition to every subscribed chat; latency is at
@@ -433,7 +437,54 @@ class CallbackAction:
     edit: Optional[MessageEdit] = None
 
 
-def format_task_view(task: dict, project: dict, history: list[dict]) -> str:
+def _toggle_button(project_id: int, subscribed: bool) -> dict:
+    """The subscribe/unsubscribe toggle button of a task view's keyboard.
+
+    ``Subscribe`` (payload ``s:<project-id>``) when the chat is not
+    subscribed to the project, ``Unsubscribe`` (payload ``u:<project-id>``)
+    when it is; both are answered by :func:`make_callback_dispatch`.
+    """
+    if subscribed:
+        return {"text": "Unsubscribe", "callback_data": f"u:{project_id}"}
+    return {"text": "Subscribe", "callback_data": f"s:{project_id}"}
+
+
+def _flip_toggle(
+    rows: list, project_id: int, old_payload: str, subscribed: bool
+) -> list:
+    """The task-view keyboard after a toggle press.
+
+    The button whose ``callback_data`` is ``old_payload`` (the button that
+    was pressed) is replaced in place by the toggle button for the new
+    ``subscribed`` state; every other row (the attachment buttons) is
+    preserved as-is. A keyboard with no such button — missing or stale from
+    an older bot version — falls back to a single row with just the new
+    toggle button.
+    """
+    new_button = _toggle_button(project_id, subscribed)
+    new_rows = []
+    flipped = False
+    for row in rows:
+        new_row = []
+        for button in row:
+            if not flipped and button.get("callback_data") == old_payload:
+                new_row.append(new_button)
+                flipped = True
+            else:
+                new_row.append(button)
+        new_rows.append(new_row)
+    if not flipped:
+        return [[new_button]]
+    return new_rows
+
+
+def format_task_view(
+    task: dict,
+    project: dict,
+    history: list[dict],
+    chat_id: Optional[int] = None,
+    subscribed: bool = False,
+) -> Reply:
     """The ``/task`` detail reply for one task.
 
     A header line in the ``/tasks`` task-line style (``#n title — type``),
@@ -443,6 +494,16 @@ def format_task_view(task: dict, project: dict, history: list[dict]) -> str:
     drill-down reference) and the most recent :data:`HISTORY_MAX` history
     rows (with an earlier-count note). Creation rows (``from_state`` is
     NULL) render as ``created``.
+
+    Without a ``chat_id`` (the pure formatter) the reply is that text as a
+    plain :class:`str`, byte-identical to the no-button form. With a
+    ``chat_id`` it is a :class:`KeyboardReply` carrying the same text and an
+    inline keyboard: one row per attachment (label = filename, payload
+    ``a:<project-id>:<number>:<attachment-id>``, answered by
+    :func:`make_callback_dispatch`) in id order, then the subscribe/
+    unsubscribe toggle row (:func:`_toggle_button`, driven by
+    ``subscribed``). The keyboard always has at least one row (the toggle),
+    so the Bot API's empty-inline-keyboard rejection never triggers.
     """
     lines = [f"#{task['number']} {task['title']} — {task['type']}"]
     lines.append(f"State: {task['state']}")
@@ -482,7 +543,22 @@ def format_task_view(task: dict, project: dict, history: list[dict]) -> str:
                     f"  {h['changed_at']} — {h['from_state']} → {h['to_state']} "
                     f"({h['source']})"
                 )
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    if chat_id is None:
+        return text
+    rows = [
+        [
+            {
+                "text": a["filename"],
+                "callback_data": (
+                    f"a:{project['id']}:{task['number']}:{a['id']}"
+                ),
+            }
+        ]
+        for a in task["attachments"]
+    ]
+    rows.append([_toggle_button(project["id"], subscribed)])
+    return KeyboardReply(text, {"inline_keyboard": rows})
 
 
 def _resolve_task(store: Store, project: dict, ref: str) -> Union[str, dict]:
@@ -514,7 +590,9 @@ def _resolve_task(store: Store, project: dict, ref: str) -> Union[str, dict]:
     return store.get_task(project["id"], matches[0]["number"])
 
 
-def task_view(store: Store, arg: Optional[str]) -> str:
+def task_view(
+    store: Store, arg: Optional[str], chat_id: Optional[int] = None
+) -> Reply:
     """Format the ``/task <project> <number|title>`` reply.
 
     The argument mixes a project reference and a task reference, either of
@@ -523,6 +601,12 @@ def task_view(store: Store, arg: Optional[str]) -> str:
     title). No argument, or no task reference after the project, gets the
     usage text; an unresolvable project gets the not-found reply pointing
     at ``/projects``.
+
+    With a ``chat_id`` the reply is the task view's keyboard form: the
+    subscribe/unsubscribe toggle button reflects whether the chat is
+    currently subscribed to the project (computed from
+    ``store.list_subscriptions``). Without one, the plain text form is
+    returned.
     """
     if arg is None or not arg.strip():
         return TASK_USAGE_TEXT
@@ -538,7 +622,13 @@ def task_view(store: Store, arg: Optional[str]) -> str:
     if not isinstance(task, dict):
         return task
     history = store.get_history(project["id"], task["number"])
-    return format_task_view(task, project, history)
+    subscribed = False
+    if chat_id is not None:
+        subscribed = any(
+            s["project_id"] == project["id"]
+            for s in store.list_subscriptions(chat_id)
+        )
+    return format_task_view(task, project, history, chat_id, subscribed)
 
 
 def attachment_view(store: Store, arg: Optional[str]) -> Union[str, FileReply]:
@@ -678,7 +768,7 @@ def make_dispatch(store: Store) -> Callable[..., Optional[Reply]]:
                 return TASKS_ERROR_TEXT
         if cmd == "/task":
             try:
-                return task_view(store, _tasks_arg(text))
+                return task_view(store, _tasks_arg(text), chat_id)
             except Exception:
                 return TASK_ERROR_TEXT
         if cmd == "/attachment":
@@ -717,20 +807,31 @@ def make_callback_dispatch(
     :class:`CallbackAction` (or None for "nothing to do" — answered with
     the out-of-date toast by ``run_bot``).
 
-    There are two payload families today. ``p:<project-id>`` (the
-    per-project buttons of the ``/projects`` view) opens that project's
-    task list view — :func:`tasks_view` resolved by id, the same view the
-    user would get typing ``/tasks <id>`` — as a new message.
+    There are four payload families. ``p:<project-id>`` (the per-project
+    buttons of the ``/projects`` view) opens that project's task list view
+    — :func:`tasks_view` resolved by id, the same view the user would get
+    typing ``/tasks <id>`` — as a new message.
     ``t:<project-id>:<number>`` (the per-task buttons of the ``/tasks``
     view) opens that task's detail view — ``get_task`` + ``get_history`` +
-    ``format_task_view`` — as a new message: no toast, no in-place edit of
-    the list (the detail view's own buttons land in #47). Both are
-    strictly shaped payloads (``:``-separated with the right prefix,
-    arity and integer fields); an unknown project or task gets an
-    informative text reply (the same wording as the ``/tasks`` and ``/task``
-    not-found replies); any other shape returns None for the out-of-date
-    toast. The remaining payload families (``a:``/``s:``/``u:``, Epic #43)
-    extend this factory's body without touching the poll loop.
+    ``format_task_view`` — as a new message carrying the task view's own
+    buttons: the chat id is read from the callback's message, so the
+    detail's keyboard reflects that chat's subscription state (an
+    inaccessible message, with no chat, gets the plain text instead).
+    ``a:<project-id>:<number>:<attachment-id>`` (the per-attachment buttons
+    of the ``/task`` view) sends the attachment to the button's chat as a
+    file — the same resolution and :class:`FileReply` shape as
+    ``/attachment``. ``s:<project-id>``/``u:<project-id>`` (the
+    subscribe/unsubscribe toggle of the ``/task`` view) toggles the
+    button's chat's subscription in the store and re-renders the message in
+    place (``editMessageText``): the text is unchanged, the pressed toggle
+    button flips to its other state, and the other rows (the attachment
+    buttons) are preserved — a stale keyboard with no toggle falls back to
+    a single toggle row; a toast confirms the new state. All four are
+    strictly shaped payloads (``:``-separated with the right prefix, arity
+    and integer fields); an unknown project, task or attachment gets an
+    informative text reply (the same wording as the corresponding
+    command's not-found reply); any other shape returns None for the
+    out-of-date toast.
     """
 
     def callback_dispatch(callback_query: dict) -> Optional[CallbackAction]:
@@ -754,30 +855,129 @@ def make_callback_dispatch(
             # The same view typing "/tasks <id>" would send (including its
             # own t: keyboard when the project has active tasks).
             return CallbackAction(reply=tasks_view(store, str(project_id)))
-        if len(parts) != 3 or parts[0] != "t":
-            return None
-        try:
+        if len(parts) == 3 and parts[0] == "t":
+            try:
+                project_id = int(parts[1])
+                number = int(parts[2])
+            except ValueError:
+                return None
+            try:
+                project = store.get_project(project_id)
+            except NotFound:
+                return CallbackAction(
+                    reply=(
+                        f"Project '{project_id}' not found. "
+                        "Use /projects to list projects."
+                    )
+                )
+            try:
+                task = store.get_task(project_id, number)
+            except NotFound:
+                return CallbackAction(
+                    reply=f"Task #{number} not found in {project['name']}."
+                )
+            history = store.get_history(project_id, number)
+            # The detail reply carries its own keyboard only when the
+            # button's chat is known (an inaccessible message arrives with
+            # no chat → the plain text, as before): the toggle button
+            # reflects that chat's subscription state.
+            message = callback_query.get("message") or {}
+            chat_id = (message.get("chat") or {}).get("id")
+            subscribed = False
+            if chat_id is not None:
+                subscribed = any(
+                    s["project_id"] == project_id
+                    for s in store.list_subscriptions(chat_id)
+                )
+            return CallbackAction(
+                reply=format_task_view(task, project, history, chat_id, subscribed)
+            )
+        if len(parts) == 4 and parts[0] == "a":
+            if not (
+                parts[1].isdigit() and parts[2].isdigit() and parts[3].isdigit()
+            ):
+                return None  # malformed → run_bot's out-of-date toast
             project_id = int(parts[1])
             number = int(parts[2])
-        except ValueError:
-            return None
-        try:
-            project = store.get_project(project_id)
-        except NotFound:
+            attachment_id = int(parts[3])
+            try:
+                project = store.get_project(project_id)
+            except NotFound:
+                return CallbackAction(
+                    reply=(
+                        f"Project '{project_id}' not found. "
+                        "Use /projects to list projects."
+                    )
+                )
+            try:
+                task = store.get_task(project_id, number)
+            except NotFound:
+                return CallbackAction(
+                    reply=f"Task #{number} not found in {project['name']}."
+                )
+            try:
+                meta, data = store.get_task_attachment(
+                    project_id, number, attachment_id
+                )
+            except NotFound:
+                return CallbackAction(
+                    reply=(
+                        f"Attachment {attachment_id} not found on task "
+                        f"#{number} ({project['name']}). Use /task "
+                        f"{project['name']} {number} to list the task's "
+                        "attachments."
+                    )
+                )
             return CallbackAction(
-                reply=(
-                    f"Project '{project_id}' not found. "
-                    "Use /projects to list projects."
+                reply=FileReply(
+                    filename=meta["filename"],
+                    data=data,
+                    content_type=meta["content_type"],
+                    caption=f"#{number} {task['title']} — {meta['filename']}",
                 )
             )
-        try:
-            task = store.get_task(project_id, number)
-        except NotFound:
+        if len(parts) == 2 and parts[0] in ("s", "u") and parts[1].isdigit():
+            project_id = int(parts[1])
+            try:
+                project = store.get_project(project_id)
+            except NotFound:
+                return CallbackAction(
+                    reply=(
+                        f"Project '{project_id}' not found. "
+                        "Use /projects to list projects."
+                    )
+                )
+            message = callback_query.get("message") or {}
+            # A subscription is per chat: an inaccessible message (no chat)
+            # cannot be toggled → the out-of-date toast.
+            chat_id = (message.get("chat") or {}).get("id")
+            if chat_id is None:
+                return None
+            if parts[0] == "s":
+                store.subscribe_project(chat_id, project_id)
+                subscribed = True
+                answer = f"Subscribed to {project['name']}"
+            else:
+                store.unsubscribe_project(chat_id, project_id)
+                subscribed = False
+                answer = f"Unsubscribed from {project['name']}"
+            # In-place re-render: a toggle leaves the message text unchanged
+            # and only flips the pressed toggle button; an inaccessible
+            # message (no text) gets the toast only.
+            text = message.get("text")
+            if text is None:
+                return CallbackAction(answer_text=answer)
+            rows = (message.get("reply_markup") or {}).get("inline_keyboard") or []
             return CallbackAction(
-                reply=f"Task #{number} not found in {project['name']}."
+                answer_text=answer,
+                edit=MessageEdit(
+                    text,
+                    {"inline_keyboard": _flip_toggle(rows, project_id, data, subscribed)},
+                ),
             )
-        history = store.get_history(project_id, number)
-        return CallbackAction(reply=format_task_view(task, project, history))
+        # Any other shape (wrong family, arity, or non-numeric fields):
+        # nothing to do → run_bot's out-of-date toast.
+        return None
 
     return callback_dispatch
 

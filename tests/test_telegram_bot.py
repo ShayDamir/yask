@@ -1142,6 +1142,50 @@ def test_tasks_drill_down_to_task_view(store):
     assert script.edited == []
 
 
+def test_task_view_attachment_and_toggle_buttons(store):
+    """The /task detail keyboard: one row per attachment + the toggle."""
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    n = t["number"]
+    attachment_rows = [
+        [{"text": "plan.md", "callback_data": f"a:{pid}:{n}:{d['plan']['id']}"}],
+        [{"text": "img.png", "callback_data": f"a:{pid}:{n}:{d['img']['id']}"}],
+    ]
+    script = run_bot_until_stop(
+        Script([[message_update(281, f"/task yask {n}")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    sent = script.sent[0]
+    # the text is unchanged from the no-button form
+    assert sent["text"] == expected_task_text(store, d)
+    assert sent["reply_markup"] == {
+        "inline_keyboard": attachment_rows
+        + [[{"text": "Subscribe", "callback_data": f"s:{pid}"}]]
+    }
+    # subscribing the chat flips only the toggle button
+    store.subscribe_project(7, pid)
+    script = run_bot_until_stop(
+        Script([[message_update(282, f"/task yask {n}")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    rows = script.sent[0]["reply_markup"]["inline_keyboard"]
+    assert rows[:2] == attachment_rows
+    assert rows[-1] == [{"text": "Unsubscribe", "callback_data": f"u:{pid}"}]
+
+
+def test_format_task_view_without_chat_is_plain_str(store):
+    """No chat id → the plain text form, byte-identical (no keyboard)."""
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    reply = telegram_bot.format_task_view(
+        store.get_task(pid, t["number"]),
+        store.get_project(pid),
+        store.get_history(pid, t["number"]),
+    )
+    assert isinstance(reply, str)
+    assert reply == expected_task_text(store, d)
+
+
 def test_task_store_failure_replies_and_recovers(store, monkeypatch):
     pid = store.create_project("yask")["id"]
     store.create_task(pid, "working")
@@ -1966,10 +2010,12 @@ def test_callback_missing_message_skips_edit():
 
 
 def test_make_callback_dispatch_skeleton(store):
-    # now with the p: and t: handlers: a well-formed ``p:`` payload is
-    # handled (a fresh store has no projects → the not-found reply), a
-    # non-``t:``/non-``p:`` payload is still unhandled (the out-of-date
-    # toast answers it), and a valid ``t:`` payload is handled
+    # with the p:, t:, a: and s:/u: handlers: a well-formed ``p:`` payload
+    # is handled (a fresh store has no projects → the not-found reply), an
+    # unrecognised payload is still unhandled (the out-of-date toast
+    # answers it), and a valid ``t:`` payload is handled — the callback's
+    # message carries a chat, so the detail reply is a KeyboardReply with
+    # the task view's own buttons (no attachments here → just the toggle).
     dispatch = telegram_bot.make_callback_dispatch(store)
     action = dispatch(callback_update(1, "p:1")["callback_query"])
     assert action is not None
@@ -1985,6 +2031,8 @@ def test_make_callback_dispatch_skeleton(store):
     )
     pid = store.create_project("alpha")["id"]
     t = store.create_task(pid, "working")
+    # callback_update's message has chat.id == 7, so the detail reply is the
+    # keyboard form for that (unsubscribed) chat
     action = dispatch(callback_update(2, f"t:{pid}:{t['number']}")["callback_query"])
     assert action is not None
     assert action.answer_text is None
@@ -1993,6 +2041,8 @@ def test_make_callback_dispatch_skeleton(store):
         store.get_task(pid, t["number"]),
         store.get_project(pid),
         store.get_history(pid, t["number"]),
+        chat_id=7,
+        subscribed=False,
     )
 
 
@@ -2014,8 +2064,13 @@ def test_callback_dispatch_task_detail_round_trip(store):
     assert sent["text"].startswith(f"#{t['number']} working — Story\n")
     assert "State: In progress" in sent["text"]
     assert "Estimate: 3" in sent["text"]
-    # the detail's own buttons (attachments, subscribe) land in #47
-    assert "reply_markup" not in sent
+    # the detail carries its own keyboard (no attachments on this task →
+    # just the subscribe toggle, reflecting chat 11's subscription state)
+    assert sent["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "Subscribe", "callback_data": f"s:{pid}"}]
+        ]
+    }
     assert script.edited == []
     assert script.offsets == [None, 303]
 
@@ -2056,9 +2111,253 @@ def test_callback_dispatch_unknown_project_p(store):
     )
 
 
+# --- a: payload (the /task view's per-attachment buttons) -------------------
+
+
+def test_callback_dispatch_attachment_sends_file(store):
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    dispatch = telegram_bot.make_callback_dispatch(store)
+    action = dispatch(
+        callback_update(291, f"a:{pid}:{t['number']}:{d['plan']['id']}")[
+            "callback_query"
+        ]
+    )
+    assert action is not None
+    assert action.answer_text is None
+    assert action.edit is None
+    reply = action.reply
+    assert isinstance(reply, telegram_bot.FileReply)
+    assert reply.filename == "plan.md"
+    assert reply.data == d["plan_bytes"]
+    assert reply.content_type == "text/markdown"
+    assert reply.caption == f"#{t['number']} working — plan.md"
+
+
+def test_callback_dispatch_attachment_round_trip(store):
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    # markdown attachment → sendDocument
+    script = run_bot_until_stop(
+        Script(
+            [[callback_update(292, f"a:{pid}:{t['number']}:{d['plan']['id']}", chat_id=13)]]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert script.answered == [{"callback_query_id": "cbq-292"}]
+    assert script.sent == []  # a file, not a text message
+    assert len(script.sent_files) == 1
+    f = script.sent_files[0]
+    assert f["method"] == "sendDocument"
+    assert f["chat_id"] == 13
+    assert f["filename"] == "plan.md"
+    assert f["data"] == d["plan_bytes"]
+    assert f["caption"] == f"#{t['number']} working — plan.md"
+    # image attachment → sendPhoto (the /attachment convention)
+    script = run_bot_until_stop(
+        Script(
+            [[callback_update(293, f"a:{pid}:{t['number']}:{d['img']['id']}", chat_id=13)]]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert len(script.sent_files) == 1
+    f = script.sent_files[0]
+    assert f["method"] == "sendPhoto"
+    assert f["filename"] == "img.png"
+    assert f["data"] == PNG
+    assert f["caption"] == f"#{t['number']} working — img.png"
+
+
+def test_callback_dispatch_attachment_not_found(store):
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    dispatch = telegram_bot.make_callback_dispatch(store)
+    # unknown project
+    action = dispatch(callback_update(294, "a:999:1:1")["callback_query"])
+    assert action is not None
+    assert action.reply == (
+        "Project '999' not found. Use /projects to list projects."
+    )
+    # unknown task
+    action = dispatch(
+        callback_update(295, f"a:{pid}:42:{d['plan']['id']}")["callback_query"]
+    )
+    assert action is not None
+    assert action.reply == "Task #42 not found in yask."
+    # unknown attachment id
+    action = dispatch(
+        callback_update(296, f"a:{pid}:{t['number']}:4242")["callback_query"]
+    )
+    assert action is not None
+    assert action.reply == (
+        f"Attachment 4242 not found on task #{t['number']} (yask). "
+        f"Use /task yask {t['number']} to list the task's attachments."
+    )
+    # a foreign attachment (belongs to another task) never leaks
+    other = store.create_task(pid, "other")
+    foreign = store.add_attachment(
+        pid, other["number"], "x.md", "text/markdown", b"x"
+    )
+    action = dispatch(
+        callback_update(297, f"a:{pid}:{t['number']}:{foreign['id']}")[
+            "callback_query"
+        ]
+    )
+    assert action is not None
+    assert action.reply == (
+        f"Attachment {foreign['id']} not found on task #{t['number']} (yask). "
+        f"Use /task yask {t['number']} to list the task's attachments."
+    )
+
+
+# --- s:/u: payload (the /task view's subscribe toggle) ----------------------
+
+
+def _detail_callback(update_id, data, chat_id, detail):
+    """A callback_update whose original message carries the /task detail
+    (``text`` + ``reply_markup``) — the shape Telegram sends when a button
+    on the detail message is pressed."""
+    update = callback_update(update_id, data, chat_id=chat_id)
+    update["callback_query"]["message"]["text"] = detail["text"]
+    update["callback_query"]["message"]["reply_markup"] = detail["reply_markup"]
+    return update
+
+
+def test_callback_dispatch_subscribe_toggle(store):
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    chat_id = 21
+    # the real /task detail (text + keyboard) as the original message
+    first = run_bot_until_stop(
+        Script([[message_update(298, f"/task yask {t['number']}", chat_id=chat_id)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    detail = first.sent[0]
+    update = _detail_callback(299, f"s:{pid}", chat_id, detail)
+    script = run_bot_until_stop(
+        Script([[update]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the store row is created
+    assert [s["project_id"] for s in store.list_subscriptions(chat_id)] == [pid]
+    # the press is answered with a toast; no message is stacked
+    assert script.answered == [
+        {"callback_query_id": "cbq-299", "text": "Subscribed to yask"}
+    ]
+    assert script.sent == []
+    # in-place edit: original text, attachment rows preserved, toggle flips
+    assert len(script.edited) == 1
+    e = script.edited[0]
+    assert e["chat_id"] == chat_id
+    assert e["message_id"] == 1
+    assert e["text"] == detail["text"]
+    rows = e["reply_markup"]["inline_keyboard"]
+    assert rows[:2] == detail["reply_markup"]["inline_keyboard"][:2]
+    assert rows[-1] == [{"text": "Unsubscribe", "callback_data": f"u:{pid}"}]
+
+
+def test_callback_dispatch_unsubscribe_toggle(store):
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    chat_id = 22
+    store.subscribe_project(chat_id, pid)
+    first = run_bot_until_stop(
+        Script([[message_update(300, f"/task yask {t['number']}", chat_id=chat_id)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    detail = first.sent[0]
+    # the detail shows Unsubscribe for the subscribed chat
+    assert detail["reply_markup"]["inline_keyboard"][-1] == [
+        {"text": "Unsubscribe", "callback_data": f"u:{pid}"}
+    ]
+    update = _detail_callback(301, f"u:{pid}", chat_id, detail)
+    script = run_bot_until_stop(
+        Script([[update]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the store row is removed
+    assert [s["project_id"] for s in store.list_subscriptions(chat_id)] == []
+    assert script.answered == [
+        {"callback_query_id": "cbq-301", "text": "Unsubscribed from yask"}
+    ]
+    assert script.sent == []
+    e = script.edited[0]
+    rows = e["reply_markup"]["inline_keyboard"]
+    assert rows[:2] == detail["reply_markup"]["inline_keyboard"][:2]
+    assert rows[-1] == [{"text": "Subscribe", "callback_data": f"s:{pid}"}]
+
+
+def test_callback_dispatch_toggle_stale_keyboard(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "working")
+    dispatch = telegram_bot.make_callback_dispatch(store)
+    # (a) no reply_markup on the original message → a single toggle row
+    action = dispatch(callback_update(302, f"s:{pid}", chat_id=23)["callback_query"])
+    assert action is not None
+    assert action.answer_text == "Subscribed to yask"
+    assert action.edit.text == "the message the button lives in"
+    assert action.edit.reply_markup == {
+        "inline_keyboard": [[{"text": "Unsubscribe", "callback_data": f"u:{pid}"}]]
+    }
+    # (b) a keyboard without the toggle row (stale layout) → single toggle
+    update = callback_update(303, f"u:{pid}", chat_id=24)
+    update["callback_query"]["message"]["reply_markup"] = {
+        "inline_keyboard": [[{"text": "plan.md", "callback_data": f"a:{pid}:1:1"}]]
+    }
+    action = dispatch(update["callback_query"])
+    assert action is not None
+    assert action.answer_text == "Unsubscribed from yask"
+    assert action.edit.reply_markup == {
+        "inline_keyboard": [[{"text": "Subscribe", "callback_data": f"s:{pid}"}]]
+    }
+
+
+def test_callback_dispatch_toggle_unknown_project(store):
+    store.create_project("yask")
+    dispatch = telegram_bot.make_callback_dispatch(store)
+    action = dispatch(callback_update(304, "s:999", chat_id=25)["callback_query"])
+    assert action is not None
+    assert action.answer_text is None
+    assert action.edit is None
+    assert action.reply == (
+        "Project '999' not found. Use /projects to list projects."
+    )
+    # no store change
+    assert store.list_subscriptions(25) == []
+
+
+def test_callback_dispatch_toggle_inaccessible_message(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "working")
+    update = callback_update(305, f"s:{pid}", chat_id=26)
+    # an old message arrives as a MaybeInaccessibleMessage: no message_id
+    # and no text, but the chat is still there
+    update["callback_query"]["message"] = {"chat": {"id": 26}}
+    script = run_bot_until_stop(
+        Script([[update]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the subscription is still toggled and toasted, the edit is skipped
+    assert [s["project_id"] for s in store.list_subscriptions(26)] == [pid]
+    assert script.answered == [
+        {"callback_query_id": "cbq-305", "text": "Subscribed to yask"}
+    ]
+    assert script.edited == []
+    assert script.sent == []
+
+
 @pytest.mark.parametrize(
     "payload",
-    ["t:1", "t:1:4:9", "t:x:4", "t:", "p:", "p:abc", "stale:payload"],
+    [
+        "t:1", "t:1:4:9", "t:x:4", "t:", "p:", "p:abc", "stale:payload",
+        "a:1", "a:1:2", "a:1:2:3:4:5", "a:x:1:2", "a:1:x:2", "a:1:2:x",
+        "s:", "s:abc", "s:1:2", "u:", "u:abc", "u:1:2",
+    ],
 )
 def test_callback_dispatch_unhandled_payloads(store, payload):
     # wrong family, wrong arity, or non-numeric fields: nothing to do →
