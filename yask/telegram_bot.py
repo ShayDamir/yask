@@ -2,7 +2,8 @@
 
 Run via ``yask telegram``: validates the bot token (``TELEGRAM_BOT_TOKEN``)
 with ``getMe``, opens the yask store, then long-polls the Bot API with
-``getUpdates`` and answers incoming messages. Today the bot answers
+``getUpdates`` (subscribing to messages and inline-keyboard callbacks) and
+answers incoming messages. Today the bot answers
 ``/start``, ``/help``, ``/projects`` (the project list with per-state task
 counts), ``/tasks`` (the tasks in the active states — Todo, Planning,
 In progress and Review — grouped by project and state),
@@ -14,7 +15,12 @@ as a file, via ``sendDocument``/``sendPhoto``); all board reads go through
 the store. A chat can ``/subscribe <project>`` to receive task
 state-change notifications for that project (``/unsubscribe <project>`` to
 stop; subscriptions are per chat, per project, and persist in the same
-SQLite database). While the bot runs, the :class:`Notifier` polls
+SQLite database). Inline-keyboard callbacks (``callback_query`` updates)
+are answered through a second dispatch layer,
+:func:`make_callback_dispatch`: every callback is answered (the client's
+progress bar hangs until it is answered) and an unrecognized payload gets
+a toast instead of a crash; the payload handlers (Epic #43) extend that
+factory. While the bot runs, the :class:`Notifier` polls
 ``state_history`` after each successful ``getUpdates`` batch and pushes a
 plain-text message per transition to every subscribed chat; latency is at
 most one poll interval. Later features of the Telegram interface (Epic #27)
@@ -30,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import signal
 import sys
 from dataclasses import dataclass
@@ -72,6 +79,13 @@ HELP_TEXT = (
 )
 
 UNKNOWN_HINT = "I don't understand that. Try /help to see what I can do."
+
+# A callback_query no payload handler recognizes (a stale button from a
+# deleted task or an older bot version) gets this toast — the bot always
+# answers every callback, so the client's progress bar never hangs.
+UNKNOWN_CALLBACK_TEXT = (
+    "This button is out of date. Try /help to see what I can do."
+)
 
 # Store-backed command failed: reply, don't crash the poll loop.
 PROJECTS_ERROR_TEXT = "I could not read the board right now. Please try again."
@@ -304,23 +318,82 @@ def tasks_view(store: Store, project_arg: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
+# An inline-keyboard payload for a reply: the JSON object the Bot API takes
+# (e.g. ``{"inline_keyboard": [[{"text": "..", "callback_data": "t:1:4"}]]}``);
+# on file uploads the BotAPI serializes it to a JSON string (multipart form
+# fields are strings).
+ReplyMarkup = dict
+
+
 @dataclass(frozen=True)
 class FileReply:
     """A reply that is a file, not a text message.
 
     ``run_bot`` sends it to the chat as a photo (``image/*`` content types)
-    or a document, with ``caption`` riding along; the dispatch layer never
-    touches the Bot API itself.
+    or a document, with ``caption`` riding along and (when set) an inline
+    keyboard as ``reply_markup``; the dispatch layer never touches the Bot
+    API itself.
     """
 
     filename: str
     data: bytes
     content_type: str
     caption: str
+    reply_markup: Optional[ReplyMarkup] = None
 
     @property
     def is_image(self) -> bool:
         return self.content_type.startswith("image/")
+
+
+@dataclass(frozen=True)
+class KeyboardReply:
+    """A reply that is a text message with an inline keyboard.
+
+    ``run_bot`` sends it with ``sendMessage``, the keyboard as
+    ``reply_markup`` — the tap target lands in the same message as the
+    text.
+    """
+
+    text: str
+    reply_markup: ReplyMarkup
+
+
+@dataclass(frozen=True)
+class MessageEdit:
+    """An in-place update of the original message (``editMessageText``).
+
+    A callback action edits the message a button lives in (e.g. the
+    subscribe toggle) instead of stacking a new message; the keyboard is
+    replaced when ``reply_markup`` is set.
+    """
+
+    text: str
+    reply_markup: Optional[ReplyMarkup] = None
+
+
+# Every shape a dispatch layer may return: plain text, text with a
+# keyboard, or a file (with an optional keyboard).
+Reply = Union[str, KeyboardReply, FileReply]
+
+
+@dataclass(frozen=True)
+class CallbackAction:
+    """The result of a callback_query dispatch.
+
+    The dispatcher sets at most one of ``reply`` (send a new message) and
+    ``edit`` (update the original message in place); ``run_bot`` answers
+    the callback first, then edits, then sends. ``answer_text`` is the
+    toast shown under the button (None → answer with no text),
+    ``show_alert`` upgrades it to an alert dialog, and ``cache_time`` the
+    client-side answer cache TTL in seconds.
+    """
+
+    answer_text: Optional[str] = None
+    show_alert: bool = False
+    cache_time: Optional[int] = None
+    reply: Optional[Reply] = None
+    edit: Optional[MessageEdit] = None
 
 
 def format_task_view(task: dict, project: dict, history: list[dict]) -> str:
@@ -537,7 +610,7 @@ def format_notification(change: dict) -> str:
     )
 
 
-def make_dispatch(store: Store) -> Callable[..., Optional[Union[str, FileReply]]]:
+def make_dispatch(store: Store) -> Callable[..., Optional[Reply]]:
     """Build the message→reply dispatcher for a bot bound to ``store``.
 
     Store-backed commands (today: ``/projects``, ``/tasks``, ``/task``,
@@ -547,12 +620,14 @@ def make_dispatch(store: Store) -> Callable[..., Optional[Union[str, FileReply]]
     falls back to the static :func:`reply_for`. A failure reading the store
     yields a short error reply instead of crashing the long-poll loop.
     ``/task`` and ``/attachment`` resolve to a text reply or a
-    :class:`FileReply` (the attachment bytes for a file send).
+    :class:`FileReply` (the attachment bytes for a file send); a
+    :class:`KeyboardReply` is the same text-plus-keyboard shape for
+    inline-keyboard views.
     """
 
     def dispatch(
         text: Optional[str], chat_id: Optional[int] = None
-    ) -> Optional[Union[str, FileReply]]:
+    ) -> Optional[Reply]:
         cmd = _command_token(text)
         if cmd == "/projects":
             try:
@@ -593,9 +668,30 @@ def make_dispatch(store: Store) -> Callable[..., Optional[Union[str, FileReply]]
     return dispatch
 
 
+def make_callback_dispatch(
+    store: Store,
+) -> Callable[[dict], Optional[CallbackAction]]:
+    """Build the callback_query→action dispatcher for a bot bound to ``store``.
+
+    The inline-keyboard pipeline's dispatch layer, mirroring
+    :func:`make_dispatch`: the raw ``callback_query`` update dict is passed
+    through (fields ``id``, ``data``, ``message``, ``from``,
+    ``chat_instance``) and the factory returns a
+    :class:`CallbackAction` (or None for "nothing to do" — answered with
+    the out-of-date toast by ``run_bot``). Today it has no payload
+    handlers; the ``p:``/``t:``/``a:``/``s:``/``u:`` handlers (Epic #43)
+    extend this factory's body without touching the poll loop.
+    """
+
+    def callback_dispatch(callback_query: dict) -> Optional[CallbackAction]:
+        return None  # no payload handlers yet — #45–#48 extend this
+
+    return callback_dispatch
+
+
 class BotAPI:
     """Minimal Telegram Bot API client: getMe, getUpdates, sendMessage,
-    sendDocument, sendPhoto.
+    sendDocument, sendPhoto, answerCallbackQuery, editMessageText.
 
     Accepts an ``httpx.AsyncClient`` for tests (e.g. with
     ``httpx.MockTransport``); production uses a default client that
@@ -687,14 +783,25 @@ class BotAPI:
     async def get_updates(
         self, offset: Optional[int] = None, timeout: int = POLL_TIMEOUT
     ) -> list[dict]:
-        params: dict[str, Any] = {"timeout": timeout, "allowed_updates": ["message"]}
+        params: dict[str, Any] = {
+            "timeout": timeout,
+            "allowed_updates": ["message", "callback_query"],
+        }
         if offset is not None:
             params["offset"] = offset
         result = await self._call("getUpdates", **params)
         return list(result) if result else []
 
-    async def send_message(self, chat_id: int, text: str) -> dict:
-        result = await self._call("sendMessage", chat_id=chat_id, text=text)
+    async def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: Optional[ReplyMarkup] = None,
+    ) -> dict:
+        params: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if reply_markup:
+            params["reply_markup"] = reply_markup
+        result = await self._call("sendMessage", **params)
         return result if isinstance(result, dict) else {}
 
     async def send_document(
@@ -704,10 +811,15 @@ class BotAPI:
         data: bytes,
         content_type: str,
         caption: Optional[str] = None,
+        reply_markup: Optional[ReplyMarkup] = None,
     ) -> dict:
         fields: dict[str, Any] = {"chat_id": chat_id}
         if caption:
             fields["caption"] = caption
+        if reply_markup:
+            # Multipart form fields are strings: the Bot API accepts the
+            # keyboard as a JSON string on file uploads.
+            fields["reply_markup"] = json.dumps(reply_markup)
         result = await self._call_multipart(
             "sendDocument", fields, "document", filename, data, content_type
         )
@@ -720,13 +832,59 @@ class BotAPI:
         data: bytes,
         content_type: str,
         caption: Optional[str] = None,
+        reply_markup: Optional[ReplyMarkup] = None,
     ) -> dict:
         fields: dict[str, Any] = {"chat_id": chat_id}
         if caption:
             fields["caption"] = caption
+        if reply_markup:
+            # Multipart form fields are strings: the Bot API accepts the
+            # keyboard as a JSON string on file uploads.
+            fields["reply_markup"] = json.dumps(reply_markup)
         result = await self._call_multipart(
             "sendPhoto", fields, "photo", filename, data, content_type
         )
+        return result if isinstance(result, dict) else {}
+
+    async def answer_callback_query(
+        self,
+        callback_query_id: str,
+        text: Optional[str] = None,
+        show_alert: bool = False,
+        cache_time: Optional[int] = None,
+    ) -> dict:
+        """Answer a callback so the client's progress bar stops spinning.
+
+        ``text`` is the toast shown under the button, ``show_alert``
+        upgrades it to an alert dialog, ``cache_time`` the client-side
+        answer cache TTL (seconds).
+        """
+        params: dict[str, Any] = {"callback_query_id": callback_query_id}
+        if text:
+            params["text"] = text
+        if show_alert:
+            params["show_alert"] = show_alert
+        if cache_time:
+            params["cache_time"] = cache_time
+        result = await self._call("answerCallbackQuery", **params)
+        return result if isinstance(result, dict) else {}
+
+    async def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: Optional[ReplyMarkup] = None,
+    ) -> dict:
+        """Update a message's text (and inline keyboard) in place."""
+        params: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+        }
+        if reply_markup:
+            params["reply_markup"] = reply_markup
+        result = await self._call("editMessageText", **params)
         return result if isinstance(result, dict) else {}
 
     async def aclose(self) -> None:
@@ -766,21 +924,71 @@ class Notifier:
             self._cursor = change["id"]
 
 
+async def _send_reply(api: BotAPI, chat_id: int, reply: Reply) -> None:
+    """Send one dispatch reply to ``chat_id``.
+
+    A ``str`` goes out with ``sendMessage``; a :class:`KeyboardReply`
+    with ``sendMessage`` plus the keyboard; a :class:`FileReply` with
+    ``sendPhoto`` (image content types) or ``sendDocument``, with its
+    caption and (when set) keyboard. Both dispatch paths (message and
+    callback) share this helper, so failed sends are caught by the same
+    error handling everywhere.
+    """
+    if isinstance(reply, FileReply):
+        if reply.is_image:
+            await api.send_photo(
+                chat_id,
+                reply.filename,
+                reply.data,
+                reply.content_type,
+                reply.caption,
+                reply.reply_markup,
+            )
+        else:
+            await api.send_document(
+                chat_id,
+                reply.filename,
+                reply.data,
+                reply.content_type,
+                reply.caption,
+                reply.reply_markup,
+            )
+    elif isinstance(reply, KeyboardReply):
+        await api.send_message(chat_id, reply.text, reply_markup=reply.reply_markup)
+    else:
+        await api.send_message(chat_id, reply)
+
+
 async def run_bot(
     api: BotAPI,
-    dispatch: Callable[..., Optional[Union[str, FileReply]]],
+    dispatch: Callable[..., Optional[Reply]],
     stop_event: Optional[asyncio.Event] = None,
     poll_timeout: int = POLL_TIMEOUT,
     error_delay: float = 1.0,
     on_cycle: Optional[Callable[[], Any]] = None,
+    callback_dispatch: Optional[Callable[[dict], Optional[CallbackAction]]] = None,
 ) -> None:
     """Long-poll ``getUpdates`` and dispatch message handlers until stopped.
 
     The offset advances to ``update_id + 1`` after each processed update.
-    A string reply is sent with ``sendMessage``; a :class:`FileReply` is
+    A string reply is sent with ``sendMessage``; a :class:`KeyboardReply`
+    with ``sendMessage`` plus its inline keyboard; a :class:`FileReply` is
     sent with ``sendPhoto`` (image content types) or ``sendDocument``, so
     failed file sends are caught by the same error handling as failed
-    messages. Transient :class:`BotAPIError` failures are logged and
+    messages.
+
+    ``callback_query`` updates are routed to ``callback_dispatch`` (when
+    provided): the raw update dict is passed through, and the callback is
+    answered first (``answerCallbackQuery`` — the client's progress bar
+    hangs until it is answered), then the action's in-place edit
+    (``editMessageText``; skipped when the original message is no longer
+    accessible — old messages arrive without a ``message_id``) and/or new
+    reply go out through the same send paths as a message reply. A missing
+    or ``None`` action answers with :data:`UNKNOWN_CALLBACK_TEXT` — the
+    safety net for stale buttons — and sends nothing. Callback handling
+    failures are logged and survive like message failures.
+
+    Transient :class:`BotAPIError` failures are logged and
     retried after ``error_delay``; they never stop the loop. After each
     successful ``getUpdates`` batch, ``on_cycle`` (the state-change
     notifier) runs; its failures — Bot API or store — are logged to stderr
@@ -824,30 +1032,44 @@ async def run_bot(
         for update in updates:
             update_id = update.get("update_id")
             message = update.get("message")
+            callback = update.get("callback_query")
             try:
                 if message is not None:
                     chat = message.get("chat") or {}
                     reply = dispatch(message.get("text"), chat.get("id"))
                     if reply is not None and "id" in chat:
-                        if isinstance(reply, FileReply):
-                            if reply.is_image:
-                                await api.send_photo(
-                                    chat["id"],
-                                    reply.filename,
-                                    reply.data,
-                                    reply.content_type,
-                                    reply.caption,
-                                )
-                            else:
-                                await api.send_document(
-                                    chat["id"],
-                                    reply.filename,
-                                    reply.data,
-                                    reply.content_type,
-                                    reply.caption,
-                                )
-                        else:
-                            await api.send_message(chat["id"], reply)
+                        await _send_reply(api, chat["id"], reply)
+                elif callback is not None:
+                    action = (
+                        callback_dispatch(callback)
+                        if callback_dispatch is not None
+                        else None
+                    )
+                    if action is None:
+                        action = CallbackAction(answer_text=UNKNOWN_CALLBACK_TEXT)
+                    # Answer first: the client's progress bar hangs until
+                    # the callback is answered.
+                    await api.answer_callback_query(
+                        callback.get("id"),
+                        text=action.answer_text,
+                        show_alert=action.show_alert,
+                        cache_time=action.cache_time,
+                    )
+                    cb_message = callback.get("message") or {}
+                    cb_chat = cb_message.get("chat") or {}
+                    if action.edit is not None:
+                        # Old messages arrive without a message_id (or
+                        # chat): the edit is skipped, the answer is not.
+                        message_id = cb_message.get("message_id")
+                        if message_id is not None and "id" in cb_chat:
+                            await api.edit_message_text(
+                                cb_chat["id"],
+                                message_id,
+                                action.edit.text,
+                                action.edit.reply_markup,
+                            )
+                    if action.reply is not None and "id" in cb_chat:
+                        await _send_reply(api, cb_chat["id"], action.reply)
             except BotAPIError as exc:
                 print(f"yask: telegram dispatch failed: {exc}", file=sys.stderr)
                 await asyncio.sleep(error_delay)
@@ -905,6 +1127,7 @@ async def _amain(
             stop_event=stop_event,
             poll_timeout=POLL_TIMEOUT,
             on_cycle=notifier.check,
+            callback_dispatch=make_callback_dispatch(store),
         )
     finally:
         if handler_installed:

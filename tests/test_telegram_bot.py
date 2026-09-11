@@ -29,6 +29,30 @@ def message_update(update_id, text, chat_id=7):
     return {"update_id": update_id, "message": message}
 
 
+def callback_update(update_id, data, chat_id=7, message_id=1):
+    """A getUpdates payload entry carrying an inline-keyboard callback.
+
+    The raw ``callback_query`` shape the bot routes to the callback
+    dispatch: ``id``, ``data`` (the button payload), the original
+    ``message`` (``message_id``/``chat.id``/``text``) and ``from``/
+    ``chat_instance``.
+    """
+    return {
+        "update_id": update_id,
+        "callback_query": {
+            "id": f"cbq-{update_id}",
+            "data": data,
+            "message": {
+                "message_id": message_id,
+                "chat": {"id": chat_id},
+                "text": "the message the button lives in",
+            },
+            "from": {"id": 42, "is_bot": False},
+            "chat_instance": "ci-1",
+        },
+    }
+
+
 def parse_multipart(request):
     """Split a multipart/form-data request into ``(fields, files)``.
 
@@ -81,9 +105,13 @@ class Script:
     entries are exhausted, getUpdates returns empty results and sets ``stop``
     (when configured), so a bot run always terminates. ``fail_once_with``
     raises once on the first request to simulate a transport failure.
-    ``sent_files`` records multipart file uploads (sendDocument/sendPhoto):
-    one dict per upload with the method, chat id, caption, filename and
-    bytes.
+    ``sent`` records sendMessage bodies; ``sent_files`` records multipart
+    file uploads (sendDocument/sendPhoto): one dict per upload with the
+    method, chat id, caption, filename, bytes and the ``reply_markup`` form
+    field (None when absent); ``answered`` records answerCallbackQuery
+    bodies; ``edited`` records editMessageText bodies; ``allowed_updates``
+    records the allowed_updates of every getUpdates call; ``offsets`` the
+    getUpdates offsets.
     """
 
     def __init__(self, get_updates, get_me_ok=True, fail_once_with=None):
@@ -93,6 +121,9 @@ class Script:
         self.failed_once = False
         self.sent = []
         self.sent_files = []
+        self.answered = []
+        self.edited = []
+        self.allowed_updates = []
         self.offsets = []
         self.stop = None
 
@@ -112,6 +143,7 @@ class Script:
                     "caption": fields.get("caption"),
                     "filename": filename,
                     "data": data,
+                    "reply_markup": fields.get("reply_markup"),
                 }
             )
             return httpx.Response(
@@ -128,6 +160,7 @@ class Script:
             )
         if method == "getUpdates":
             self.offsets.append(body.get("offset"))
+            self.allowed_updates.append(body.get("allowed_updates"))
             if self.get_updates:
                 entry = self.get_updates.pop(0)
                 if isinstance(entry, list):
@@ -140,16 +173,25 @@ class Script:
         if method == "sendMessage":
             self.sent.append(body)
             return httpx.Response(200, json={"ok": True, "result": {"message_id": 99}})
+        if method == "answerCallbackQuery":
+            self.answered.append(body)
+            return httpx.Response(200, json={"ok": True, "result": True})
+        if method == "editMessageText":
+            self.edited.append(body)
+            return httpx.Response(200, json={"ok": True, "result": True})
         raise AssertionError(f"unexpected Bot API method: {method}")
 
 
-def run_bot_until_stop(script, dispatch=None, on_cycle=None, error_delay=0.01):
+def run_bot_until_stop(
+    script, dispatch=None, on_cycle=None, error_delay=0.01, callback_dispatch=None
+):
     """Run run_bot against the script until the script drains (sets stop).
 
     ``dispatch`` defaults to the static ``reply_for`` (wrapped for the
     two-argument dispatch signature); pass a ``make_dispatch(store)``
     dispatcher for store-backed commands. ``on_cycle`` is passed through to
-    ``run_bot`` (the state-change notifier hook).
+    ``run_bot`` (the state-change notifier hook); ``callback_dispatch`` the
+    callback_query dispatcher (None → the out-of-date toast safety net).
     """
     script.stop = asyncio.Event()
     if dispatch is None:
@@ -167,12 +209,32 @@ def run_bot_until_stop(script, dispatch=None, on_cycle=None, error_delay=0.01):
                 poll_timeout=1,
                 error_delay=error_delay,
                 on_cycle=on_cycle,
+                callback_dispatch=callback_dispatch,
             )
         finally:
             await client.aclose()
 
     asyncio.run(go())
     return script
+
+
+def bot_api_call(script, calls):
+    """Run BotAPI method calls directly against the script's mock transport.
+
+    ``calls(api)`` is an async callable (the method invocations under
+    test); the client is always closed. For the BotAPI-level tests that
+    don't need the poll loop.
+    """
+    client = make_client(script.handler)
+    api = telegram_bot.BotAPI(BOT_TOKEN, client=client)
+
+    async def go():
+        try:
+            await calls(api)
+        finally:
+            await client.aclose()
+
+    asyncio.run(go())
 
 
 def test_cli_telegram_missing_token(capsys, monkeypatch):
@@ -1470,3 +1532,327 @@ def test_run_bot_notifier_end_to_end(store):
     # the notification arrives after the move, and the draining poll 3 adds
     # no duplicate
     assert script.sent[2]["text"] == _notification(pid, t, "working", "Review")
+
+
+# --- inline-keyboard callbacks (BotAPI + run_bot plumbing) -------------------
+
+
+def test_get_updates_subscribes_to_callback_queries():
+    script = run_bot_until_stop(Script([[message_update(311, "/start")]]))
+    assert script.allowed_updates
+    assert all(
+        au == ["message", "callback_query"] for au in script.allowed_updates
+    )
+
+
+def test_answer_callback_query_minimal():
+    script = Script([])
+    bot_api_call(script, lambda api: api.answer_callback_query("cbq-1"))
+    # no text/show_alert/cache_time keys when the options are left default
+    assert script.answered == [{"callback_query_id": "cbq-1"}]
+
+
+def test_answer_callback_query_full_params():
+    script = Script([])
+
+    async def calls(api):
+        await api.answer_callback_query(
+            "cbq-2", text="Done!", show_alert=True, cache_time=30
+        )
+
+    bot_api_call(script, calls)
+    assert script.answered == [
+        {
+            "callback_query_id": "cbq-2",
+            "text": "Done!",
+            "show_alert": True,
+            "cache_time": 30,
+        }
+    ]
+
+
+def test_edit_message_text_params():
+    markup = {"inline_keyboard": [[{"text": "off", "callback_data": "u:1"}]]}
+    script = Script([])
+
+    async def calls(api):
+        await api.edit_message_text(7, 99, "new text", markup)
+        await api.edit_message_text(7, 99, "plain")
+
+    bot_api_call(script, calls)
+    assert script.edited == [
+        {
+            "chat_id": 7,
+            "message_id": 99,
+            "text": "new text",
+            "reply_markup": markup,
+        },
+        # no markup → no key
+        {"chat_id": 7, "message_id": 99, "text": "plain"},
+    ]
+
+
+def test_send_message_reply_markup_threaded():
+    markup = {"inline_keyboard": [[{"text": "go", "callback_data": "p:1"}]]}
+    script = Script([])
+
+    async def calls(api):
+        await api.send_message(7, "hello")
+        await api.send_message(7, "hello", reply_markup=markup)
+
+    bot_api_call(script, calls)
+    assert script.sent == [
+        # regression: a plain send is byte-identical to before
+        {"chat_id": 7, "text": "hello"},
+        {"chat_id": 7, "text": "hello", "reply_markup": markup},
+    ]
+
+
+def test_send_document_photo_reply_markup_threaded():
+    markup = {"inline_keyboard": [[{"text": "view", "callback_data": "a:1:1:2"}]]}
+    script = Script([])
+
+    async def calls(api):
+        await api.send_document(
+            7, "doc.md", b"x", "text/markdown", reply_markup=markup
+        )
+        await api.send_photo(
+            7, "img.png", b"y", "image/png", caption="c", reply_markup=markup
+        )
+        await api.send_document(7, "plain.md", b"z", "text/markdown")
+
+    bot_api_call(script, calls)
+    assert len(script.sent_files) == 3
+    doc, photo, plain = script.sent_files
+    assert doc["method"] == "sendDocument"
+    assert photo["method"] == "sendPhoto"
+    # multipart form fields are strings: the markup is a JSON string that
+    # round-trips back to the dict (a Python dict would be rejected)
+    assert json.loads(doc["reply_markup"]) == markup
+    assert json.loads(photo["reply_markup"]) == markup
+    assert photo["caption"] == "c"
+    # no markup → no key
+    assert plain["reply_markup"] is None
+
+
+def test_callback_query_routed_to_callback_dispatch():
+    seen = []
+
+    def callback_dispatch(callback_query):
+        seen.append(callback_query)
+        return telegram_bot.CallbackAction(answer_text="ok", reply="detail")
+
+    script = run_bot_until_stop(
+        Script([[callback_update(321, "t:1:4")]]),
+        callback_dispatch=callback_dispatch,
+    )
+    # the raw update dict is passed through, untouched
+    assert len(seen) == 1
+    assert seen[0]["id"] == "cbq-321"
+    assert seen[0]["data"] == "t:1:4"
+    assert seen[0]["message"]["chat"]["id"] == 7
+    assert script.answered == [{"callback_query_id": "cbq-321", "text": "ok"}]
+    assert script.sent == [{"chat_id": 7, "text": "detail"}]
+    assert script.edited == []
+    assert script.sent_files == []
+    assert script.offsets == [None, 322]
+
+
+def test_callback_keyboard_reply():
+    markup = {"inline_keyboard": [[{"text": "done", "callback_data": "d:1"}]]}
+
+    def callback_dispatch(callback_query):
+        return telegram_bot.CallbackAction(
+            reply=telegram_bot.KeyboardReply("here is the task", markup)
+        )
+
+    script = run_bot_until_stop(
+        Script([[callback_update(331, "p:1")]]),
+        callback_dispatch=callback_dispatch,
+    )
+    assert script.answered == [{"callback_query_id": "cbq-331"}]
+    assert script.sent == [
+        {"chat_id": 7, "text": "here is the task", "reply_markup": markup}
+    ]
+
+
+def test_callback_file_reply():
+    markup = {"inline_keyboard": [[{"text": "open", "callback_data": "a:1:1:1"}]]}
+
+    def callback_dispatch(callback_query):
+        return telegram_bot.CallbackAction(
+            reply=telegram_bot.FileReply(
+                "plan.md", b"# plan", "text/markdown", "the plan",
+                reply_markup=markup,
+            )
+        )
+
+    script = run_bot_until_stop(
+        Script([[callback_update(341, "a:1:1:1")]]),
+        callback_dispatch=callback_dispatch,
+    )
+    assert script.sent == []
+    assert len(script.sent_files) == 1
+    f = script.sent_files[0]
+    assert f["method"] == "sendDocument"
+    assert f["chat_id"] == 7
+    assert f["data"] == b"# plan"
+    assert f["caption"] == "the plan"
+    assert json.loads(f["reply_markup"]) == markup
+
+
+def test_callback_edit_in_place():
+    markup = {"inline_keyboard": [[{"text": "unsub", "callback_data": "u:1"}]]}
+
+    def callback_dispatch(callback_query):
+        return telegram_bot.CallbackAction(
+            answer_text="unsubscribed",
+            edit=telegram_bot.MessageEdit("Subscribed: no", markup),
+        )
+
+    script = run_bot_until_stop(
+        Script([[callback_update(351, "u:1", chat_id=11, message_id=77)]]),
+        callback_dispatch=callback_dispatch,
+    )
+    assert script.answered == [
+        {"callback_query_id": "cbq-351", "text": "unsubscribed"}
+    ]
+    assert script.edited == [
+        {
+            "chat_id": 11,
+            "message_id": 77,
+            "text": "Subscribed: no",
+            "reply_markup": markup,
+        }
+    ]
+    # an edit updates the original message — no new message is sent
+    assert script.sent == []
+    assert script.offsets == [None, 352]
+
+
+def test_unknown_callback_data_gets_toast():
+    # no callback dispatch at all: the toast safety net
+    script = run_bot_until_stop(
+        Script([[callback_update(361, "stale:payload")]]),
+    )
+    assert script.answered == [
+        {
+            "callback_query_id": "cbq-361",
+            "text": telegram_bot.UNKNOWN_CALLBACK_TEXT,
+        }
+    ]
+    assert script.sent == []
+    assert script.edited == []
+    assert script.offsets == [None, 362]
+
+    # a dispatch that returns None (an unrecognized payload): the same net
+    def callback_dispatch(callback_query):
+        return None
+
+    script = run_bot_until_stop(
+        Script(
+            [
+                [callback_update(363, "unknown:payload")],
+                [message_update(364, "/start")],
+            ]
+        ),
+        callback_dispatch=callback_dispatch,
+    )
+    assert script.answered == [
+        {
+            "callback_query_id": "cbq-363",
+            "text": telegram_bot.UNKNOWN_CALLBACK_TEXT,
+        }
+    ]
+    # nothing is sent for the callback, and the loop survived it: the next
+    # message is still answered
+    assert [m["text"] for m in script.sent] == [telegram_bot.START_TEXT]
+    assert script.offsets == [None, 364, 365]
+
+
+def test_callback_api_error_survived():
+    def callback_dispatch(callback_query):
+        return telegram_bot.CallbackAction(answer_text="ok", reply="detail")
+
+    script = Script(
+        [
+            [callback_update(371, "t:1:4")],
+            [message_update(372, "/start")],
+        ]
+    )
+    base_handler = script.handler
+    answer_calls = []
+
+    def handler(request):
+        if request.url.path.rsplit("/", 1)[-1] == "answerCallbackQuery":
+            answer_calls.append(1)
+            if len(answer_calls) == 1:
+                # a plain ok:false body (no 429 retry semantics)
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": False,
+                        "error_code": 400,
+                        "description": "query is too old and response timeout expired",
+                    },
+                )
+        return base_handler(request)
+
+    script.stop = asyncio.Event()
+    client = make_client(handler)
+    api = telegram_bot.BotAPI(BOT_TOKEN, client=client)
+
+    async def go():
+        try:
+            await telegram_bot.run_bot(
+                api,
+                lambda text, chat_id=None: telegram_bot.reply_for(text),
+                stop_event=script.stop,
+                poll_timeout=1,
+                error_delay=0.01,
+                callback_dispatch=callback_dispatch,
+            )
+        finally:
+            await client.aclose()
+
+    asyncio.run(go())
+
+    # the failed answer was logged, not raised, and skipped the rest of the
+    # callback handling (no reply sent) — mirroring test_transport_error_is_survived
+    assert len(answer_calls) == 1
+    assert [m["text"] for m in script.sent] == [telegram_bot.START_TEXT]
+    # the offset still advanced past the failed callback
+    assert script.offsets == [None, 372, 373]
+
+
+def test_callback_missing_message_skips_edit():
+    def callback_dispatch(callback_query):
+        return telegram_bot.CallbackAction(
+            answer_text="edited",
+            edit=telegram_bot.MessageEdit("new text"),
+        )
+
+    # an old message arrives as a MaybeInaccessibleMessage: no message_id
+    update = callback_update(381, "t:1:4")
+    update["callback_query"]["message"] = {"chat": {"id": 7}}
+    script = run_bot_until_stop(
+        Script(
+            [
+                [update],
+                [message_update(382, "/start")],
+            ]
+        ),
+        callback_dispatch=callback_dispatch,
+    )
+    # the edit is skipped, the answer still goes out, the loop survives
+    assert script.answered == [{"callback_query_id": "cbq-381", "text": "edited"}]
+    assert script.edited == []
+    assert [m["text"] for m in script.sent] == [telegram_bot.START_TEXT]
+    assert script.offsets == [None, 382, 383]
+
+
+def test_make_callback_dispatch_skeleton(store):
+    # the #44 baseline: no payload handlers yet, so every callback is
+    # answered with the out-of-date toast and nothing else happens
+    dispatch = telegram_bot.make_callback_dispatch(store)
+    assert dispatch(callback_update(1, "p:1")) is None
