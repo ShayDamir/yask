@@ -360,6 +360,63 @@ def test_update_task_type_via_mcp(store, project):
     assert store.get_task(project["id"], t["number"])["type"] == "Bug"
 
 
+def test_update_task_omitting_parent_preserves_parent(store, project):
+    """Omitting parent_number must not detach the task from its epic (#41)."""
+    epic = store.create_task(project["id"], "epic", type="Epic")
+    child = store.create_task(
+        project["id"], "child", type="Story", parent_number=epic["number"]
+    )
+    assert child["parent_number"] == epic["number"]
+
+    # estimate-only update: parent stays
+    res = call(store, "update_task", project=project["name"],
+               number=child["number"], estimate=5.0)
+    data = json.loads(texts(res)[0].text)
+    assert data["estimate"] == 5.0
+    assert data["parent_number"] == epic["number"]
+
+    # title-only update: parent still stays
+    res = call(store, "update_task", project=project["name"],
+               number=child["number"], title="child renamed")
+    data = json.loads(texts(res)[0].text)
+    assert data["title"] == "child renamed"
+    assert data["parent_number"] == epic["number"]
+    assert store.get_task(project["id"], child["number"])["parent_number"] == epic["number"]
+
+
+def test_update_task_explicit_null_detaches_from_epic(store, project):
+    """An explicit parent_number=None detaches the task (documented contract)."""
+    epic = store.create_task(project["id"], "epic", type="Epic")
+    child = store.create_task(
+        project["id"], "child", type="Story", parent_number=epic["number"]
+    )
+    res = call(store, "update_task", project=project["name"],
+               number=child["number"], parent_number=None)
+    data = json.loads(texts(res)[0].text)
+    assert data["parent_number"] is None
+    assert store.get_task(project["id"], child["number"])["parent_number"] is None
+
+
+def test_update_task_schema_parent_number_optional_nullable(store, project):
+    """The exposed schema keeps parent_number optional+nullable, no default (#41)."""
+    server = build_server(store)
+
+    async def schema():
+        for t in await server.list_tools():
+            if t.name == "update_task":
+                return t.inputSchema
+
+    schema = asyncio.run(schema())
+    props = schema["properties"]
+    assert "parent_number" in props
+    union = props["parent_number"]["anyOf"]
+    assert {"type": "integer"} in union and {"type": "null"} in union
+    assert "parent_number" not in schema.get("required", [])
+    assert "default" not in props["parent_number"], (
+        "the _UNSET sentinel must not leak into the exposed schema"
+    )
+
+
 def test_all_digit_project_name_resolves(store):
     p = store.create_project("123")
     store.create_task(p["id"], "Numeric name task")

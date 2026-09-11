@@ -17,7 +17,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.types import TextContent
 
-from .store import NotFound, ValidationError, Store, YaskError
+from .store import _UNSET, NotFound, ValidationError, Store, YaskError
 
 
 def _wrap(fn):
@@ -214,9 +214,13 @@ def build_server(store: Store) -> FastMCP:
         description: str | None = None,
         type: str | None = None,
         estimate: float | None = None,
-        parent_number: int | None = None,
+        parent_number: int | None = _UNSET,
     ) -> dict:
-        """Update a task's fields. parent_number null detaches it from its epic."""
+        """Update a task's fields. parent_number null detaches it from its epic.
+
+        Omitting parent_number leaves the current parent unchanged; only an
+        explicit null detaches the task from its epic.
+        """
         return store.update_task(
             project_id,
             number,
