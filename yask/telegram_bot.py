@@ -20,23 +20,25 @@ project and state, with one inline button per task),
 ``/task <project> <number|title>`` (one task's details — state, estimate,
 description, prerequisites, attachments and recent history — the task
 found by number or by case-insensitive title) and ``/attachment
-<project> <task> <id>`` (sends one of the task's attachments to the chat
-as a file, via ``sendDocument``/``sendPhoto``); all board reads go through
-the store. A chat can ``/subscribe <project>`` to receive task
-state-change notifications for that project (``/unsubscribe <project>`` to
-stop; subscriptions are per chat, per project, and persist in the same
-SQLite database). Inline-keyboard callbacks (``callback_query`` updates)
-are answered through a second dispatch layer,
+<project> <task> <id>`` (shows one of the task's attachments — small
+markdown/plain text (<16 KB) inline as a message, images as a photo,
+larger content as a file, via ``sendDocument``/``sendPhoto``); all board
+reads go through the store. A chat can ``/subscribe <project>`` to receive
+task state-change notifications for that project (``/unsubscribe
+<project>`` to stop; subscriptions are per chat, per project, and persist
+in the same SQLite database). Inline-keyboard callbacks
+(``callback_query`` updates) are answered through a second dispatch layer,
 :func:`make_callback_dispatch`: every callback is answered (the client's
 progress bar hangs until it is answered) and an unrecognized payload gets
 a toast instead of a crash; the ``p:`` payload (the per-project buttons of
 ``/projects``) opens the project's task list view as a new message, the
 ``t:`` payload (the per-task buttons of ``/tasks``) opens the task's detail
-view as a new message, the ``a:`` payload (the per-attachment buttons of the
-``/task`` view) sends the attachment to the chat as a file, and the
-``s:``/``u:`` payload (the subscribe/unsubscribe toggle of the ``/task``
-view) toggles the chat's subscription and flips the button in place. While
-the bot runs, the
+view as a new message, the ``a:`` payload (the per-attachment buttons of
+the ``/task`` view) shows the attachment in the chat — small
+markdown/plain text (<16 KB) inline as a message, images as a photo,
+larger content as a file — and the ``s:``/``u:`` payload (the
+subscribe/unsubscribe toggle of the ``/task`` view) toggles the chat's
+subscription and flips the button in place. While the bot runs, the
 :class:`Notifier` polls ``state_history`` after each successful
 ``getUpdates`` batch and pushes a message per transition to every
 subscribed chat, each carrying one inline button (payload
@@ -94,7 +96,7 @@ HELP_TEXT = (
     "/projects — list of projects with per-state task counts\n"
     "/tasks [project] — tasks in Todo, Planning, In progress and Review\n"
     "/task <project> <number|title> — task details (state, description, prereqs, attachments, history)\n"
-    "/attachment <project> <task> <id> — send me a task's attachment as a file\n"
+    "/attachment <project> <task> <id> — show a task's attachment (small markdown inline, images as a photo)\n"
     "/subscribe [project] — subscribe to task state-change notifications\n"
     "/unsubscribe [project] — stop notifications for a project\n\n"
     "I read the yask board that this process was started with\n"
@@ -150,7 +152,8 @@ TASK_USAGE_TEXT = (
 
 ATTACHMENT_USAGE_TEXT = (
     "Usage: /attachment <project> <task> <attachment-id>\n"
-    "Sends one of the task's attachments to this chat as a file.\n"
+    "Shows one of the task's attachments: small markdown/plain text (<16 KB)\n"
+    "inline in the chat, images as a photo, larger content as a file.\n"
     "List a task's attachments with /task <project> <number|title>."
 )
 
@@ -158,6 +161,14 @@ ATTACHMENT_USAGE_TEXT = (
 # by capping the description and the visible history.
 DESCRIPTION_MAX = 2500
 HISTORY_MAX = 10
+
+# Attachments strictly smaller than this are rendered inline instead of
+# being sent as a downloadable document (the story's "<16KB" threshold).
+INLINE_MARKDOWN_MAX_SIZE = 16 * 1024
+# Char budget for an inline attachment message. Telegram caps a message at
+# 4096 (measured in UTF-16 code units); 4000 leaves room for the
+# truncation note and non-BMP characters.
+INLINE_TEXT_MAX = 4000
 
 # Display cap for the state-change notification's button label. Telegram
 # documents no limit on inline button text (only ``callback_data`` is
@@ -707,13 +718,46 @@ def task_view(
     return format_task_view(task, project, history, chat_id, subscribed)
 
 
+def attachment_reply(meta: dict, data: bytes, task: dict) -> Union[str, FileReply]:
+    """The reply for one attachment.
+
+    Small text attachments (``text/markdown`` / ``text/plain`` under
+    :data:`INLINE_MARKDOWN_MAX_SIZE`) come back as the decoded content as a
+    plain ``str`` (sent with sendMessage — inline in the chat), prefixed
+    with the same ``#<number> <title> — <filename>`` context line the file
+    caption uses, truncated to :data:`INLINE_TEXT_MAX` with a
+    ``… (truncated, N chars total)`` note. Everything else is a
+    :class:`FileReply` — images as a photo (already displayed inline by
+    Telegram), other content as a document.
+    """
+    if (
+        meta["size"] < INLINE_MARKDOWN_MAX_SIZE
+        and meta["content_type"] in ("text/markdown", "text/plain")
+    ):
+        body = data.decode("utf-8", errors="replace")
+        text = f"#{task['number']} {task['title']} — {meta['filename']}\n{body}"
+        if len(text) > INLINE_TEXT_MAX:
+            note = f"\n… (truncated, {len(body)} chars total)"
+            budget = max(0, INLINE_TEXT_MAX - len(note))
+            text = text[:budget] + note
+        return text
+    return FileReply(
+        filename=meta["filename"],
+        data=data,
+        content_type=meta["content_type"],
+        caption=f"#{task['number']} {task['title']} — {meta['filename']}",
+    )
+
+
 def attachment_view(store: Store, arg: Optional[str]) -> Union[str, FileReply]:
     """Resolve ``/attachment <project> <task> <attachment-id>``.
 
     Project by longest prefix, task by number or title (a disambiguation
-    list when the title is ambiguous — never a file send), then the
+    list when the title is ambiguous — never an attachment send), then the
     attachment id (the last word) is looked up scoped to that task. Returns
-    a :class:`FileReply` to send as a file, or a usage / not-found text.
+    the attachment's reply — :func:`attachment_reply`: an inline text reply
+    for small text attachments, a :class:`FileReply` for images (photo) and
+    larger content (document) — or a usage / not-found text.
     """
     if arg is None or not arg.strip():
         return ATTACHMENT_USAGE_TEXT
@@ -745,12 +789,7 @@ def attachment_view(store: Store, arg: Optional[str]) -> Union[str, FileReply]:
             f"({project['name']}). Use /task {project['name']} {task['number']} "
             "to list the task's attachments."
         )
-    return FileReply(
-        filename=meta["filename"],
-        data=data,
-        content_type=meta["content_type"],
-        caption=f"#{task['number']} {task['title']} — {meta['filename']}",
-    )
+    return attachment_reply(meta, data, task)
 
 
 def subscribe_view(store: Store, chat_id: int, arg: Optional[str] = None) -> str:
@@ -847,10 +886,11 @@ def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Op
     commands additionally need the sender's chat id, hence
     ``dispatch(text, chat_id)``. Everything else falls back to the static
     :func:`reply_for`. A failure reading the store yields a short error
-    reply instead of crashing the long-poll loop. ``/task`` and
-    ``/attachment`` resolve to a text reply or a :class:`FileReply` (the
-    attachment bytes for a file send); a :class:`KeyboardReply` is the same
-    text-plus-keyboard shape for inline-keyboard views.
+    reply instead of crashing the long-poll loop. ``/task`` resolves to a
+    text reply and ``/attachment`` to an inline text reply (small text
+    attachments) or a :class:`FileReply` (the attachment bytes for a file
+    send); a :class:`KeyboardReply` is the same text-plus-keyboard shape
+    for inline-keyboard views.
 
     Board access is gated by ``auth`` (an :class:`Auth`; the production
     bot always passes one): the board commands answer unauthenticated
@@ -962,9 +1002,10 @@ def make_callback_dispatch(
     detail's keyboard reflects that chat's subscription state (an
     inaccessible message, with no chat, gets the plain text instead).
     ``a:<project-id>:<number>:<attachment-id>`` (the per-attachment buttons
-    of the ``/task`` view) sends the attachment to the button's chat as a
-    file — the same resolution and :class:`FileReply` shape as
-    ``/attachment``. ``s:<project-id>``/``u:<project-id>`` (the
+    of the ``/task`` view) shows the attachment in the button's chat: small
+    markdown/plain text (<16 KB) inline as a message, images as a photo,
+    other content as a file — the same resolution as ``/attachment``
+    (:func:`attachment_reply`). ``s:<project-id>``/``u:<project-id>`` (the
     subscribe/unsubscribe toggle of the ``/task`` view) toggles the
     button's chat's subscription in the store and re-renders the message in
     place (``editMessageText``): the text is unchanged, the pressed toggle
@@ -1116,14 +1157,7 @@ def make_callback_dispatch(
                 )
             except Exception:
                 return CallbackAction(reply=ATTACHMENT_ERROR_TEXT)
-            return CallbackAction(
-                reply=FileReply(
-                    filename=meta["filename"],
-                    data=data,
-                    content_type=meta["content_type"],
-                    caption=f"#{number} {task['title']} — {meta['filename']}",
-                )
-            )
+            return CallbackAction(reply=attachment_reply(meta, data, task))
         if len(parts) == 2 and parts[0] in ("s", "u") and parts[1].isdigit():
             project_id = int(parts[1])
             # The family's error text, per prefix (a failed press of the

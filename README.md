@@ -106,7 +106,8 @@ In progress and Review — grouped by project and state), `/task
 <project> <number|title>` (one task's details — state, estimate,
 description, prerequisites, attachments and recent history — the task
 found by number or by title) and `/attachment <project> <task> <id>`
-(sends a task's attachment to the chat as a file). A chat can
+(shows a task's attachment — small markdown/plain text (<16 KB) inline as
+a message, images as a photo, larger content as a file). A chat can
 `/subscribe [project]` to receive notifications about every task state
 change in that project, and `/unsubscribe [project]` to stop them —
 subscriptions are per chat and per project and persist across restarts; the

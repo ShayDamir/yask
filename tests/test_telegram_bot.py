@@ -906,6 +906,20 @@ def seed_task_view(store):
     }
 
 
+def expected_inline_text(number, title, filename, body):
+    """The inline attachment message the bot sends for a small text
+    attachment: the ``#<n> <title> — <filename>`` header line plus the
+    decoded body, truncated to ``INLINE_TEXT_MAX`` with a
+    ``… (truncated, N chars total)`` note when it does not fit.
+    """
+    text = f"#{number} {title} — {filename}\n{body}"
+    if len(text) > telegram_bot.INLINE_TEXT_MAX:
+        note = f"\n… (truncated, {len(body)} chars total)"
+        budget = max(0, telegram_bot.INLINE_TEXT_MAX - len(note))
+        text = text[:budget] + note
+    return text
+
+
 def expected_task_text(store, d):
     """The exact /task detail reply for the seed_task_view task."""
     pid, t = d["pid"], d["t"]
@@ -1238,7 +1252,9 @@ def test_help_mentions_task_and_attachment():
 # --- /attachment (store-backed dispatch) -------------------------------------
 
 
-def test_attachment_markdown_sent_as_document(store):
+def test_attachment_small_markdown_rendered_inline(store):
+    """A <16 KB markdown attachment goes out as an inline text message
+    (the 7800-char seed body truncates to the message cap)."""
     d = seed_task_view(store)
     script = run_bot_until_stop(
         Script(
@@ -1252,14 +1268,55 @@ def test_attachment_markdown_sent_as_document(store):
         ),
         dispatch=telegram_bot.make_dispatch(store),
     )
+    assert script.sent_files == []  # inline text, not a file
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 7
+    assert script.sent[0]["text"] == expected_inline_text(
+        d["t"]["number"], "working", "plan.md", d["plan_bytes"].decode()
+    )
+
+
+def test_attachment_large_markdown_sent_as_document(store):
+    """A >=16 KB markdown attachment is still sent as a document."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    big = b"# Big\n" + b"y" * (17 * 1024)  # 17 KB, over the inline threshold
+    a = store.add_attachment(pid, t["number"], "big.md", "text/markdown", big)
+    script = run_bot_until_stop(
+        Script([[message_update(275, f"/attachment yask {t['number']} {a['id']}")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
     assert script.sent == []  # a file, not a text message
     assert len(script.sent_files) == 1
     f = script.sent_files[0]
     assert f["method"] == "sendDocument"
     assert f["chat_id"] == 7
-    assert f["filename"] == "plan.md"
-    assert f["data"] == d["plan_bytes"]
-    assert f["caption"] == f"#{d['t']['number']} working — plan.md"
+    assert f["filename"] == "big.md"
+    assert f["data"] == big
+    assert f["caption"] == f"#{t['number']} working — big.md"
+
+
+def test_attachment_inline_truncated_to_message_cap(store):
+    """A <16 KB attachment over the message cap is truncated with a note."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    body = b"#" + b"m" * 4999  # 5000 chars — over INLINE_TEXT_MAX, under 16 KB
+    a = store.add_attachment(pid, t["number"], "long.md", "text/markdown", body)
+    script = run_bot_until_stop(
+        Script(
+            [[message_update(276, f"/attachment yask {t['number']} {a['id']}")]],
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent_files == []
+    assert len(script.sent) == 1
+    text = script.sent[0]["text"]
+    assert len(text) <= telegram_bot.INLINE_TEXT_MAX
+    assert text.startswith(f"#{t['number']} working — long.md\n")
+    assert text.endswith("\n… (truncated, 5000 chars total)")
+    assert text == expected_inline_text(
+        t["number"], "working", "long.md", body.decode()
+    )
 
 
 def test_attachment_image_sent_as_photo(store):
@@ -1287,6 +1344,8 @@ def test_attachment_image_sent_as_photo(store):
 
 
 def test_attachment_by_task_title(store):
+    """Task resolution by title still works — the small attachment goes
+    out inline."""
     d = seed_task_view(store)
     script = run_bot_until_stop(
         Script(
@@ -1300,10 +1359,11 @@ def test_attachment_by_task_title(store):
         ),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert script.sent == []
-    assert len(script.sent_files) == 1
-    assert script.sent_files[0]["filename"] == "plan.md"
-    assert script.sent_files[0]["data"] == d["plan_bytes"]
+    assert script.sent_files == []
+    assert len(script.sent) == 1
+    assert script.sent[0]["text"] == expected_inline_text(
+        d["t"]["number"], "working", "plan.md", d["plan_bytes"].decode()
+    )
 
 
 def test_attachment_usage_and_not_found_texts(store):
@@ -2292,7 +2352,8 @@ def test_callback_t_store_failure_replies_and_recovers(store, monkeypatch):
 # --- a: payload (the /task view's per-attachment buttons) -------------------
 
 
-def test_callback_dispatch_attachment_sends_file(store):
+def test_callback_dispatch_attachment_renders_inline(store):
+    """An a: press on a small markdown attachment replies inline text."""
     d = seed_task_view(store)
     pid, t = d["pid"], d["t"]
     dispatch = telegram_bot.make_callback_dispatch(store)
@@ -2305,17 +2366,16 @@ def test_callback_dispatch_attachment_sends_file(store):
     assert action.answer_text is None
     assert action.edit is None
     reply = action.reply
-    assert isinstance(reply, telegram_bot.FileReply)
-    assert reply.filename == "plan.md"
-    assert reply.data == d["plan_bytes"]
-    assert reply.content_type == "text/markdown"
-    assert reply.caption == f"#{t['number']} working — plan.md"
+    assert isinstance(reply, str)
+    assert reply == expected_inline_text(
+        t["number"], "working", "plan.md", d["plan_bytes"].decode()
+    )
 
 
 def test_callback_dispatch_attachment_round_trip(store):
     d = seed_task_view(store)
     pid, t = d["pid"], d["t"]
-    # markdown attachment → sendDocument
+    # markdown attachment → inline text message
     script = run_bot_until_stop(
         Script(
             [[callback_update(292, f"a:{pid}:{t['number']}:{d['plan']['id']}", chat_id=13)]]
@@ -2324,14 +2384,12 @@ def test_callback_dispatch_attachment_round_trip(store):
         callback_dispatch=telegram_bot.make_callback_dispatch(store),
     )
     assert script.answered == [{"callback_query_id": "cbq-292"}]
-    assert script.sent == []  # a file, not a text message
-    assert len(script.sent_files) == 1
-    f = script.sent_files[0]
-    assert f["method"] == "sendDocument"
-    assert f["chat_id"] == 13
-    assert f["filename"] == "plan.md"
-    assert f["data"] == d["plan_bytes"]
-    assert f["caption"] == f"#{t['number']} working — plan.md"
+    assert script.sent_files == []
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 13
+    assert script.sent[0]["text"] == expected_inline_text(
+        t["number"], "working", "plan.md", d["plan_bytes"].decode()
+    )
     # image attachment → sendPhoto (the /attachment convention)
     script = run_bot_until_stop(
         Script(
@@ -2346,6 +2404,27 @@ def test_callback_dispatch_attachment_round_trip(store):
     assert f["filename"] == "img.png"
     assert f["data"] == PNG
     assert f["caption"] == f"#{t['number']} working — img.png"
+
+
+def test_callback_a_large_markdown_sends_document(store):
+    """An a: press on a >=16 KB markdown attachment replies with a file."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    big = b"# Big\n" + b"y" * (17 * 1024)  # over the inline threshold
+    a = store.add_attachment(pid, t["number"], "big.md", "text/markdown", big)
+    dispatch = telegram_bot.make_callback_dispatch(store)
+    action = dispatch(
+        callback_update(298, f"a:{pid}:{t['number']}:{a['id']}")["callback_query"]
+    )
+    assert action is not None
+    assert action.answer_text is None
+    assert action.edit is None
+    reply = action.reply
+    assert isinstance(reply, telegram_bot.FileReply)
+    assert reply.filename == "big.md"
+    assert reply.data == big
+    assert reply.content_type == "text/markdown"
+    assert reply.caption == f"#{t['number']} working — big.md"
 
 
 def test_callback_dispatch_attachment_not_found(store):
