@@ -105,11 +105,14 @@ from `TELEGRAM_BOT_TOKEN` (get one from @BotFather) and answers `/start`,
 In progress and Review — grouped by project and state), `/task
 <project> <number|title>` (one task's details — state, estimate,
 description, prerequisites, attachments and recent history — the task
-found by number or by title) and `/attachment <project> <task> <id>`
+found by number or by title), `/attachment <project> <task> <id>`
 (shows a task's attachment — small markdown/plain text (<16 KB) inline as
-a message, images as a photo, larger content as a file). A chat can
-`/subscribe [project]` to receive notifications about every task state
-change in that project, and `/unsubscribe [project]` to stop them —
+a message, images as a photo, larger content as a file) and `/move
+<project> <task> <state>` (moves a task to another state; a move that
+would pull prerequisites along asks for confirmation via inline buttons
+first). A chat can `/subscribe [project]` to receive notifications about
+every task state change in that project, and `/unsubscribe [project]` to
+stop them —
 subscriptions are per chat and per project and persist across restarts; the
 bot detects changes by polling `state_history`, so latency is at most one
 poll interval (~30 s). More board commands are on the way. Reads the same

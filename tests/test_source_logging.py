@@ -1,7 +1,8 @@
-"""Tests for logging the source (web/mcp) of task actions (#22).
+"""Tests for logging the source (web/mcp/telegram) of task actions (#22).
 
 Every recorded change — a task's creation and each state transition — should
-say whether it came from the web UI (REST API) or the MCP surface.
+say whether it came from the web UI (REST API), the MCP surface or the
+Telegram bot.
 """
 
 import asyncio
@@ -80,6 +81,17 @@ def test_mcp_actions_logged_as_mcp(store, project):
         confirm=True,
     )
     assert all(s == "mcp" for s in srcs(store, pid, t["number"]))
+
+
+def test_telegram_actions_logged_as_telegram(store, project):
+    """The bot process opens its store with source='telegram'; its actions —
+    a creation and a move alike — are attributed to telegram."""
+    bot = Store(store.conn, source="telegram")
+    pid = project["id"]
+    t = bot.create_task(pid, "From the bot")
+    assert t["created_by"] == "telegram"
+    bot.move_task(pid, t["number"], "Todo", confirm=True)
+    assert all(s == "telegram" for s in srcs(store, pid, t["number"]))
 
 
 def test_api_actions_logged_as_web(client, pid):

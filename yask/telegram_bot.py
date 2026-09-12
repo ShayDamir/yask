@@ -19,11 +19,15 @@ active states — Todo, Planning, In progress and Review — grouped by
 project and state, with one inline button per task),
 ``/task <project> <number|title>`` (one task's details — state, estimate,
 description, prerequisites, attachments and recent history — the task
-found by number or by case-insensitive title) and ``/attachment
+found by number or by case-insensitive title), ``/attachment
 <project> <task> <id>`` (shows one of the task's attachments — small
 markdown/plain text (<16 KB) inline as a message, images as a photo,
-larger content as a file, via ``sendDocument``/``sendPhoto``); all board
-reads go through the store. A chat can ``/subscribe <project>`` to receive
+larger content as a file, via ``sendDocument``/``sendPhoto``) and
+``/move <project> <task> <state>`` (moves a task to another workflow
+state — a move that would pull prerequisites along is confirmed with
+inline buttons first, nothing is applied before the confirmation); all
+board reads and writes go through the store. A chat can ``/subscribe
+<project>`` to receive
 task state-change notifications for that project (``/unsubscribe
 <project>`` to stop; subscriptions are per chat, per project, and persist
 in the same SQLite database). Inline-keyboard callbacks
@@ -33,12 +37,17 @@ progress bar hangs until it is answered) and an unrecognized payload gets
 a toast instead of a crash; the ``p:`` payload (the per-project buttons of
 ``/projects``) opens the project's task list view as a new message, the
 ``t:`` payload (the per-task buttons of ``/tasks``) opens the task's detail
-view as a new message, the ``a:`` payload (the per-attachment buttons of
-the ``/task`` view) shows the attachment in the chat — small
+view as a new message (the detail's keyboard also carries one state
+button per other workflow state), the ``a:`` payload (the per-attachment
+buttons of the ``/task`` view) shows the attachment in the chat — small
 markdown/plain text (<16 KB) inline as a message, images as a photo,
-larger content as a file — and the ``s:``/``u:`` payload (the
+larger content as a file — the ``s:``/``u:`` payload (the
 subscribe/unsubscribe toggle of the ``/task`` view) toggles the chat's
-subscription and flips the button in place. While the bot runs, the
+subscription and flips the button in place, and the ``m:``/``c:``/``x:``
+payload (the per-state buttons of the ``/task`` view) moves the task to a
+workflow state in place — a move that would pull prerequisites along is
+confirmed first (``c:`` confirms the cascade, ``x:`` cancels). While the
+bot runs, the
 :class:`Notifier` polls ``state_history`` after each successful
 ``getUpdates`` batch and pushes a message per transition to every
 subscribed chat, each carrying one inline button (payload
@@ -96,6 +105,7 @@ HELP_TEXT = (
     "/projects — list of projects with per-state task counts\n"
     "/tasks [project] — tasks in Todo, Planning, In progress and Review\n"
     "/task <project> <number|title> — task details (state, description, prereqs, attachments, history)\n"
+    "/move <project> <task> <state> — move a task to another state\n"
     "/attachment <project> <task> <id> — show a task's attachment (small markdown inline, images as a photo)\n"
     "/subscribe [project] — subscribe to task state-change notifications\n"
     "/unsubscribe [project] — stop notifications for a project\n\n"
@@ -142,6 +152,7 @@ SUBSCRIBE_ERROR_TEXT = (
 UNSUBSCRIBE_ERROR_TEXT = (
     "I could not change your subscription right now. Please try again."
 )
+MOVE_ERROR_TEXT = "I could not write to the board right now. Please try again."
 
 TASK_USAGE_TEXT = (
     "Usage: /task <project> <number|title>\n"
@@ -155,6 +166,13 @@ ATTACHMENT_USAGE_TEXT = (
     "Shows one of the task's attachments: small markdown/plain text (<16 KB)\n"
     "inline in the chat, images as a photo, larger content as a file.\n"
     "List a task's attachments with /task <project> <number|title>."
+)
+
+MOVE_USAGE_TEXT = (
+    "Usage: /move <project> <task> <state>\n"
+    "Moves a task to another state: Backlog, Todo, Planning, In progress,\n"
+    "Review or Done.\n"
+    "Example: /move yask 4 In progress"
 )
 
 # Telegram caps a message at 4096 chars; the task view stays well under it
@@ -177,11 +195,12 @@ INLINE_TEXT_MAX = 4000
 NOTIFICATION_BUTTON_TEXT_MAX = 64
 
 # Static command table. Store-backed commands (today: /login, /whoami,
-# /projects, /tasks, /task, /attachment, /subscribe, /unsubscribe) live in
-# make_dispatch — the first two because they need the store and the auth
-# state, the rest because they read the board; state-change notifications
-# are pushed by the Notifier on every poll cycle. Later features extend
-# the dispatch layer without changing the poll loop.
+# /projects, /tasks, /task, /attachment, /move, /subscribe,
+# /unsubscribe) live in make_dispatch — the first two because they need
+# the store and the auth state, the rest because they read (or, for
+# /move, write) the board; state-change notifications are pushed by the
+# Notifier on every poll cycle. Later features extend the dispatch layer
+# without changing the poll loop.
 COMMANDS: dict[str, str] = {
     "/start": START_TEXT,
     "/help": HELP_TEXT,
@@ -565,6 +584,24 @@ def _flip_toggle(
     return new_rows
 
 
+def _state_button_rows(project_id: int, number: int, current_state: str) -> list:
+    """Workflow-state buttons for the task detail keyboard.
+
+    One button per state in ``db.WORKFLOW_STATES`` order, the task's
+    current state excluded, packed 3 per row. Payload
+    ``m:<project-id>:<number>:<idx>`` where ``idx`` is the state's index
+    in ``db.WORKFLOW_STATES`` (state names contain spaces, which would
+    break the ``:``-separated payload syntax); the ``m:`` family is
+    answered by :func:`make_callback_dispatch`.
+    """
+    buttons = [
+        {"text": state, "callback_data": f"m:{project_id}:{number}:{i}"}
+        for i, state in enumerate(db.WORKFLOW_STATES)
+        if state != current_state
+    ]
+    return [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
+
+
 def format_task_view(
     task: dict,
     project: dict,
@@ -587,8 +624,9 @@ def format_task_view(
     ``chat_id`` it is a :class:`KeyboardReply` carrying the same text and an
     inline keyboard: one row per attachment (label = filename, payload
     ``a:<project-id>:<number>:<attachment-id>``, answered by
-    :func:`make_callback_dispatch`) in id order, then the subscribe/
-    unsubscribe toggle row (:func:`_toggle_button`, driven by
+    :func:`make_callback_dispatch`) in id order, then the workflow-state
+    rows (:func:`_state_button_rows` — hidden on an archived task), then
+    the subscribe/unsubscribe toggle row (:func:`_toggle_button`, driven by
     ``subscribed``). The keyboard always has at least one row (the toggle),
     so the Bot API's empty-inline-keyboard rejection never triggers.
     """
@@ -644,6 +682,13 @@ def format_task_view(
         ]
         for a in task["attachments"]
     ]
+    # Blocked keeps its state rows (moving it to a workflow state is the
+    # natural "resume" action); Archived never shows them (the sanctioned
+    # way out of Archived is the separate restore action).
+    if task["state"] != db.ARCHIVED_STATE:
+        rows.extend(
+            _state_button_rows(project["id"], task["number"], task["state"])
+        )
     rows.append([_toggle_button(project["id"], subscribed)])
     return KeyboardReply(text, {"inline_keyboard": rows})
 
@@ -792,6 +837,121 @@ def attachment_view(store: Store, arg: Optional[str]) -> Union[str, FileReply]:
     return attachment_reply(meta, data, task)
 
 
+def _match_state_suffix(words: list[str]) -> Optional[tuple[list[str], str]]:
+    """The suffix of ``words`` that is a workflow state name.
+
+    Case-insensitive match against :data:`db.WORKFLOW_STATES`, shortest
+    suffix first — and since no state name is a suffix of another state
+    name, at most one suffix can ever match, so the search order is not
+    semantically significant. A state-only argument never matches (the
+    matched suffix is always proper, so a task reference is required).
+    Returns ``(leading words, matched state)`` — the leading words are the
+    task reference — or None when no suffix matches.
+    """
+    for i in range(len(words), 0, -1):
+        candidate = " ".join(words[i:])
+        for state in db.WORKFLOW_STATES:
+            if candidate.lower() == state.lower():
+                return words[:i], state
+    return None
+
+
+def _confirm_move_markup(
+    project_id: int, task: dict, target: str, affected: list[dict]
+) -> KeyboardReply:
+    """The confirm/cancel keyboard for a move that pulls prerequisites along.
+
+    The same prompt both entry points share (the ``/move`` command and the
+    ``m:`` state buttons): ``Move #<n> to <target>?`` plus the pulled
+    prerequisites (capped at 10 lines with a ``… N more`` note — the
+    confirmed move still applies to all of them), a ``Move all`` button
+    (payload ``c:<project-id>:<number>:<idx>``) and a ``Cancel`` button
+    (payload ``x:<project-id>:<number>``), both answered by
+    :func:`make_callback_dispatch`.
+    """
+    lines = [
+        f"Move #{task['number']} to {target}?",
+        "This also moves its prerequisites that have not reached this stage:",
+    ]
+    pulled = affected[1:]
+    for a in pulled[:10]:
+        lines.append(f"  #{a['number']} {a['title']} — {a['from']}")
+    if len(pulled) > 10:
+        lines.append(f"  … {len(pulled) - 10} more")
+    state_idx = db.WORKFLOW_STATES.index(target)
+    return KeyboardReply(
+        "\n".join(lines),
+        {
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "Move all",
+                        "callback_data": (
+                            f"c:{project_id}:{task['number']}:{state_idx}"
+                        ),
+                    }
+                ],
+                [
+                    {
+                        "text": "Cancel",
+                        "callback_data": f"x:{project_id}:{task['number']}",
+                    }
+                ],
+            ]
+        },
+    )
+
+
+def move_view(store: Store, arg: Optional[str]) -> Reply:
+    """Format the ``/move <project> <task> <state>`` reply.
+
+    The argument mixes a project reference, a task reference (number or
+    case-insensitive title) and a target state, any of which may contain
+    spaces: :func:`_split_project` resolves the longest project prefix,
+    :func:`_match_state_suffix` resolves the state (the matching suffix of
+    the remaining words, so multi-word states like ``In progress``
+    disambiguate from multi-word titles), and the words between them are
+    the task reference (``_resolve_task`` — its disambiguation and
+    not-found strings pass through). A single-task move is applied and
+    confirmed in plain text; a move that would pull prerequisites along is
+    answered with the confirm/cancel keyboard
+    (:func:`_confirm_move_markup`) and nothing is written until the
+    ``c:`` button is pressed. ``Blocked`` is never a target (a move there
+    must carry an ``unblock.md`` attachment — web UI / MCP only) and
+    archived tasks are refused.
+    """
+    if arg is None or not arg.strip():
+        return MOVE_USAGE_TEXT
+    words = arg.split()
+    project, rest = _split_project(store, words)
+    if project is None:
+        return (
+            f"Project '{words[0]}' not found. Use /projects to list projects."
+        )
+    if not rest:
+        return MOVE_USAGE_TEXT
+    matched = _match_state_suffix(rest)
+    if matched is None:
+        return (
+            f"Unknown state '{rest[-1]}'. Use one of: "
+            + ", ".join(db.WORKFLOW_STATES)
+            + "."
+        )
+    task_ref, target = matched
+    task = _resolve_task(store, project, " ".join(task_ref))
+    if not isinstance(task, dict):
+        return task
+    if task["state"] == db.ARCHIVED_STATE:
+        return f"Task #{task['number']} is archived and cannot be moved."
+    if task["state"] == target:
+        return f"Task #{task['number']} is already in {target}."
+    affected = store.plan_move(project["id"], task["number"], target)
+    if len(affected) > 1:
+        return _confirm_move_markup(project["id"], task, target, affected)
+    store.move_task(project["id"], task["number"], target)
+    return f"Moved #{task['number']} to {target}."
+
+
 def subscribe_view(store: Store, chat_id: int, arg: Optional[str] = None) -> str:
     """Format the ``/subscribe [project]`` reply.
 
@@ -881,16 +1041,18 @@ def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Op
     """Build the message→reply dispatcher for a bot bound to ``store``.
 
     Store-backed commands (today: ``/login``, ``/whoami``, ``/projects``,
-    ``/tasks``, ``/task``, ``/attachment``, ``/subscribe``,
+    ``/tasks``, ``/task``, ``/attachment``, ``/move``, ``/subscribe``,
     ``/unsubscribe``) read the board through ``store``; the subscription
     commands additionally need the sender's chat id, hence
     ``dispatch(text, chat_id)``. Everything else falls back to the static
-    :func:`reply_for`. A failure reading the store yields a short error
-    reply instead of crashing the long-poll loop. ``/task`` resolves to a
-    text reply and ``/attachment`` to an inline text reply (small text
-    attachments) or a :class:`FileReply` (the attachment bytes for a file
-    send); a :class:`KeyboardReply` is the same text-plus-keyboard shape
-    for inline-keyboard views.
+    :func:`reply_for`. A failure reading (or writing) the store yields a
+    short error reply instead of crashing the long-poll loop. ``/task``
+    resolves to a text reply and ``/attachment`` to an inline text reply
+    (small text attachments) or a :class:`FileReply` (the attachment
+    bytes for a file send); a :class:`KeyboardReply` is the same
+    text-plus-keyboard shape for inline-keyboard views — ``/move``
+    answers with one when the move would pull prerequisites along (the
+    confirm/cancel keyboard, nothing applied until the ``c:`` button).
 
     Board access is gated by ``auth`` (an :class:`Auth`; the production
     bot always passes one): the board commands answer unauthenticated
@@ -935,6 +1097,7 @@ def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Op
             "/tasks",
             "/task",
             "/attachment",
+            "/move",
             "/subscribe",
             "/unsubscribe",
         ) and not _authed(chat_id):
@@ -959,6 +1122,11 @@ def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Op
                 return attachment_view(store, _tasks_arg(text))
             except Exception:
                 return ATTACHMENT_ERROR_TEXT
+        if cmd == "/move":
+            try:
+                return move_view(store, _tasks_arg(text))
+            except Exception:
+                return MOVE_ERROR_TEXT
         if cmd == "/subscribe":
             if chat_id is None:
                 return SUBSCRIBE_ERROR_TEXT
@@ -978,6 +1146,73 @@ def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Op
     return dispatch
 
 
+def _resolve_move_context(
+    store: Store, project_id: int, number: int
+) -> Union[CallbackAction, tuple[dict, dict]]:
+    """Resolve project + task for the ``m:``/``c:``/``x:`` move families.
+
+    The same resolution as the ``t:`` family, including its not-found
+    texts; any other store failure answers with :data:`MOVE_ERROR_TEXT`.
+    Returns ``(project, task)`` or a ready-to-return
+    :class:`CallbackAction`.
+    """
+    try:
+        project = store.get_project(project_id)
+    except NotFound:
+        return CallbackAction(
+            reply=(
+                f"Project '{project_id}' not found. "
+                "Use /projects to list projects."
+            )
+        )
+    except Exception:
+        return CallbackAction(reply=MOVE_ERROR_TEXT)
+    try:
+        task = store.get_task(project_id, number)
+    except NotFound:
+        return CallbackAction(
+            reply=f"Task #{number} not found in {project['name']}."
+        )
+    except Exception:
+        return CallbackAction(reply=MOVE_ERROR_TEXT)
+    return project, task
+
+
+def _detail_edit(
+    store: Store, project: dict, number: int, callback_query: dict
+) -> Union[CallbackAction, MessageEdit]:
+    """The in-place edit back to the task's fresh detail view.
+
+    Re-renders :func:`format_task_view` after an ``m:``/``c:``/``x:``
+    action (the new state text, the keyboard now excluding the new current
+    state); the chat id and subscription state come from the callback's
+    message (an inaccessible message, with no chat, gets the plain text).
+    A store failure answers :data:`MOVE_ERROR_TEXT` instead.
+    """
+    project_id = project["id"]
+    try:
+        task = store.get_task(project_id, number)
+        history = store.get_history(project_id, number)
+    except Exception:
+        return CallbackAction(reply=MOVE_ERROR_TEXT)
+    chat_id = ((callback_query.get("message") or {}).get("chat") or {}).get(
+        "id"
+    )
+    subscribed = False
+    if chat_id is not None:
+        try:
+            subscribed = any(
+                s["project_id"] == project_id
+                for s in store.list_subscriptions(chat_id)
+            )
+        except Exception:
+            return CallbackAction(reply=MOVE_ERROR_TEXT)
+    reply = format_task_view(task, project, history, chat_id, subscribed)
+    if isinstance(reply, str):
+        return MessageEdit(reply)
+    return MessageEdit(reply.text, reply.reply_markup)
+
+
 def make_callback_dispatch(
     store: Store,
     auth: Optional[Auth] = None,
@@ -991,7 +1226,7 @@ def make_callback_dispatch(
     :class:`CallbackAction` (or None for "nothing to do" — answered with
     the out-of-date toast by ``run_bot``).
 
-    There are four payload families. ``p:<project-id>`` (the per-project
+    There are seven payload families. ``p:<project-id>`` (the per-project
     buttons of the ``/projects`` view) opens that project's task list view
     — :func:`tasks_view` resolved by id, the same view the user would get
     typing ``/tasks <id>`` — as a new message.
@@ -1011,13 +1246,23 @@ def make_callback_dispatch(
     place (``editMessageText``): the text is unchanged, the pressed toggle
     button flips to its other state, and the other rows (the attachment
     buttons) are preserved — a stale keyboard with no toggle falls back to
-    a single toggle row; a toast confirms the new state. All four are
-    strictly shaped payloads (``:``-separated with the right prefix, arity
-    and integer fields); an unknown project, task or attachment gets an
-    informative text reply (the same wording as the corresponding
-    command's not-found reply); any other shape returns None for the
-    out-of-date toast. A non-NotFound store failure in any family (a
-    locked or corrupted DB) yields the family's error-text reply — the
+    a single toggle row; a toast confirms the new state.
+    ``m:<project-id>:<number>:<state-index>`` (the per-state buttons of the
+    ``/task`` view) moves the task to the ``db.WORKFLOW_STATES[state-index]``
+    workflow state: a single-task move is applied and the message re-renders
+    in place to the fresh detail view (toast ``Moved #<n> to <state>.``),
+    while a move that would pull prerequisites along answers with the
+    confirm/cancel keyboard (:func:`_confirm_move_markup`) in place and
+    writes nothing. ``c:<project-id>:<number>:<state-index>`` confirms such
+    a cascade (applies it with ``confirm=True``, re-renders the detail in
+    place); ``x:<project-id>:<number>`` cancels it (re-renders the plain
+    detail, no store change). All seven are strictly shaped payloads
+    (``:``-separated with the right prefix, arity, integer fields and — for
+    the state index — an in-range value); an unknown project, task or
+    attachment gets an informative text reply (the same wording as the
+    corresponding command's not-found reply); any other shape returns None
+    for the out-of-date toast. A non-NotFound store failure in any family
+    (a locked or corrupted DB) yields the family's error-text reply — the
     same convention as :func:`make_dispatch` — instead of propagating out
     of :func:`run_bot`'s per-update handler (which catches only
     BotAPIError) and killing the long-poll process.
@@ -1210,6 +1455,69 @@ def make_callback_dispatch(
                     {"inline_keyboard": _flip_toggle(rows, project_id, data, subscribed)},
                 ),
             )
+        if len(parts) == 4 and parts[0] in ("m", "c") and all(
+            parts[i].isdigit() for i in (1, 2, 3)
+        ):
+            # The /task view's per-state buttons (m:) and the confirm
+            # button (c:). The state index is the payload's last field;
+            # out of range → malformed → the out-of-date toast.
+            if int(parts[3]) >= len(db.WORKFLOW_STATES):
+                return None
+            project_id, number = int(parts[1]), int(parts[2])
+            target = db.WORKFLOW_STATES[int(parts[3])]
+            resolved = _resolve_move_context(store, project_id, number)
+            if not isinstance(resolved, tuple):
+                return resolved
+            project, task = resolved
+            # Archived details never carry state buttons (or confirms).
+            if task["state"] == db.ARCHIVED_STATE:
+                return None
+            if task["state"] == target:
+                # m: a stale button; c: someone moved it in the meantime.
+                # A toast only — no store call, no edit.
+                return CallbackAction(answer_text=f"Already in {target}.")
+            try:
+                affected = store.plan_move(project_id, number, target)
+            except Exception:
+                return CallbackAction(reply=MOVE_ERROR_TEXT)
+            if parts[0] == "m" and len(affected) > 1:
+                # The move would pull prerequisites along: edit the message
+                # to the confirm keyboard, nothing is written.
+                confirm = _confirm_move_markup(
+                    project_id, task, target, affected
+                )
+                return CallbackAction(
+                    edit=MessageEdit(confirm.text, confirm.reply_markup)
+                )
+            try:
+                store.move_task(
+                    project_id, number, target,
+                    confirm=(parts[0] == "c"),
+                )
+            except Exception:
+                return CallbackAction(reply=MOVE_ERROR_TEXT)
+            detail = _detail_edit(store, project, number, callback_query)
+            if not isinstance(detail, MessageEdit):
+                return detail
+            if len(affected) == 1:
+                answer = f"Moved #{number} to {target}."
+            else:
+                answer = f"Moved {len(affected)} tasks to {target}."
+            return CallbackAction(answer_text=answer, edit=detail)
+        if len(parts) == 3 and parts[0] == "x" and all(
+            parts[i].isdigit() for i in (1, 2)
+        ):
+            # The confirm keyboard's Cancel: re-render the plain detail,
+            # no store change.
+            project_id, number = int(parts[1]), int(parts[2])
+            resolved = _resolve_move_context(store, project_id, number)
+            if not isinstance(resolved, tuple):
+                return resolved
+            project, task = resolved
+            detail = _detail_edit(store, project, number, callback_query)
+            if not isinstance(detail, MessageEdit):
+                return detail
+            return CallbackAction(answer_text="Cancelled.", edit=detail)
         # Any other shape (wrong family, arity, or non-numeric fields):
         # nothing to do → run_bot's out-of-date toast.
         return None
@@ -1643,7 +1951,9 @@ async def _amain(
     print(f"yask: telegram bot @{me.get('username')} (data: {data_dir})")
 
     conn = db.connect(data_dir / "yask.db")
-    store = Store(conn)
+    # Bot-initiated actions (created tasks, state moves) are recorded in
+    # the history with source "telegram".
+    store = Store(conn, source="telegram")
 
     # Per-run login state: a restart logs every chat out.
     auth = Auth()

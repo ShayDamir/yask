@@ -143,8 +143,10 @@ def _normalize_color(raw: str | None) -> str:
 
 class Store:
     def __init__(self, conn: sqlite3.Connection, source: str = "web"):
-        if source not in ("web", "mcp"):
-            raise ValidationError(f"invalid source '{source}': expected 'web' or 'mcp'")
+        if source not in ("web", "mcp", "telegram"):
+            raise ValidationError(
+                f"invalid source '{source}': expected 'web', 'mcp' or 'telegram'"
+            )
         self.conn = conn
         self.source = source
 

@@ -1182,13 +1182,26 @@ def test_tasks_drill_down_to_task_view(store):
 
 
 def test_task_view_attachment_and_toggle_buttons(store):
-    """The /task detail keyboard: one row per attachment + the toggle."""
+    """The /task detail keyboard: attachment rows + state rows + toggle."""
     d = seed_task_view(store)
     pid, t = d["pid"], d["t"]
     n = t["number"]
     attachment_rows = [
         [{"text": "plan.md", "callback_data": f"a:{pid}:{n}:{d['plan']['id']}"}],
         [{"text": "img.png", "callback_data": f"a:{pid}:{n}:{d['img']['id']}"}],
+    ]
+    # 'working' is In progress: one button per other workflow state
+    # (Backlog=0, Todo=1, Planning=2, Review=4, Done=5), 3 per row
+    state_rows = [
+        [
+            {"text": "Backlog", "callback_data": f"m:{pid}:{n}:0"},
+            {"text": "Todo", "callback_data": f"m:{pid}:{n}:1"},
+            {"text": "Planning", "callback_data": f"m:{pid}:{n}:2"},
+        ],
+        [
+            {"text": "Review", "callback_data": f"m:{pid}:{n}:4"},
+            {"text": "Done", "callback_data": f"m:{pid}:{n}:5"},
+        ],
     ]
     script = run_bot_until_stop(
         Script([[message_update(281, f"/task yask {n}")]]),
@@ -1199,6 +1212,7 @@ def test_task_view_attachment_and_toggle_buttons(store):
     assert sent["text"] == expected_task_text(store, d)
     assert sent["reply_markup"] == {
         "inline_keyboard": attachment_rows
+        + state_rows
         + [[{"text": "Subscribe", "callback_data": f"s:{pid}"}]]
     }
     # subscribing the chat flips only the toggle button
@@ -1209,6 +1223,7 @@ def test_task_view_attachment_and_toggle_buttons(store):
     )
     rows = script.sent[0]["reply_markup"]["inline_keyboard"]
     assert rows[:2] == attachment_rows
+    assert rows[2:4] == state_rows
     assert rows[-1] == [{"text": "Unsubscribe", "callback_data": f"u:{pid}"}]
 
 
@@ -1450,6 +1465,205 @@ def test_attachment_store_failure_replies_and_recovers(store, monkeypatch):
     assert script.sent[0]["text"] == telegram_bot.ATTACHMENT_ERROR_TEXT
     assert script.sent[1]["text"] == telegram_bot.START_TEXT
     assert script.sent_files == []
+
+
+# --- /move (store-backed dispatch) -------------------------------------------
+
+
+def test_move_usage_texts(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "working")
+    for text in ("/move", "/move yask"):
+        script = run_bot_until_stop(
+            Script([[message_update(701, text)]]),
+            dispatch=telegram_bot.make_dispatch(store),
+        )
+        assert script.sent[0]["text"] == telegram_bot.MOVE_USAGE_TEXT
+
+
+def test_move_single_task_applies_and_confirms_in_text(store):
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    script = run_bot_until_stop(
+        Script([[message_update(702, f"/move yask {t['number']} Review")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    assert script.sent[0]["text"] == f"Moved #{t['number']} to Review."
+    assert "reply_markup" not in script.sent[0]
+    assert store.get_task(pid, t["number"])["state"] == "Review"
+
+
+def test_move_multiword_state_with_number(store):
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    script = run_bot_until_stop(
+        Script([[message_update(703, f"/move yask {t['number']} In progress")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == f"Moved #{t['number']} to In progress."
+    assert store.get_task(pid, t["number"])["state"] == "In progress"
+
+
+def test_move_multiword_title_and_state(store):
+    """'/move yask fix the bug Review' → task 'fix the bug', state 'Review'."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "fix the bug")
+    script = run_bot_until_stop(
+        Script([[message_update(704, "/move yask fix the bug Review")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == f"Moved #{t['number']} to Review."
+    assert store.get_task(pid, t["number"])["state"] == "Review"
+
+
+def test_move_state_case_insensitive(store):
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    script = run_bot_until_stop(
+        Script([[message_update(705, f"/move yask {t['number']} dOnE")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == f"Moved #{t['number']} to Done."
+    assert store.get_task(pid, t["number"])["state"] == "Done"
+
+
+def test_move_unknown_state_lists_workflow_states(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "working")
+    script = run_bot_until_stop(
+        Script([[message_update(706, "/move yask 1 Shipping")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Unknown state 'Shipping'. Use one of: "
+        "Backlog, Todo, Planning, In progress, Review, Done."
+    )
+
+
+def test_move_state_only_argument_never_matches(store):
+    """A bare state is not a (task, state) pair: it gets the unknown-state
+    reply, not a usage or not-found reply."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "working")
+    script = run_bot_until_stop(
+        Script([[message_update(707, "/move yask Review")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Unknown state 'Review'. Use one of: "
+        "Backlog, Todo, Planning, In progress, Review, Done."
+    )
+
+
+def test_move_already_in_state(store):
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    store.move_task(pid, t["number"], "Review", confirm=True)
+    script = run_bot_until_stop(
+        Script([[message_update(708, f"/move yask {t['number']} Review")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == f"Task #{t['number']} is already in Review."
+
+
+def test_move_archived_task_refused(store):
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    store.archive_task(pid, t["number"], confirm=True)
+    script = run_bot_until_stop(
+        Script([[message_update(709, f"/move yask {t['number']} Review")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        f"Task #{t['number']} is archived and cannot be moved."
+    )
+    assert store.get_task(pid, t["number"])["state"] == "Archived"
+
+
+def test_move_unknown_task_and_project(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "working")
+    script = run_bot_until_stop(
+        Script([[message_update(711, "/move yask 99 Review")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == "Task #99 not found in yask."
+    script = run_bot_until_stop(
+        Script([[message_update(712, "/move nope 1 Review")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Project 'nope' not found. Use /projects to list projects."
+    )
+
+
+def test_move_cascade_gets_confirm_keyboard(store):
+    """A move that pulls prerequisites replies with the confirm keyboard —
+    nothing is written until the c: button is pressed."""
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    # 'working' (In progress) has 'prereq one' (Review) and 'prereq two'
+    # (In progress) as prerequisites — both pull to Done
+    script = run_bot_until_stop(
+        Script([[message_update(713, f"/move yask {t['number']} Done")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    sent = script.sent[0]
+    assert sent["text"] == (
+        f"Move #{t['number']} to Done?\n"
+        "This also moves its prerequisites that have not reached this stage:\n"
+        f"  #{d['p1']['number']} prereq one — Review\n"
+        f"  #{d['p2']['number']} prereq two — In progress"
+    )
+    assert sent["reply_markup"] == {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Move all",
+                    "callback_data": f"c:{pid}:{t['number']}:5",
+                }
+            ],
+            [
+                {
+                    "text": "Cancel",
+                    "callback_data": f"x:{pid}:{t['number']}",
+                }
+            ],
+        ]
+    }
+    # nothing has moved yet
+    assert store.get_task(pid, t["number"])["state"] == "In progress"
+    assert store.get_task(pid, d["p1"]["number"])["state"] == "Review"
+    assert store.get_task(pid, d["p2"]["number"])["state"] == "In progress"
+
+
+def test_move_store_failure_replies_and_recovers(store, monkeypatch):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "working")
+
+    def boom(project_id, number, to_state):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "plan_move", boom)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    message_update(714, "/move yask 1 Review"),
+                    message_update(715, "/start"),
+                ]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 2
+    assert script.sent[0]["text"] == telegram_bot.MOVE_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+
+
+def test_help_mentions_move():
+    assert "/move" in telegram_bot.HELP_TEXT
 
 
 # --- /subscribe, /unsubscribe (store-backed dispatch) ------------------------
@@ -2214,12 +2428,13 @@ def test_callback_missing_message_skips_edit():
 
 
 def test_make_callback_dispatch_skeleton(store):
-    # with the p:, t:, a: and s:/u: handlers: a well-formed ``p:`` payload
-    # is handled (a fresh store has no projects → the not-found reply), an
-    # unrecognised payload is still unhandled (the out-of-date toast
-    # answers it), and a valid ``t:`` payload is handled — the callback's
-    # message carries a chat, so the detail reply is a KeyboardReply with
-    # the task view's own buttons (no attachments here → just the toggle).
+    # with the p:, t:, a:, s:/u: and m:/c:/x: handlers: a well-formed
+    # ``p:`` payload is handled (a fresh store has no projects → the
+    # not-found reply), an unrecognised payload is still unhandled (the
+    # out-of-date toast answers it), and a valid ``t:`` payload is
+    # handled — the callback's message carries a chat, so the detail reply
+    # is a KeyboardReply with the task view's own buttons (no attachments
+    # here → just the state rows and the toggle).
     dispatch = telegram_bot.make_callback_dispatch(store)
     action = dispatch(callback_update(1, "p:1")["callback_query"])
     assert action is not None
@@ -2268,11 +2483,23 @@ def test_callback_dispatch_task_detail_round_trip(store):
     assert sent["text"].startswith(f"#{t['number']} working — Story\n")
     assert "State: In progress" in sent["text"]
     assert "Estimate: 3" in sent["text"]
-    # the detail carries its own keyboard (no attachments on this task →
-    # just the subscribe toggle, reflecting chat 11's subscription state)
+    # the detail carries its own keyboard: no attachments on this task →
+    # the state rows (the task is In progress: the other five workflow
+    # states, 3 per row) plus the subscribe toggle, reflecting chat 11's
+    # subscription state
+    n = t["number"]
     assert sent["reply_markup"] == {
         "inline_keyboard": [
-            [{"text": "Subscribe", "callback_data": f"s:{pid}"}]
+            [
+                {"text": "Backlog", "callback_data": f"m:{pid}:{n}:0"},
+                {"text": "Todo", "callback_data": f"m:{pid}:{n}:1"},
+                {"text": "Planning", "callback_data": f"m:{pid}:{n}:2"},
+            ],
+            [
+                {"text": "Review", "callback_data": f"m:{pid}:{n}:4"},
+                {"text": "Done", "callback_data": f"m:{pid}:{n}:5"},
+            ],
+            [{"text": "Subscribe", "callback_data": f"s:{pid}"}],
         ]
     }
     assert script.edited == []
@@ -2708,12 +2935,311 @@ def test_callback_dispatch_toggle_inaccessible_message(store):
     assert script.sent == []
 
 
+# --- m:/c:/x: payload (the /task view's state buttons) ------------------------
+
+DONE_IDX = 5  # 'Done''s index in db.WORKFLOW_STATES
+
+
+def test_callback_m_single_move_edits_detail_in_place(store):
+    """An m: press on a prerequisite-free task moves it and re-renders the
+    detail in place (no message stacked)."""
+    d = seed_task_view(store)
+    pid, n = d["pid"], d["p2"]["number"]  # 'prereq two': In progress, no prereqs
+    chat_id = 31
+    first = run_bot_until_stop(
+        Script([[message_update(721, f"/task yask {n}", chat_id=chat_id)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    detail = first.sent[0]
+    update = _detail_callback(722, f"m:{pid}:{n}:{DONE_IDX}", chat_id, detail)
+    script = run_bot_until_stop(
+        Script([[update]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert store.get_task(pid, n)["state"] == "Done"
+    assert script.answered == [
+        {"callback_query_id": "cbq-722", "text": f"Moved #{n} to Done."}
+    ]
+    assert script.sent == []
+    assert len(script.edited) == 1
+    e = script.edited[0]
+    assert e["chat_id"] == chat_id
+    assert e["message_id"] == 1
+    assert "State: Done" in e["text"]
+    # the fresh keyboard: the new current state (Done) is excluded
+    labels = [
+        b["text"]
+        for row in e["reply_markup"]["inline_keyboard"]
+        for b in row
+    ]
+    assert "Done" not in labels
+    assert "Backlog" in labels and "Subscribe" in labels
+
+
+def test_callback_m_cascade_shows_confirm_keyboard(store):
+    """An m: press that would pull prerequisites edits the message to the
+    confirm keyboard and writes nothing."""
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]  # 'working' — has two prerequisites
+    n = t["number"]
+    chat_id = 32
+    first = run_bot_until_stop(
+        Script([[message_update(723, f"/task yask {n}", chat_id=chat_id)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    detail = first.sent[0]
+    update = _detail_callback(724, f"m:{pid}:{n}:{DONE_IDX}", chat_id, detail)
+    script = run_bot_until_stop(
+        Script([[update]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # nothing is written; the message is edited to the confirm prompt
+    assert store.get_task(pid, n)["state"] == "In progress"
+    assert script.answered == [{"callback_query_id": "cbq-724"}]
+    assert script.sent == []
+    assert len(script.edited) == 1
+    e = script.edited[0]
+    assert e["text"] == (
+        f"Move #{n} to Done?\n"
+        "This also moves its prerequisites that have not reached this stage:\n"
+        f"  #{d['p1']['number']} prereq one — Review\n"
+        f"  #{d['p2']['number']} prereq two — In progress"
+    )
+    assert e["reply_markup"] == {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Move all",
+                    "callback_data": f"c:{pid}:{n}:{DONE_IDX}",
+                }
+            ],
+            [
+                {
+                    "text": "Cancel",
+                    "callback_data": f"x:{pid}:{n}",
+                }
+            ],
+        ]
+    }
+
+
+def test_callback_c_confirms_cascade_and_renders_detail(store):
+    """The full button flow: m: → confirm keyboard, c: → the cascade is
+    applied and the detail re-renders in place."""
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    n = t["number"]
+    chat_id = 33
+    first = run_bot_until_stop(
+        Script([[message_update(725, f"/task yask {n}", chat_id=chat_id)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    detail = first.sent[0]
+    script = run_bot_until_stop(
+        Script(
+            [
+                [_detail_callback(726, f"m:{pid}:{n}:{DONE_IDX}", chat_id, detail)],
+                [_detail_callback(727, f"c:{pid}:{n}:{DONE_IDX}", chat_id, detail)],
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the cascade was applied to all three tasks
+    assert store.get_task(pid, n)["state"] == "Done"
+    assert store.get_task(pid, d["p1"]["number"])["state"] == "Done"
+    assert store.get_task(pid, d["p2"]["number"])["state"] == "Done"
+    assert script.answered == [
+        {"callback_query_id": "cbq-726"},
+        {"callback_query_id": "cbq-727", "text": "Moved 3 tasks to Done."},
+    ]
+    assert script.sent == []
+    assert len(script.edited) == 2
+    # the second edit is the fresh detail view of the moved task
+    e = script.edited[1]
+    assert e["chat_id"] == chat_id
+    assert "State: Done" in e["text"]
+    labels = [
+        b["text"]
+        for row in e["reply_markup"]["inline_keyboard"]
+        for b in row
+    ]
+    assert "Done" not in labels
+    assert "plan.md" in labels  # the attachment rows are back
+
+
+def test_callback_x_cancels_and_renders_detail(store):
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    n = t["number"]
+    chat_id = 34
+    first = run_bot_until_stop(
+        Script([[message_update(728, f"/task yask {n}", chat_id=chat_id)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    detail = first.sent[0]
+    update = _detail_callback(729, f"x:{pid}:{n}", chat_id, detail)
+    script = run_bot_until_stop(
+        Script([[update]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # nothing moved; the message is re-rendered to the plain detail view
+    assert store.get_task(pid, n)["state"] == "In progress"
+    assert script.answered == [
+        {"callback_query_id": "cbq-729", "text": "Cancelled."}
+    ]
+    assert script.sent == []
+    e = script.edited[0]
+    assert e["text"].startswith(f"#{n} working — Story")
+    assert "State: In progress" in e["text"]
+    labels = [
+        b["text"]
+        for row in e["reply_markup"]["inline_keyboard"]
+        for b in row
+    ]
+    assert "Done" in labels  # the state buttons are back
+
+
+def test_callback_m_already_in_state_toasts_only(store):
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    n = t["number"]
+    dispatch = telegram_bot.make_callback_dispatch(store)
+    # 'working' is In progress (index 3): pressing its own state toasts and
+    # changes nothing
+    action = dispatch(
+        callback_update(731, f"m:{pid}:{n}:3", chat_id=35)["callback_query"]
+    )
+    assert action is not None
+    assert action.answer_text == "Already in In progress."
+    assert action.reply is None
+    assert action.edit is None
+    assert store.get_task(pid, n)["state"] == "In progress"
+
+
+def test_callback_c_stale_confirm_toasts_already(store):
+    """Someone moved the task in the meantime: the stale c: press toasts
+    'Already in …' and writes nothing."""
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    n = t["number"]
+    store.move_task(pid, n, "Done", confirm=True)
+    dispatch = telegram_bot.make_callback_dispatch(store)
+    action = dispatch(
+        callback_update(732, f"c:{pid}:{n}:{DONE_IDX}", chat_id=36)["callback_query"]
+    )
+    assert action is not None
+    assert action.answer_text == "Already in Done."
+    assert action.reply is None
+    assert action.edit is None
+
+
+def test_callback_m_archived_task_is_out_of_date(store):
+    """Archived details never carry state buttons (or confirms): a stale
+    m:/c: press on an archived task is unhandled → the out-of-date toast."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    store.archive_task(pid, t["number"], confirm=True)
+    dispatch = telegram_bot.make_callback_dispatch(store)
+    for payload in (
+        f"m:{pid}:{t['number']}:{DONE_IDX}",
+        f"c:{pid}:{t['number']}:{DONE_IDX}",
+    ):
+        assert (
+            dispatch(callback_update(733, payload)["callback_query"]) is None
+        ), payload
+
+
+def test_callback_m_unknown_task_and_project(store):
+    pid = store.create_project("alpha")["id"]
+    dispatch = telegram_bot.make_callback_dispatch(store)
+    action = dispatch(callback_update(734, f"m:{pid}:42:1")["callback_query"])
+    assert action is not None
+    assert action.reply == "Task #42 not found in alpha."
+    action = dispatch(callback_update(735, "m:999:1:1")["callback_query"])
+    assert action is not None
+    assert action.reply == (
+        "Project '999' not found. Use /projects to list projects."
+    )
+    # x: has the same resolution
+    action = dispatch(callback_update(736, f"x:{pid}:42")["callback_query"])
+    assert action is not None
+    assert action.reply == "Task #42 not found in alpha."
+
+
+def test_callback_m_store_failure_replies_and_recovers(store, monkeypatch):
+    """A store failure on an m: press replies with the error text, no crash."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+
+    def boom(project_id, number, to_state):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "plan_move", boom)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    callback_update(737, f"m:{pid}:{t['number']}:4", chat_id=11),
+                    message_update(738, "/start"),
+                ]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert script.answered == [{"callback_query_id": "cbq-737"}]
+    assert len(script.sent) == 2
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"] == telegram_bot.MOVE_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+    assert script.edited == []
+    # the failed move leaves the task in place
+    assert store.get_task(pid, t["number"])["state"] == "Backlog"
+
+
+def test_callback_c_store_failure_replies_and_recovers(store, monkeypatch):
+    """A store failure on a c: press replies with the error text, no crash."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    store.move_task(pid, t["number"], "Todo", confirm=True)
+
+    def boom(project_id, number, to_state, confirm=False, **kw):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "move_task", boom)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    callback_update(739, f"c:{pid}:{t['number']}:4", chat_id=11),
+                    message_update(740, "/start"),
+                ]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert script.answered == [{"callback_query_id": "cbq-739"}]
+    assert len(script.sent) == 2
+    assert script.sent[0]["text"] == telegram_bot.MOVE_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+    assert script.edited == []
+    assert store.get_task(pid, t["number"])["state"] == "Todo"
+
+
 @pytest.mark.parametrize(
     "payload",
     [
         "t:1", "t:1:4:9", "t:x:4", "t:", "p:", "p:abc", "stale:payload",
         "a:1", "a:1:2", "a:1:2:3:4:5", "a:x:1:2", "a:1:x:2", "a:1:2:x",
         "s:", "s:abc", "s:1:2", "u:", "u:abc", "u:1:2",
+        "m:", "m:1", "m:1:2", "m:1:2:3:4", "m:x:2:3", "m:1:x:3",
+        "m:1:2:x", "m:1:2:99", "c:", "c:1:2", "c:1:2:99",
+        "x:", "x:1", "x:1:2:3", "x:abc:1", "x:1:abc",
     ],
 )
 def test_callback_dispatch_unhandled_payloads(store, payload):
@@ -2864,17 +3390,20 @@ def test_all_board_commands_gated_for_unauthenticated_chat(store):
                 [message_update(623, f"/attachment yask {t['number']} {d['plan']['id']}")],
                 [message_update(624, "/subscribe yask")],
                 [message_update(625, "/unsubscribe yask")],
+                [message_update(626, f"/move yask {t['number']} Done")],
             ]
         ),
         dispatch=telegram_bot.make_dispatch(store, auth),
     )
-    assert len(script.sent) == 5
+    assert len(script.sent) == 6
     for m in script.sent:
         assert m["text"] == telegram_bot.AUTH_REQUIRED_TEXT
     # the gate keeps the data itself: no file is sent for /attachment, no
-    # subscription row is created for /subscribe
+    # subscription row is created for /subscribe, no task state is changed
+    # for /move
     assert script.sent_files == []
     assert store.list_subscriptions(7) == []
+    assert store.get_task(pid, t["number"])["state"] == "In progress"
 
 
 def test_start_help_whoami_work_unauthenticated(store):
@@ -2940,6 +3469,9 @@ def test_all_callback_families_gated_until_login(store):
         f"a:{pid}:{t['number']}:{d['plan']['id']}",
         f"s:{pid}",
         f"u:{pid}",
+        f"m:{pid}:{t['number']}:{DONE_IDX}",
+        f"c:{pid}:{t['number']}:{DONE_IDX}",
+        f"x:{pid}:{t['number']}",
     ):
         action = dispatch(
             callback_update(642, payload, chat_id=11)["callback_query"]
@@ -2948,8 +3480,10 @@ def test_all_callback_families_gated_until_login(store):
         assert action.answer_text == telegram_bot.AUTH_REQUIRED_TEXT, payload
         assert action.reply == telegram_bot.AUTH_REQUIRED_TEXT, payload
         assert action.edit is None, payload
-    # the gated s: press created no subscription
+    # the gated s: press created no subscription, and the gated m:/c:
+    # presses moved no task
     assert store.list_subscriptions(11) == []
+    assert store.get_task(pid, t["number"])["state"] == "In progress"
     # after login, the same press reaches the board
     assert auth.authenticate(11, "pw", store)
     action = dispatch(callback_update(643, f"p:{pid}", chat_id=11)["callback_query"])
