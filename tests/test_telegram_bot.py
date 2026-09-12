@@ -1666,6 +1666,112 @@ def test_help_mentions_move():
     assert "/move" in telegram_bot.HELP_TEXT
 
 
+# --- /add (store-backed dispatch) --------------------------------------------
+
+
+def test_add_task_creates_task_in_backlog(store):
+    pid = store.create_project("yask")["id"]
+    script = run_bot_until_stop(
+        Script([[message_update(720, "/add yask fix the bug")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    assert "reply_markup" not in script.sent[0]
+    assert script.sent[0]["text"] == (
+        "Created #1 'fix the bug' in yask — Backlog. "
+        "Use /task yask 1 to view it."
+    )
+    tasks = store.list_tasks(pid)
+    assert len(tasks) == 1
+    assert tasks[0]["number"] == 1
+    assert tasks[0]["title"] == "fix the bug"
+    assert tasks[0]["state"] == "Backlog"
+    assert tasks[0]["type"] == "Task"
+
+
+def test_add_task_by_project_id(store):
+    pid = store.create_project("yask")["id"]
+    script = run_bot_until_stop(
+        Script([[message_update(722, f"/add {pid} new thing")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Created #1 'new thing' in yask — Backlog. "
+        "Use /task yask 1 to view it."
+    )
+    assert store.get_task(pid, 1)["title"] == "new thing"
+
+
+def test_add_task_project_and_title_with_spaces(store):
+    """Longest-prefix resolution: project 'my big project', title
+    'fix the bug'."""
+    pid = store.create_project("my big project")["id"]
+    script = run_bot_until_stop(
+        Script([[message_update(724, "/add my big project fix the bug")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Created #1 'fix the bug' in my big project — Backlog. "
+        "Use /task my big project 1 to view it."
+    )
+    t = store.get_task(pid, 1)
+    assert t["title"] == "fix the bug"
+    assert t["state"] == "Backlog"
+
+
+def test_add_usage_and_not_found(store):
+    pid = store.create_project("yask")["id"]
+    script = run_bot_until_stop(
+        Script(
+            [
+                [message_update(726, "/add")],
+                [message_update(727, "/add yask")],
+                [message_update(729, "/add nope thing")],
+                [message_update(731, "/add 999 thing")],
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 4
+    assert script.sent[0]["text"] == telegram_bot.ADD_USAGE_TEXT
+    assert script.sent[1]["text"] == telegram_bot.ADD_USAGE_TEXT
+    assert script.sent[2]["text"] == (
+        "Project 'nope' not found. Use /projects to list projects."
+    )
+    assert script.sent[3]["text"] == (
+        "Project '999' not found. Use /projects to list projects."
+    )
+    assert store.list_tasks(pid) == []
+
+
+def test_add_store_failure_replies_and_recovers(store, monkeypatch):
+    pid = store.create_project("yask")["id"]
+
+    def boom(project_id, title, *args, **kwargs):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "create_task", boom)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    message_update(733, "/add yask new thing"),
+                    message_update(734, "/start"),
+                ]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 2
+    assert script.sent[0]["text"] == telegram_bot.ADD_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+    assert store.list_tasks(pid) == []
+
+
+def test_help_mentions_add():
+    assert "/add" in telegram_bot.HELP_TEXT
+
+
 # --- /subscribe, /unsubscribe (store-backed dispatch) ------------------------
 
 
@@ -3391,19 +3497,21 @@ def test_all_board_commands_gated_for_unauthenticated_chat(store):
                 [message_update(624, "/subscribe yask")],
                 [message_update(625, "/unsubscribe yask")],
                 [message_update(626, f"/move yask {t['number']} Done")],
+                [message_update(627, "/add yask something")],
             ]
         ),
         dispatch=telegram_bot.make_dispatch(store, auth),
     )
-    assert len(script.sent) == 6
+    assert len(script.sent) == 7
     for m in script.sent:
         assert m["text"] == telegram_bot.AUTH_REQUIRED_TEXT
     # the gate keeps the data itself: no file is sent for /attachment, no
     # subscription row is created for /subscribe, no task state is changed
-    # for /move
+    # for /move, no task is created for /add (the seed's four tasks only)
     assert script.sent_files == []
     assert store.list_subscriptions(7) == []
     assert store.get_task(pid, t["number"])["state"] == "In progress"
+    assert len(store.list_tasks(pid)) == 4
 
 
 def test_start_help_whoami_work_unauthenticated(store):

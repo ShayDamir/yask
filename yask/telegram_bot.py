@@ -22,11 +22,12 @@ description, prerequisites, attachments and recent history — the task
 found by number or by case-insensitive title), ``/attachment
 <project> <task> <id>`` (shows one of the task's attachments — small
 markdown/plain text (<16 KB) inline as a message, images as a photo,
-larger content as a file, via ``sendDocument``/``sendPhoto``) and
+larger content as a file, via ``sendDocument``/``sendPhoto``),
 ``/move <project> <task> <state>`` (moves a task to another workflow
 state — a move that would pull prerequisites along is confirmed with
-inline buttons first, nothing is applied before the confirmation); all
-board reads and writes go through the store. A chat can ``/subscribe
+inline buttons first, nothing is applied before the confirmation) and
+``/add <project> <title>`` (creates a new task in the project's
+backlog); all board reads and writes go through the store. A chat can ``/subscribe
 <project>`` to receive
 task state-change notifications for that project (``/unsubscribe
 <project>`` to stop; subscriptions are per chat, per project, and persist
@@ -106,6 +107,7 @@ HELP_TEXT = (
     "/tasks [project] — tasks in Todo, Planning, In progress and Review\n"
     "/task <project> <number|title> — task details (state, description, prereqs, attachments, history)\n"
     "/move <project> <task> <state> — move a task to another state\n"
+    "/add <project> <title> — add a task to the project's backlog\n"
     "/attachment <project> <task> <id> — show a task's attachment (small markdown inline, images as a photo)\n"
     "/subscribe [project] — subscribe to task state-change notifications\n"
     "/unsubscribe [project] — stop notifications for a project\n\n"
@@ -153,6 +155,7 @@ UNSUBSCRIBE_ERROR_TEXT = (
     "I could not change your subscription right now. Please try again."
 )
 MOVE_ERROR_TEXT = "I could not write to the board right now. Please try again."
+ADD_ERROR_TEXT = "I could not write to the board right now. Please try again."
 
 TASK_USAGE_TEXT = (
     "Usage: /task <project> <number|title>\n"
@@ -175,6 +178,12 @@ MOVE_USAGE_TEXT = (
     "Example: /move yask 4 In progress"
 )
 
+ADD_USAGE_TEXT = (
+    "Usage: /add <project> <title>\n"
+    "Creates a new task in the project's backlog.\n"
+    "Example: /add yask fix the login bug"
+)
+
 # Telegram caps a message at 4096 chars; the task view stays well under it
 # by capping the description and the visible history.
 DESCRIPTION_MAX = 2500
@@ -195,12 +204,12 @@ INLINE_TEXT_MAX = 4000
 NOTIFICATION_BUTTON_TEXT_MAX = 64
 
 # Static command table. Store-backed commands (today: /login, /whoami,
-# /projects, /tasks, /task, /attachment, /move, /subscribe,
+# /projects, /tasks, /task, /attachment, /move, /add, /subscribe,
 # /unsubscribe) live in make_dispatch — the first two because they need
 # the store and the auth state, the rest because they read (or, for
-# /move, write) the board; state-change notifications are pushed by the
-# Notifier on every poll cycle. Later features extend the dispatch layer
-# without changing the poll loop.
+# /move and /add, write) the board; state-change notifications are pushed
+# by the Notifier on every poll cycle. Later features extend the dispatch
+# layer without changing the poll loop.
 COMMANDS: dict[str, str] = {
     "/start": START_TEXT,
     "/help": HELP_TEXT,
@@ -952,6 +961,35 @@ def move_view(store: Store, arg: Optional[str]) -> Reply:
     return f"Moved #{task['number']} to {target}."
 
 
+def add_view(store: Store, arg: Optional[str]) -> str:
+    """Format the ``/add <project> <title>`` reply.
+
+    The argument mixes a project reference and a title, either of which
+    may contain spaces: :func:`_split_project` resolves the longest
+    project prefix, and the remaining words (joined back) are the title.
+    No argument, or a project with no title words left, gets the usage
+    text; an unresolvable project gets the not-found reply pointing at
+    ``/projects``. On success the store creates a plain ``Task`` in the
+    project's Backlog (numbering, ordering and history included) and the
+    reply is a confirmation with the new number.
+    """
+    if arg is None or not arg.strip():
+        return ADD_USAGE_TEXT
+    words = arg.split()
+    project, rest = _split_project(store, words)
+    if project is None:
+        return (
+            f"Project '{words[0]}' not found. Use /projects to list projects."
+        )
+    if not rest:
+        return ADD_USAGE_TEXT
+    task = store.create_task(project["id"], " ".join(rest))
+    return (
+        f"Created #{task['number']} '{task['title']}' in {project['name']} — "
+        f"Backlog. Use /task {project['name']} {task['number']} to view it."
+    )
+
+
 def subscribe_view(store: Store, chat_id: int, arg: Optional[str] = None) -> str:
     """Format the ``/subscribe [project]`` reply.
 
@@ -1041,8 +1079,9 @@ def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Op
     """Build the message→reply dispatcher for a bot bound to ``store``.
 
     Store-backed commands (today: ``/login``, ``/whoami``, ``/projects``,
-    ``/tasks``, ``/task``, ``/attachment``, ``/move``, ``/subscribe``,
-    ``/unsubscribe``) read the board through ``store``; the subscription
+    ``/tasks``, ``/task``, ``/attachment``, ``/move``, ``/add``,
+    ``/subscribe``, ``/unsubscribe``) read the board through ``store``;
+    the subscription
     commands additionally need the sender's chat id, hence
     ``dispatch(text, chat_id)``. Everything else falls back to the static
     :func:`reply_for`. A failure reading (or writing) the store yields a
@@ -1098,6 +1137,7 @@ def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Op
             "/task",
             "/attachment",
             "/move",
+            "/add",
             "/subscribe",
             "/unsubscribe",
         ) and not _authed(chat_id):
@@ -1127,6 +1167,11 @@ def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Op
                 return move_view(store, _tasks_arg(text))
             except Exception:
                 return MOVE_ERROR_TEXT
+        if cmd == "/add":
+            try:
+                return add_view(store, _tasks_arg(text))
+            except Exception:
+                return ADD_ERROR_TEXT
         if cmd == "/subscribe":
             if chat_id is None:
                 return SUBSCRIBE_ERROR_TEXT
