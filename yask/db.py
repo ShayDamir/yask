@@ -3,8 +3,8 @@
 The whole world lives in a single SQLite file. All domain state — projects,
 tasks, their types, prerequisites, state history, attachments, Telegram
 subscriptions and the Telegram bot's permitted-user allowlist (hashed
-passwords only) — is stored here. Attachments are kept as BLOBs so the
-database is fully self-contained.
+passwords plus each chat's persisted login session) — is stored here.
+Attachments are kept as BLOBs so the database is fully self-contained.
 """
 
 from __future__ import annotations
@@ -112,6 +112,7 @@ CREATE INDEX IF NOT EXISTS idx_telegram_subscriptions_project
 CREATE TABLE IF NOT EXISTS telegram_users (
     chat_id       INTEGER PRIMARY KEY,
     password_hash TEXT NOT NULL,
+    authenticated_at TEXT,
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
@@ -195,6 +196,15 @@ def _ensure_missing_columns(conn: sqlite3.Connection) -> None:
     if "color" not in label_cols:
         conn.execute(
             "ALTER TABLE labels ADD COLUMN color TEXT NOT NULL DEFAULT ''"
+        )
+    tg_user_cols = {
+        r["name"] for r in conn.execute("PRAGMA table_info(telegram_users)")
+    }
+    if "authenticated_at" not in tg_user_cols:
+        # NULL for legacy rows: the chat has no session yet and must
+        # /login once (an allowlist entry alone never authenticates).
+        conn.execute(
+            "ALTER TABLE telegram_users ADD COLUMN authenticated_at TEXT"
         )
 
 

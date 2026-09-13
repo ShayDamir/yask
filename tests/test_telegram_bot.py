@@ -6,13 +6,16 @@ never called.
 
 import asyncio
 import json
+import sqlite3
 import time
 
 import httpx
 import pytest
 
 from yask import cli
+from yask import db
 from yask import telegram_bot
+from yask.store import Store
 
 BOT_TOKEN = "12345:TEST"
 
@@ -304,6 +307,80 @@ def test_main_happy_path_opens_store_and_exits_zero(tmp_path):
     assert len(script.sent) == 1
     assert script.sent[0]["chat_id"] == 7
     assert script.sent[0]["text"] == telegram_bot.START_TEXT
+
+
+def test_login_session_survives_a_bot_restart(tmp_path):
+    """A /login in one process run stays authenticated in the next: the
+    session is stored in the database, not in process memory."""
+    # Seed: one permitted chat and one project, in the file the bot opens.
+    conn = db.connect(tmp_path / "yask.db")
+    seed = Store(conn)
+    seed.add_telegram_user(7, "pw")
+    seed.create_project("yask")
+    conn.close()
+
+    # Run 1: the chat logs in.
+    script1 = Script([[message_update(711, "/login pw")]])
+    script1.stop = asyncio.Event()
+    code = telegram_bot.main(
+        BOT_TOKEN, tmp_path, client=make_client(script1.handler),
+        stop_event=script1.stop,
+    )
+    assert code == 0
+    assert [m["text"] for m in script1.sent] == [telegram_bot.LOGIN_OK_TEXT]
+
+    # Run 2 (the restart): the same chat is still authenticated —
+    # /projects answers the real view, not the auth-required notice.
+    script2 = Script([[message_update(712, "/projects")]])
+    script2.stop = asyncio.Event()
+    code = telegram_bot.main(
+        BOT_TOKEN, tmp_path, client=make_client(script2.handler),
+        stop_event=script2.stop,
+    )
+    assert code == 0
+    assert len(script2.sent) == 1
+    text = script2.sent[0]["text"]
+    assert text != telegram_bot.AUTH_REQUIRED_TEXT
+    assert text.startswith("Projects:")
+    assert "yask" in text
+
+
+def test_legacy_telegram_users_db_gets_authenticated_at_column(tmp_path):
+    """A database predating the column is upgraded through the real ALTER
+    path: the table is built with the old DDL by a raw connection, so
+    connect() (not the schema) must add the column."""
+    path = tmp_path / "yask.db"
+    legacy = sqlite3.connect(str(path))
+    try:
+        legacy.execute(
+            "CREATE TABLE telegram_users ("
+            "chat_id INTEGER PRIMARY KEY, "
+            "password_hash TEXT NOT NULL, "
+            "created_at TEXT NOT NULL, "
+            "updated_at TEXT NOT NULL)"
+        )
+        legacy.execute(
+            "INSERT INTO telegram_users"
+            "(chat_id, password_hash, created_at, updated_at) "
+            "VALUES (7, 'scrypt$1$1$1$00$00', '2020-01-01T00:00:00Z', "
+            "'2020-01-01T00:00:00Z')"
+        )
+        legacy.commit()
+    finally:
+        legacy.close()
+
+    conn = db.connect(path)
+    try:
+        store = Store(conn)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(telegram_users)")}
+        assert "authenticated_at" in cols
+        row = conn.execute(
+            "SELECT authenticated_at FROM telegram_users WHERE chat_id = 7"
+        ).fetchone()
+        assert row["authenticated_at"] is None  # legacy row: no session yet
+        assert store.is_telegram_user_authenticated(7) is False
+    finally:
+        conn.close()
 
 
 def test_start_command():
@@ -3383,16 +3460,16 @@ def test_callback_dispatch_unhandled_payload_toast(store):
 
 def test_auth_none_chat_is_never_authenticated(store):
     store.add_telegram_user(7, "pw")
-    auth = telegram_bot.Auth()
+    auth = telegram_bot.Auth(store)
     assert auth.is_authenticated(None) is False
     assert auth.is_authenticated(7) is False  # permitted, but not logged in
-    assert auth.authenticate(None, "pw", store) is False
+    assert auth.authenticate(None, "pw") is False
     assert auth.is_authenticated(None) is False
 
 
 def test_login_success(store):
     store.add_telegram_user(7, "pw123")
-    auth = telegram_bot.Auth()
+    auth = telegram_bot.Auth(store)
     script = run_bot_until_stop(
         Script([[message_update(601, "/login pw123")]]),
         dispatch=telegram_bot.make_dispatch(store, auth),
@@ -3405,7 +3482,7 @@ def test_login_success(store):
 
 def test_login_wrong_password_fails(store):
     store.add_telegram_user(7, "pw123")
-    auth = telegram_bot.Auth()
+    auth = telegram_bot.Auth(store)
     script = run_bot_until_stop(
         Script([[message_update(602, "/login wrong")]]),
         dispatch=telegram_bot.make_dispatch(store, auth),
@@ -3418,7 +3495,7 @@ def test_login_unlisted_chat_fails_like_wrong_password(store):
     """An unknown chat gets the exact same failure text as a wrong password
     — the bot must not reveal which chat ids exist in the allowlist."""
     store.add_telegram_user(7, "pw")
-    auth = telegram_bot.Auth()
+    auth = telegram_bot.Auth(store)
     script = run_bot_until_stop(
         Script(
             [
@@ -3438,7 +3515,7 @@ def test_login_unlisted_chat_fails_like_wrong_password(store):
 
 def test_login_no_argument_gets_usage(store):
     store.add_telegram_user(7, "pw")
-    auth = telegram_bot.Auth()
+    auth = telegram_bot.Auth(store)
     script = run_bot_until_stop(
         Script([[message_update(605, "/login")]]),
         dispatch=telegram_bot.make_dispatch(store, auth),
@@ -3450,7 +3527,7 @@ def test_login_no_argument_gets_usage(store):
 def test_login_password_with_spaces(store):
     # the password is everything after the command token
     store.add_telegram_user(7, "my secret pw")
-    auth = telegram_bot.Auth()
+    auth = telegram_bot.Auth(store)
     script = run_bot_until_stop(
         Script([[message_update(606, "/login my secret pw")]]),
         dispatch=telegram_bot.make_dispatch(store, auth),
@@ -3463,7 +3540,7 @@ def test_board_command_requires_auth_then_works_after_login(store):
     pid = store.create_project("yask")["id"]
     store.create_task(pid, "top secret task")
     store.add_telegram_user(7, "pw")
-    auth = telegram_bot.Auth()
+    auth = telegram_bot.Auth(store)
     script = run_bot_until_stop(
         Script(
             [
@@ -3487,7 +3564,7 @@ def test_all_board_commands_gated_for_unauthenticated_chat(store):
     d = seed_task_view(store)
     pid, t = d["pid"], d["t"]
     store.add_telegram_user(7, "pw")
-    auth = telegram_bot.Auth()
+    auth = telegram_bot.Auth(store)
     script = run_bot_until_stop(
         Script(
             [
@@ -3516,7 +3593,7 @@ def test_all_board_commands_gated_for_unauthenticated_chat(store):
 
 def test_start_help_whoami_work_unauthenticated(store):
     store.add_telegram_user(7, "pw")
-    auth = telegram_bot.Auth()
+    auth = telegram_bot.Auth(store)
     script = run_bot_until_stop(
         Script(
             [
@@ -3544,7 +3621,7 @@ def test_callback_from_unauthenticated_chat_leaks_nothing(store):
     d = seed_task_view(store)
     pid, t = d["pid"], d["t"]
     store.add_telegram_user(13, "pw")
-    auth = telegram_bot.Auth()
+    auth = telegram_bot.Auth(store)
     script = run_bot_until_stop(
         Script(
             [[callback_update(641, f"a:{pid}:{t['number']}:{d['plan']['id']}", chat_id=13)]]
@@ -3569,7 +3646,7 @@ def test_all_callback_families_gated_until_login(store):
     d = seed_task_view(store)
     pid, t = d["pid"], d["t"]
     store.add_telegram_user(11, "pw")
-    auth = telegram_bot.Auth()
+    auth = telegram_bot.Auth(store)
     dispatch = telegram_bot.make_callback_dispatch(store, auth)
     for payload in (
         f"p:{pid}",
@@ -3593,7 +3670,7 @@ def test_all_callback_families_gated_until_login(store):
     assert store.list_subscriptions(11) == []
     assert store.get_task(pid, t["number"])["state"] == "In progress"
     # after login, the same press reaches the board
-    assert auth.authenticate(11, "pw", store)
+    assert auth.authenticate(11, "pw")
     action = dispatch(callback_update(643, f"p:{pid}", chat_id=11)["callback_query"])
     assert action is not None
     assert action.reply != telegram_bot.AUTH_REQUIRED_TEXT
@@ -3606,8 +3683,8 @@ def test_notifier_skips_unauthenticated_subscribers(store):
     store.subscribe_project(1, pid)
     store.subscribe_project(2, pid)
     store.subscribe_project(3, pid)  # subscribed but never permitted
-    auth = telegram_bot.Auth()
-    auth.authenticate(1, "pw1", store)  # only chat 1 logged in
+    auth = telegram_bot.Auth(store)
+    auth.authenticate(1, "pw1")  # only chat 1 logged in
     api = FakeAPI()
     notifier = telegram_bot.Notifier(api, store, auth)
     notifier.seed()

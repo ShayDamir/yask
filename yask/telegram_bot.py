@@ -6,10 +6,12 @@ with ``getMe``, opens the yask store, then long-polls the Bot API with
 answers incoming messages. Board access is password-authenticated: the
 permitted chats (a chat id plus a password, stored only as a salted hash in
 the store's ``telegram_users`` table and managed from the web UI) may
-``/login <password>`` once per bot process run (a restart logs every chat
-out); until a chat has authenticated, the board commands and every
-inline-keyboard callback answer with an auth-required notice and no board
-data, and state-change notifications are not delivered to it. The ungated
+``/login <password>``; a successful login stamps a session in the store
+that persists across bot restarts (a password rotation or a removal from
+the web UI revokes it, requiring a fresh ``/login``); until a chat has
+authenticated, the board commands and every inline-keyboard callback
+answer with an auth-required notice and no board data, and state-change
+notifications are not delivered to it. The ungated
 commands are ``/start``, ``/help``, ``/login`` and ``/whoami`` (the chat's
 own id — the identifier the administrator enters in the web UI). Today the
 authenticated bot answers
@@ -233,38 +235,38 @@ class BotAPIError(Exception):
 
 
 class Auth:
-    """The chats that have logged in during this bot process run.
+    """The chats that currently hold a login session, as the store sees them.
 
-    The allowlist (who *may* authenticate, with which password) lives in
-    the store's ``telegram_users`` table — managed from the web UI, stored
-    only as salted hashes. This object only tracks which of those chats
-    have actually ``/login``-ed since the process started: sessions are
-    deliberately per run, so a bot restart logs every chat out (no tokens
-    or expiry bookkeeping in the database).
+    The allowlist (who *may* authenticate, with which password) and the
+    sessions themselves both live in the store's ``telegram_users`` table —
+    the allowlist is managed from the web UI, stored only as salted hashes.
+    A successful ``/login`` stamps the session in the database, so it
+    survives bot restarts. A password rotation or a removal from the web UI
+    invalidates the session (NULL / row gone), and because the store is
+    consulted on every check, the revocation bites immediately — even in a
+    running bot process — no restart needed.
     """
 
-    def __init__(self) -> None:
-        self._authenticated: set[int] = set()
+    def __init__(self, store: Store) -> None:
+        self._store = store
 
     def is_authenticated(self, chat_id: Optional[int]) -> bool:
-        """Whether this chat has logged in during this process run."""
+        """Whether this chat has a persisted login session."""
         if chat_id is None:
             return False
-        return chat_id in self._authenticated
+        return self._store.is_telegram_user_authenticated(chat_id)
 
-    def authenticate(self, chat_id: Optional[int], password: str, store: Store) -> bool:
+    def authenticate(self, chat_id: Optional[int], password: str) -> bool:
         """Check the chat's password against the store's allowlist.
 
-        On success the chat is marked authenticated for this run. A ``None``
-        chat (no sender) and an unknown chat or wrong password all return
-        ``False`` — the bot cannot tell the cases apart.
+        On success the chat's login session is stamped in the store — it
+        survives bot restarts. A ``None`` chat (no sender) and an unknown
+        chat or wrong password all return ``False`` — the bot cannot tell
+        the cases apart.
         """
         if chat_id is None:
             return False
-        if store.verify_telegram_user(chat_id, password):
-            self._authenticated.add(chat_id)
-            return True
-        return False
+        return self._store.login_telegram_user(chat_id, password)
 
 
 def _command_token(text: Optional[str]) -> Optional[str]:
@@ -1120,7 +1122,7 @@ def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Op
             # store-backed commands.
             try:
                 ok = (
-                    auth.authenticate(chat_id, " ".join(args), store)
+                    auth.authenticate(chat_id, " ".join(args))
                     if auth is not None
                     else True
                 )
@@ -1326,7 +1328,8 @@ def make_callback_dispatch(
         if not isinstance(data, str):
             return None
         # Board access: the chat the button was pressed in (the original
-        # message's chat.id) must have logged in for this run.
+        # message's chat.id) must hold a login session — persisted in the
+        # store, so a bot restart does not log it out.
         if auth is not None:
             message = callback_query.get("message") or {}
             chat_id = (message.get("chat") or {}).get("id")
@@ -2000,8 +2003,8 @@ async def _amain(
     # the history with source "telegram".
     store = Store(conn, source="telegram")
 
-    # Per-run login state: a restart logs every chat out.
-    auth = Auth()
+    # Login sessions live in the store: a restart does not log anyone out.
+    auth = Auth(store)
 
     # Seed the notification cursor to the current history maximum so only
     # changes made while this process runs are pushed (no replay on restart).

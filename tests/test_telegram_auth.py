@@ -123,6 +123,84 @@ def test_verify_telegram_user(store):
     assert store.verify_telegram_user(8, "pw") is False
 
 
+# --- store: the persisted login session (task #55) ------------------------------
+
+
+def _authenticated_at(store, chat_id=7):
+    row = store.conn.execute(
+        "SELECT authenticated_at FROM telegram_users WHERE chat_id = ?", (chat_id,)
+    ).fetchone()
+    return row["authenticated_at"]
+
+
+def test_login_telegram_user(store):
+    store.add_telegram_user(7, "pw")
+    assert store.login_telegram_user(7, "pw") is True
+    # re-login is idempotent (a re-stamp, not an error)
+    assert store.login_telegram_user(7, "pw") is True
+    # wrong password, empty password, unknown chat: False, indistinguishable
+    assert store.login_telegram_user(7, "wrong") is False
+    assert store.login_telegram_user(7, "") is False
+    assert store.login_telegram_user(8, "pw") is False
+
+
+def test_login_telegram_user_stamps_the_row(store):
+    store.add_telegram_user(7, "pw")
+    assert _authenticated_at(store) is None  # permitted, never logged in
+    assert store.login_telegram_user(7, "pw") is True
+    assert _authenticated_at(store) is not None
+
+
+def test_is_telegram_user_authenticated(store):
+    store.add_telegram_user(7, "pw")
+    assert store.is_telegram_user_authenticated(7) is False  # never logged in
+    assert store.is_telegram_user_authenticated(8) is False  # not permitted
+    store.login_telegram_user(7, "pw")
+    assert store.is_telegram_user_authenticated(7) is True
+
+
+def test_password_rotation_invalidates_the_session(store):
+    store.add_telegram_user(7, "old")
+    store.login_telegram_user(7, "old")
+    assert store.is_telegram_user_authenticated(7) is True
+    store.set_telegram_user_password(7, "new")
+    # rotated out: the old password no longer logs in, the new one does
+    assert store.is_telegram_user_authenticated(7) is False
+    assert store.login_telegram_user(7, "old") is False
+    assert store.is_telegram_user_authenticated(7) is False
+    assert store.login_telegram_user(7, "new") is True
+    assert store.is_telegram_user_authenticated(7) is True
+
+
+def test_removal_invalidates_the_session(store):
+    store.add_telegram_user(7, "pw")
+    store.login_telegram_user(7, "pw")
+    assert store.is_telegram_user_authenticated(7) is True
+    store.remove_telegram_user(7)
+    assert store.is_telegram_user_authenticated(7) is False
+    assert store.login_telegram_user(7, "pw") is False
+
+
+def test_login_session_survives_a_reconnect(tmp_path):
+    """The session lives in the database: a fresh connection to the same
+    file (a bot restart) still sees the chat as authenticated."""
+    path = tmp_path / "restart.db"
+    conn = db.connect(path)
+    store = Store(conn)
+    store.add_telegram_user(7, "pw")
+    assert store.login_telegram_user(7, "pw") is True
+    conn.close()
+    conn = db.connect(path)
+    restarted = Store(conn)
+    try:
+        assert restarted.is_telegram_user_authenticated(7) is True
+        assert restarted.login_telegram_user(7, "pw") is True
+        assert restarted.login_telegram_user(7, "wrong") is False
+        assert restarted.is_telegram_user_authenticated(7) is True
+    finally:
+        conn.close()
+
+
 # --- API: the web UI's management endpoints -------------------------------------
 
 

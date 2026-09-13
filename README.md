@@ -125,11 +125,14 @@ Telegram chat id plus a password, stored only as a salted scrypt hash — are
 managed in the web UI (topbar → ✈ "Telegram bot users"), not via Telegram.
 A user asks the bot `/whoami` to learn their chat id, the administrator
 enters it in the web UI with a password, and the user unlocks the board
-with `/login <password>` — for the life of the bot process (a restart logs
-every chat out). Until a chat is authenticated, the board commands and all
-inline buttons answer with an auth-required notice and no board data, and
-state-change notifications are not delivered to it; `/start`, `/help`,
-`/login` and `/whoami` stay available to everyone.
+with `/login <password>`. A successful login persists across bot restarts
+(the session is stored in the database); a newly added chat must log in
+once, and a password change or removal from the web UI requires a fresh
+`/login` (removal revokes access immediately). Until a chat is
+authenticated, the board commands and all inline buttons answer with an
+auth-required notice and no board data, and state-change notifications are
+not delivered to it; `/start`, `/help`, `/login` and `/whoami` stay
+available to everyone.
 
 ## Project layout
 

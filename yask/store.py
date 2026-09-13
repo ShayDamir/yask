@@ -1228,7 +1228,9 @@ class Store:
         the password is stored only as a salted scrypt hash, never in plain
         form. A chat that is already permitted is a conflict — use
         :meth:`set_telegram_user_password` to rotate its password. The
-        returned dict never carries the hash.
+        returned dict never carries the hash. A newly permitted chat holds
+        no login session yet — it must ``/login`` once before the board is
+        open to it.
         """
         if not isinstance(chat_id, int) or isinstance(chat_id, bool) or chat_id <= 0:
             raise ValidationError("chat id must be a positive integer")
@@ -1258,7 +1260,13 @@ class Store:
         return [dict(r) for r in rows]
 
     def set_telegram_user_password(self, chat_id: int, password: str) -> dict:
-        """Replace a permitted chat's password (re-hashed, ``updated_at`` bumped)."""
+        """Replace a permitted chat's password (re-hashed, ``updated_at`` bumped).
+
+        The rotation also invalidates the chat's login session
+        (``authenticated_at`` reset to NULL): a fresh ``/login`` with the new
+        password is required, and a running bot picks up the revocation on
+        its next gate check.
+        """
         if password is None or not password.strip():
             raise ValidationError("password must not be empty")
         row = self._get_telegram_user_row(chat_id)
@@ -1267,8 +1275,8 @@ class Store:
         now = self._now()
         with self.conn:
             self.conn.execute(
-                "UPDATE telegram_users SET password_hash = ?, updated_at = ? "
-                "WHERE chat_id = ?",
+                "UPDATE telegram_users SET password_hash = ?, updated_at = ?, "
+                "authenticated_at = NULL WHERE chat_id = ?",
                 (_hash_password(password), now, chat_id),
             )
         return {
@@ -1295,6 +1303,39 @@ class Store:
         if row is None:
             return False
         return _verify_password(password or "", row["password_hash"])
+
+    def login_telegram_user(self, chat_id: int, password: str) -> bool:
+        """Authenticate a permitted chat and persist its login session.
+
+        Verifies the password with the same contract as
+        :meth:`verify_telegram_user` (unknown chat, wrong or empty password
+        all return ``False`` indistinguishably). On success the chat's
+        ``authenticated_at`` is stamped with the current time — the session
+        lives in the database, so it survives bot restarts. A re-login
+        simply re-stamps the timestamp (idempotent).
+        """
+        if not self.verify_telegram_user(chat_id, password):
+            return False
+        with self.conn:
+            self.conn.execute(
+                "UPDATE telegram_users SET authenticated_at = ? "
+                "WHERE chat_id = ?",
+                (self._now(), chat_id),
+            )
+        return True
+
+    def is_telegram_user_authenticated(self, chat_id: int) -> bool:
+        """Whether the chat is permitted *and* holds a persisted session.
+
+        A newly permitted chat has no session yet (``authenticated_at`` is
+        NULL) — it must ``/login`` once before the board is open to it.
+        ``False`` for a chat that is not in the allowlist at all.
+        """
+        row = self.conn.execute(
+            "SELECT authenticated_at FROM telegram_users WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()
+        return row is not None and row["authenticated_at"] is not None
 
     # -- attachments --------------------------------------------------------------------
 
