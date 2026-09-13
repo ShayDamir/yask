@@ -148,6 +148,27 @@ def test_reorder_self_reference_is_noop(store, project):
         store.reorder_task(pid, nums[0], before_number=nums[0], after_number=nums[0])
 
 
+def test_empty_plan_noops_return_centralized_shape(store, project):
+    """An empty plan is a clean no-op: applied, no affected, no history rows."""
+    pid = project["id"]
+    t = store.create_task(pid, "t")
+    # moving to the task's current state is a no-op
+    out = store.move_task(pid, t["number"], "Backlog")
+    assert out == {"applied": True, "affected": []}
+    # no state-change rows beyond the initial Backlog entry
+    assert [h["to_state"] for h in store.get_history(pid, t["number"])] == [
+        "Backlog"
+    ]
+    # archiving an already-archived task is the same no-op
+    store.archive_task(pid, t["number"])
+    out = store.archive_task(pid, t["number"])
+    assert out == {"applied": True, "affected": []}
+    assert [h["to_state"] for h in store.get_history(pid, t["number"])] == [
+        "Backlog",
+        "Archived",
+    ]
+
+
 def test_move_task_self_position_reference_rejected(store, project):
     """A self position reference in a move is a 4xx ValidationError, not a 500."""
     pid = project["id"]

@@ -926,6 +926,19 @@ class Store:
             )
         return out
 
+    def _guard_confirmation(self, affected: list[dict], confirm: bool):
+        """Shared confirmation contract for mutating actions.
+
+        Returns the no-op result when the plan is empty, raises
+        ``ConfirmationRequired`` when the plan touches more than one task and
+        ``confirm`` is false, and returns ``None`` when the caller may proceed.
+        """
+        if not affected:
+            return {"applied": True, "affected": []}
+        if len(affected) > 1 and not confirm:
+            raise ConfirmationRequired(affected)
+        return None
+
     def move_task(
         self,
         project_id: int,
@@ -935,12 +948,10 @@ class Store:
         before_number: int | None = None,
         after_number: int | None = None,
     ) -> dict:
-        row = self._get_task(project_id, number)
         affected = self.plan_move(project_id, number, to_state)
-        if not affected:
-            return {"applied": True, "affected": []}
-        if len(affected) > 1 and not confirm:
-            raise ConfirmationRequired(affected)
+        noop = self._guard_confirmation(affected, confirm)
+        if noop is not None:
+            return noop
 
         now = self._now()
         main_row = self._get_task(project_id, number)
@@ -1000,12 +1011,10 @@ class Store:
         return self._describe_states(ids, db.ARCHIVED_STATE)
 
     def archive_task(self, project_id: int, number: int, confirm: bool = False) -> dict:
-        row = self._get_task(project_id, number)
         affected = self.plan_archive(project_id, number)
-        if not affected:
-            return {"applied": True, "affected": []}
-        if len(affected) > 1 and not confirm:
-            raise ConfirmationRequired(affected)
+        noop = self._guard_confirmation(affected, confirm)
+        if noop is not None:
+            return noop
         now = self._now()
         with self.conn:
             for a in affected:
@@ -1036,8 +1045,9 @@ class Store:
         if to_state not in db.WORKFLOW_STATES:
             raise ValidationError(f"cannot restore to '{to_state}'")
         affected = self.plan_move(project_id, number, to_state)
-        if len(affected) > 1 and not confirm:
-            raise ConfirmationRequired(affected)
+        noop = self._guard_confirmation(affected, confirm)
+        if noop is not None:
+            return noop
         now = self._now()
         with self.conn:
             so = self.next_sort_order(project_id, to_state, row["parent_id"])
@@ -1081,8 +1091,9 @@ class Store:
         if row["state"] != db.ARCHIVED_STATE:
             raise ValidationError("only archived tasks can be deleted")
         affected = self.plan_delete(project_id, number)
-        if len(affected) > 1 and not confirm:
-            raise ConfirmationRequired(affected)
+        noop = self._guard_confirmation(affected, confirm)
+        if noop is not None:
+            return noop
         now = self._now()
         with self.conn:
             for d in self._all_descendants(row["id"]):
