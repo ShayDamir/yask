@@ -4,11 +4,31 @@ and ``yask telegram`` (Telegram bot)."""
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
 import sys
 from pathlib import Path
 
 DEFAULT_PORT = 4304  # 0x10D0
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True if *host* is loopback/localhost (safe to bind without auth)."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def host_bind_verdict(host: str, allow_remote: bool) -> str:
+    """Return ``"ok"`` (loopback), ``"warn"`` (remote + override) or ``"refuse"``."""
+    if _is_loopback_host(host):
+        return "ok"
+    if allow_remote:
+        return "warn"
+    return "refuse"
 
 
 def default_data_dir() -> Path:
@@ -26,11 +46,36 @@ def _data_path(args) -> Path:
 
 
 def cmd_serve(args) -> int:
+    db_path = _data_path(args) / "yask.db"
+
+    allow_remote = (
+        getattr(args, "allow_remote", False)
+        or os.environ.get("YASK_ALLOW_REMOTE") == "1"
+    )
+    verdict = host_bind_verdict(args.host, allow_remote)
+    if verdict == "refuse":
+        print(
+            "yask: refusing to bind to non-loopback host "
+            f"{args.host!r}.\n"
+            "The web REST API has no authentication or CSRF protection. By design\n"
+            "yask is a loopback-only tool for a single local user. Use --allow-remote\n"
+            "to override this safety check (not recommended).\n",
+            file=sys.stderr,
+        )
+        return 2
+    if verdict == "warn":
+        print(
+            f"yask: WARNING — serving on {args.host}:{args.port} WITHOUT\n"
+            "authentication or CSRF protection. The entire /api/* REST surface is\n"
+            "unauthenticated, including Telegram bot user management. Only do this\n"
+            "on a trusted network.\n",
+            file=sys.stderr,
+        )
+
     import uvicorn
 
     from .api import create_app
 
-    db_path = _data_path(args) / "yask.db"
     app = create_app(db_path)
     print(f"yask: serving web UI on http://{args.host}:{args.port} (data: {db_path})")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
@@ -67,6 +112,12 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("serve", help="run the local web UI")
     s.add_argument("--port", type=int, default=int(os.environ.get("YASK_PORT", DEFAULT_PORT)))
     s.add_argument("--host", default="127.0.0.1")
+    s.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="override the loopback-only safety check and bind to any host; "
+             "note the /api/* REST surface then has NO authentication or CSRF",
+    )
     s.add_argument("--data", help="data directory (default: $YASK_DATA or ~/.local/share/yask)")
     s.set_defaults(func=cmd_serve)
 
