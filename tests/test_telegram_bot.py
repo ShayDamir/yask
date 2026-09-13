@@ -388,8 +388,33 @@ def test_start_command():
     assert len(script.sent) == 1
     assert script.sent[0]["chat_id"] == 7
     assert script.sent[0]["text"] == telegram_bot.START_TEXT
+    # the /start reply carries the hub's exact keyboard (the intro plus
+    # the hub is the natural entry point, #62)
+    assert script.sent[0]["reply_markup"] == telegram_bot.menu_view().reply_markup
     # offset advanced past the processed update
     assert script.offsets == [None, 102]
+
+
+def test_start_renders_menu():
+    """/start goes out with the intro plus the hub's exact two-row keyboard."""
+    script = run_bot_until_stop(Script([[message_update(411, "/start")]]))
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 7
+    assert script.sent[0]["text"] == telegram_bot.START_TEXT
+    # the exact two-row layout: Projects/Tasks, then Subscriptions/Add task/Help
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [
+                {"text": "Projects", "callback_data": "h:p"},
+                {"text": "Tasks", "callback_data": "h:t"},
+            ],
+            [
+                {"text": "Subscriptions", "callback_data": "h:s"},
+                {"text": "Add task", "callback_data": "h:a"},
+                {"text": "Help", "callback_data": "h:h"},
+            ],
+        ]
+    }
 
 
 def test_help_command():
@@ -399,7 +424,22 @@ def test_help_command():
     assert text == telegram_bot.HELP_TEXT
     assert "/start" in text
     assert "/help" in text
+    # the /help reply carries the trailing Main-menu row (#62)
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [[{"text": "Main menu", "callback_data": "h"}]]
+    }
     assert script.offsets == [None, 22]
+
+
+def test_help_renders_reference_with_menu_button():
+    """/help goes out with the full reference plus the Main-menu button."""
+    script = run_bot_until_stop(Script([[message_update(412, "/help")]]))
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 7
+    assert script.sent[0]["text"] == telegram_bot.HELP_TEXT
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [[{"text": "Main menu", "callback_data": "h"}]]
+    }
 
 
 def test_unknown_text_gets_help_hint():
@@ -523,9 +563,18 @@ def test_transport_error_is_survived():
 
 
 def test_reply_for_dispatch_table():
-    assert telegram_bot.reply_for("/start") == telegram_bot.START_TEXT
-    assert telegram_bot.reply_for("/help") == telegram_bot.HELP_TEXT
-    assert telegram_bot.reply_for("/start please") == telegram_bot.START_TEXT
+    start = telegram_bot.reply_for("/start")
+    assert isinstance(start, telegram_bot.KeyboardReply)
+    assert start.text == telegram_bot.START_TEXT
+    assert start.reply_markup == telegram_bot.menu_view().reply_markup
+    help_reply = telegram_bot.reply_for("/help")
+    assert isinstance(help_reply, telegram_bot.KeyboardReply)
+    assert help_reply.text == telegram_bot.HELP_TEXT
+    assert help_reply.reply_markup == {
+        "inline_keyboard": [[telegram_bot._main_menu_button()]]
+    }
+    # the command token only: argument words after /start are ignored
+    assert telegram_bot.reply_for("/start please") == start
     assert "/help" in telegram_bot.reply_for("random chatter")
     assert telegram_bot.reply_for(None) is None
     assert telegram_bot.reply_for("   ") is None
@@ -694,6 +743,36 @@ def test_main_menu_button_from_projects_opens_menu(store):
     # the press is answered (no toast) and the menu text+markup go out as
     # a new message to the button's chat; nothing is edited
     assert script.answered == [{"callback_query_id": "cbq-98"}]
+    assert len(script.sent) == 1
+    expected = telegram_bot.menu_view()
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"] == expected.text
+    assert script.sent[0]["reply_markup"] == expected.reply_markup
+    assert script.edited == []
+
+
+def test_main_menu_button_from_help_opens_menu(store):
+    """Pressing the /help reply's Main-menu row opens the menu hub.
+
+    The button is seeded from the real /help reply markup (the same
+    ``label "Main menu", payload "h"`` row the board views emit), so the
+    help → hub link is pinned end to end (#62).
+    """
+    first = run_bot_until_stop(
+        Script([[message_update(413, "/help")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    rows = first.sent[0]["reply_markup"]["inline_keyboard"]
+    assert rows == [[{"text": "Main menu", "callback_data": "h"}]]
+    payload = rows[0][0]["callback_data"]
+    script = run_bot_until_stop(
+        Script([[callback_update(414, payload, chat_id=11)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the press is answered (no toast) and the hub's text+markup go out
+    # as a new message to the button's chat; nothing is edited
+    assert script.answered == [{"callback_query_id": "cbq-414"}]
     assert len(script.sent) == 1
     expected = telegram_bot.menu_view()
     assert script.sent[0]["chat_id"] == 11
@@ -3926,6 +4005,45 @@ def test_all_callback_families_gated_until_login(store):
     action = dispatch(callback_update(643, f"p:{pid}", chat_id=11)["callback_query"])
     assert action is not None
     assert action.reply != telegram_bot.AUTH_REQUIRED_TEXT
+
+
+def test_start_menu_ungated_buttons_gated(store):
+    """/start is open to everyone; the menu's board buttons are not.
+
+    The #62 end behavior: an unauthenticated chat opens the hub via
+    /start (the intro — with its /login guidance — plus the hub's
+    keyboard, no gate) and presses a board button inside it; the press
+    answers the auth notice as toast and reply, with no board data.
+    """
+    store.add_telegram_user(7, "pw")
+    auth = telegram_bot.Auth(store)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [message_update(651, "/start")],
+                [callback_update(652, "h:p")],
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store, auth),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store, auth),
+    )
+    # /start is ungated: the intro plus the hub's keyboard goes out
+    assert script.sent[0]["chat_id"] == 7
+    assert script.sent[0]["text"] == telegram_bot.START_TEXT
+    assert script.sent[0]["reply_markup"] == telegram_bot.menu_view().reply_markup
+    # the hub's board button is gated: the auth notice as toast and reply
+    assert script.answered == [
+        {
+            "callback_query_id": "cbq-652",
+            "text": telegram_bot.AUTH_REQUIRED_TEXT,
+        }
+    ]
+    assert len(script.sent) == 2
+    assert script.sent[1] == {
+        "chat_id": 7,
+        "text": telegram_bot.AUTH_REQUIRED_TEXT,
+    }
+    assert script.edited == []
 
 
 def test_notifier_skips_unauthenticated_subscribers(store):

@@ -118,7 +118,10 @@ stop them —
 subscriptions are per chat and per project and persist across restarts; the
 bot detects changes by polling `state_history`, so latency is at most one
 poll interval (~30 s). More board commands are on the way. Reads the same
-data directory as the other subcommands.
+data directory as the other subcommands. `/start` opens the main menu — an
+inline-keyboard hub that deep-links into the board views, and every board
+view (and `/help`) carries a "Main menu" row back to the hub; the menu's
+board buttons are auth-gated like every other inline button.
 
 **Authentication.** Board commands are password-gated. Permitted users — a
 Telegram chat id plus a password, stored only as a salted scrypt hash — are

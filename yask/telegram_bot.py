@@ -56,7 +56,10 @@ list (``h:t``), the chat's subscription list (``h:s``), the add-task usage
 (``h:a``) and the help text (``h:h``); every board view's keyboard
 (``/projects``, ``/tasks``, ``/task`` and the notifications) carries a
 trailing ``Main menu`` row with the bare ``h`` payload, so the hub is one
-tap away from anywhere in the chat. While the
+tap away from anywhere in the chat, and is the natural entry point:
+``/start`` replies with the intro text (carrying the ``/login`` guidance)
+plus the hub's keyboard, and ``/help`` with the command reference plus a
+Main-menu button. While the
 bot runs, the
 :class:`Notifier` polls ``state_history`` after each successful
 ``getUpdates`` batch and pushes a message per transition to every
@@ -109,7 +112,7 @@ START_TEXT = (
 
 HELP_TEXT = (
     "Commands:\n"
-    "/start — introduction\n"
+    "/start — main menu (intro + login guidance)\n"
     "/help — this help\n"
     "/login <password> — authenticate this chat (required for board commands)\n"
     "/whoami — show this chat's id (give it to the yask administrator)\n"
@@ -213,19 +216,6 @@ INLINE_TEXT_MAX = 4000
 # satisfies), so 64 chars is a compact, safe display choice.
 NOTIFICATION_BUTTON_TEXT_MAX = 64
 
-# Static command table. Store-backed commands (today: /login, /whoami,
-# /projects, /tasks, /task, /attachment, /move, /add, /subscribe,
-# /unsubscribe) live in make_dispatch — the first two because they need
-# the store and the auth state, the rest because they read (or, for
-# /move and /add, write) the board; state-change notifications are pushed
-# by the Notifier on every poll cycle. Later features extend the dispatch
-# layer without changing the poll loop.
-COMMANDS: dict[str, str] = {
-    "/start": START_TEXT,
-    "/help": HELP_TEXT,
-}
-
-
 class BotAPIError(Exception):
     """Bot API failure: an ``ok:false`` response or a transport failure.
 
@@ -291,11 +281,15 @@ def _command_token(text: Optional[str]) -> Optional[str]:
     return token.split("@", 1)[0].lower()
 
 
-def reply_for(text: Optional[str]) -> Optional[str]:
-    """Reply text for an incoming message, or None if there is nothing to say.
+def reply_for(text: Optional[str]) -> Optional[Reply]:
+    """Reply for an incoming message, or None if there is nothing to say.
 
     Non-text messages (stickers, photos, ...) get no reply; unknown input
     gets a short "try /help" hint. A ``/command@botname`` suffix is ignored.
+    The table's values are :class:`KeyboardReply` — ``/start`` the intro
+    plus the hub's keyboard (:func:`start_view`), ``/help`` the command
+    reference plus a Main-menu button (:func:`help_view`) — unknown chatter
+    stays a plain hint string.
     """
     if not isinstance(text, str) or not text.strip():
         return None
@@ -615,6 +609,47 @@ def _main_menu_button() -> dict:
     factory so the views can never diverge.
     """
     return {"text": "Main menu", "callback_data": "h"}
+
+
+def start_view() -> KeyboardReply:
+    """Format the ``/start`` reply: the intro plus the main-menu hub (#62).
+
+    The static table's ungated entry point: :data:`START_TEXT` verbatim
+    (it carries the ``/login`` guidance for unauthenticated chats) with
+    the hub's keyboard — taken from :func:`menu_view`, so the ``/start``
+    keyboard and the hub can never diverge. The reply itself stays
+    ungated; the hub's board buttons answer unauthenticated chats with
+    :data:`AUTH_REQUIRED_TEXT` through the existing ``h:`` family gate.
+    """
+    return KeyboardReply(START_TEXT, menu_view().reply_markup)
+
+
+def help_view() -> KeyboardReply:
+    """Format the ``/help`` reply: the command reference plus a menu row.
+
+    The static table's other ungated entry: :data:`HELP_TEXT` verbatim
+    (the full command reference) plus one trailing Main-menu row — the
+    shared :func:`_main_menu_button` factory, the same row the board views
+    carry — so the help and the menu hub link into each other and cannot
+    drift apart (#62).
+    """
+    return KeyboardReply(HELP_TEXT, {"inline_keyboard": [[_main_menu_button()]]})
+
+
+# Static command table: the ungated entry points, now
+# KeyboardReply-capable (#62) — /start the intro plus the hub's keyboard,
+# /help the command reference plus a Main-menu button. Store-backed
+# commands (today: /login, /whoami, /projects, /tasks, /task,
+# /attachment, /move, /add, /subscribe, /unsubscribe) live in
+# make_dispatch — the first two because they need the store and the auth
+# state, the rest because they read (or, for /move and /add, write) the
+# board; state-change notifications are pushed by the Notifier on every
+# poll cycle. Later features extend the dispatch layer without changing
+# the poll loop.
+COMMANDS: dict[str, Reply] = {
+    "/start": start_view(),
+    "/help": help_view(),
+}
 
 
 def _flip_toggle(
