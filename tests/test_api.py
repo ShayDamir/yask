@@ -219,6 +219,56 @@ def test_attachment_malicious_filename_no_header_injection(client, pid):
     assert "x-attacked" not in header_names
 
 
+def test_attachment_upload_rejects_oversized_payload(client, pid):
+    """Bug #72: an oversized attachment is rejected by the size check before
+    the full payload is buffered in memory (DoS, CWE-770). The web handler
+    caps its read at ``MAX + 1`` bytes and rejects anything larger; the
+    store guard is the backend safety net.
+    """
+    client.post(f"/api/projects/{pid}/tasks", json={"title": "t"})
+    boundary = "----yaskoversizedboundary"
+    cap = 10 * 1024 * 1024
+
+    # control: exactly the cap is accepted.
+    body_ok = _multipart_body(boundary, "ok.md", b"x" * cap, "text/markdown")
+    r_ok = client.post(
+        f"/api/projects/{pid}/tasks/1/attachments",
+        content=body_ok,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    assert r_ok.status_code == 201
+    stored_after_ok = len(
+        client.get(f"/api/projects/{pid}/tasks/1").json()["attachments"]
+    )
+
+    # the boundary itself: cap + 1 byte is rejected.
+    body_over = _multipart_body(boundary, "over.md", b"x" * (cap + 1), "text/markdown")
+    r_over = client.post(
+        f"/api/projects/{pid}/tasks/1/attachments",
+        content=body_over,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    assert r_over.status_code == 400
+    # nothing new was stored by the rejection.
+    assert (
+        len(client.get(f"/api/projects/{pid}/tasks/1").json()["attachments"])
+        == stored_after_ok
+    )
+
+    # a clearly oversized payload is rejected too.
+    body_big = _multipart_body(boundary, "big.md", b"x" * (cap * 2), "text/markdown")
+    r_big = client.post(
+        f"/api/projects/{pid}/tasks/1/attachments",
+        content=body_big,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    assert r_big.status_code == 400
+    assert (
+        len(client.get(f"/api/projects/{pid}/tasks/1").json()["attachments"])
+        == stored_after_ok
+    )
+
+
 def test_task_types_over_api(client):
     r = client.get("/api/task-types").json()
     assert {t["name"] for t in r} >= {"Story", "Task", "Bug", "Epic"}

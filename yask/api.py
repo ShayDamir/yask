@@ -15,7 +15,6 @@ from .store import (
     ConfirmationRequired,
     CycleError,
     Store,
-    ValidationError,
     YaskError,
 )
 
@@ -276,7 +275,14 @@ def create_app(db_path: str | Path) -> FastAPI:
     async def api_add_attachment(
         project_id: int, number: int, file: UploadFile = File(...)
     ):
-        data = await file.read()
+        # Cap the read so an oversized payload cannot force a full in-memory
+        # allocation before the size check (DoS, CWE-770); the store keeps the
+        # authoritative backend guard. (task #72)
+        data = await file.read(Store.MAX_ATTACHMENT_SIZE + 1)
+        if len(data) > Store.MAX_ATTACHMENT_SIZE:
+            raise HTTPException(
+                status_code=400, detail="attachment exceeds 10 MB limit"
+            )
         content_type = (file.content_type or "application/octet-stream").lower()
         return handle(
             lambda: store().add_attachment(
