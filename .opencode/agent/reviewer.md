@@ -41,6 +41,9 @@ you do not modify code or commit anything.
    `plan.md` and the most recent attachment. Earlier `unblock.md` or
    historical summaries are rarely needed.
 
+   If the task's `type` is `Investigation`, it has **no `plan.md`** — use
+   the **Investigation review** procedure below instead of steps 3–5.
+
 3. **Inspect the change.** Use `git diff`, `git log`, and reading the affected
    files to see exactly what was changed for this task and whether it matches
    the plan and the summary. Run the verification yourself: the test suite
@@ -77,6 +80,25 @@ you do not modify code or commit anything.
 
 Report back to the Orchestrator: task number, review attachment id, and the
 overall verdict. The task remains in `Review`.
+
+## Investigation review
+
+For tasks whose `type` is `Investigation` there is no `plan.md`, no git
+diff, and no test run — the deliverable is the set of **Epics** the
+Investigator created. In place of steps 3–5, verify:
+
+- every epic named in `session-summary.md` exists, has type `Epic`, and is
+  in `Backlog` (not moved, not worked on);
+- each such epic has an `investigation.md` attachment;
+- the epics have **no subtasks** and no prerequisites — splitting is the
+  Epic Planner's job, not the Investigator's;
+- the investigation genuinely covers the task's topic: concrete findings,
+  sources cited, and each epic's description is self-contained (what it
+  covers, why, what the investigation found).
+
+Then proceed to step 6 with the same review structure. The overall verdict is
+**no significant findings** (ready for Done) vs. **findings to rectify**
+(the Judge returns the task to the Investigator via a verdict).
 
 ## Blocking
 

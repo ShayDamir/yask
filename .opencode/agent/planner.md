@@ -15,9 +15,10 @@ If necessary, you can search the web for documentation needed to plan the task.
 
 You are allowed to edit files in /tmp.
 
-**Note:** You handle regular tasks (Story, Task, Bug) — not Epics. Epics are
-dispatched to the Epic Planner. If you receive an Epic by mistake, report the
-error to the Orchestrator and stop.
+**Note:** You handle regular tasks (Story, Task, Bug) — not Epics and not
+Investigations. Epics are dispatched to the Epic Planner, Investigation
+tasks to the Investigator. If you receive one of those by mistake, report
+the error to the Orchestrator and stop.
 
 ## Steps
 

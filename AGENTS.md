@@ -85,18 +85,20 @@ on an **Orchestrator** agent that drives a loop — pick the next task that
 needs work, hand it off to the matching subagent by **project + task
 number**, repeat until nothing is actionable, then stop and report. Everyone
 else is a subagent it spawns. Role-specific instructions live in
-`.opencode/agent/{orchestrator,planner,epic-planner,executor,reviewer,judge}.md`;
+`.opencode/agent/{orchestrator,planner,epic-planner,investigator,executor,reviewer,judge}.md`;
 this file documents only what every agent must agree on.
 
 ### Dispatch (state → agent)
 
 Subagents handle the states the Orchestrator dispatches:
 
-| Task state                | Handled by            | Ends with                         |
-| ------------------------- | --------------------- | --------------------------------- |
-| `Todo` / `Planning` (Epic)| Epic Planner          | stays `Todo` (prereqs set on subtasks) |
-| `Todo` / `Planning`       | Planner               | `In progress` (plan attached)     |
-| `In progress`             | Executor              | `Review` (session summary attached) |
+| Task state                          | Handled by          | Ends with                         |
+| ----------------------------------- | ------------------- | --------------------------------- |
+| `Todo` / `Planning` (Epic)          | Epic Planner        | stays `Todo` (prereqs set on subtasks) |
+| `Todo` / `Planning` (Investigation) | Investigator        | `Review` (epics created, `investigation.md` attached) |
+| `Todo` / `Planning`                 | Planner             | `In progress` (plan attached)     |
+| `In progress` (Investigation)       | Investigator (re-work) | `Review` (session summary attached) |
+| `In progress`                       | Executor            | `Review` (session summary attached) |
 | `Review` (no review yet)  | Reviewer              | stays `Review` (review attached)  |
 | `Review` (review attached)| Judge                 | `Done` (commit) or `In progress` (verdict) |
 | `Todo`/`Planning` blocked on unmet prereqs | (skip until prereqs advance) | — |
@@ -132,6 +134,31 @@ ordered, it may skip creating new tasks and just attach an `epic-plan.md`
 summary of the current structure. The key output is the prerequisite links,
 not the attachment.
 
+### Investigation workflow
+
+Investigation tasks produce **no code** — they produce **Epics**. The
+Investigator researches the task's topic (repository docs/code plus internet
+sources) and turns the findings into work items:
+
+1. An Investigation task in `Todo` (or re-dispatched from `In progress`
+   after a verdict) goes to the **Investigator** (not the regular Planner).
+2. The Investigator researches the topic, then creates **one or several
+   Epics** with self-contained descriptions (scope, why, what the
+   investigation found). The epics get **no subtasks and no
+   prerequisites** — that is the Epic Planner's job.
+3. The Investigator attaches the result of the investigation to every
+   created epic as `investigation.md`, attaches a `session-summary.md` to
+   the Investigation task itself, and moves it to `Review`.
+4. The Investigation task flows through the normal review pipeline
+   (Reviewer, then Judge). The Judge moves it to `Done` **without a
+   commit** — no code was produced.
+5. The created Epics stay in `Backlog` until the **user** moves them to
+   `Todo`. There the Epic Planner splits them into subtasks, using the
+   epic's `investigation.md` as the primary scope/rationale context.
+
+So an Investigation task is a one-shot research→epics step, and the epics
+it creates drive all subsequent work through the regular pipeline.
+
 ### Handoff contract
 
 - The Orchestrator hands a task to a subagent by **project + task number** —
@@ -153,6 +180,7 @@ Filenames are the contract; content is markdown unless noted:
 | -------------------- | ------------ | ---------------------------------------------- |
 | `plan.md`            | Planner      | implementation plan                            |
 | `epic-plan.md`       | Epic Planner | task breakdown, prerequisites, execution order  |
+| `investigation.md`   | Investigator | result of investigation, attached to the created epics |
 | `session-summary.md` | Executor     | what changed, verification results, deviations |
 | `review.md`          | Reviewer     | plan→code verification, findings, verdict      |
 | `verdict.md`         | Judge        | what must be fixed (re-work round)             |
@@ -188,7 +216,9 @@ information, a human decision). Rules:
 
 Only the **Judge** commits, and only when moving a task to `Done`: stage and
 commit exactly that task's files with a concise conventional message. No other
-agent commits; the Executor's work sits uncommitted until then.
+agent commits; the Executor's work sits uncommitted until then. Exception:
+**Investigation** tasks reach `Done` **without a commit** — they produce no
+code, only epics and documents inside yask.
 
 ### When a new task arises during implementation
 

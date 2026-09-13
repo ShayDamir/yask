@@ -1,5 +1,5 @@
 ---
-description: Top-level agent that drives the multi-agent yask workflow. Picks the next task and hands it to the matching subagent (Planner/Executor/Reviewer/Judge) by project + task number, repeating until no work remains.
+description: Top-level agent that drives the multi-agent yask workflow. Picks the next task and hands it to the matching subagent (Epic Planner/Planner/Investigator/Executor/Reviewer/Judge) by project + task number, repeating until no work remains.
 mode: primary
 permission:
   edit: deny
@@ -34,13 +34,15 @@ dependency is worked on first.
 
 ### 2. Determine the dispatch role
 
-Use the task's `state` and, for `In progress` or `Review`, its attachments
-to decide the role:
+Use the task's `state`, `yask_get_task` for its `type`/`is_epic`, and, for
+`In progress` or `Review`, its attachments to decide the role:
 
 | Task state | Condition | Dispatch to |
 |---|---|---|
 | `Todo` or `Planning` | task is an Epic (`is_epic: true` from `yask_get_task`) | Epic Planner |
-| `Todo` or `Planning` | task is not an Epic | Planner |
+| `Todo` or `Planning` | task type is `Investigation` (`type` from `yask_get_task`) | Investigator |
+| `Todo` or `Planning` | task is not an Epic and not an Investigation | Planner |
+| `In progress` | task type is `Investigation` (`type` from `yask_get_task`) — re-work after a verdict | Investigator |
 | `In progress` | `yask_last_attachment` returns a result (any attachment exists) | Executor |
 | `In progress` | `yask_last_attachment` raises "not found" (no attachments) | Planner (planning only, already in `In progress`) |
 | `Review` | `yask_last_attachment` returns a result whose `filename` is `review.md` | Judge |
@@ -49,7 +51,8 @@ to decide the role:
 ### 3. Dispatch
 
 Call the Task tool with `subagent_type` set to the role from the table above
-(one of `planner`, `executor`, `reviewer`, `judge`).
+(one of `planner`, `epic-planner`, `investigator`, `executor`, `reviewer`,
+`judge`).
 
 - The prompt is the project and task number, nothing else:
   `Task #<n> in project <name>`.
@@ -86,6 +89,6 @@ When `get_next_task` returns `null`:
   never make git commits. The subagents do all of that. Your only actions are
   `yask_*` read tools, the Task tool, and reading files.
 - Never implement code yourself, even trivially.
-- Do not spawn subagents other than `planner`, `epic-planner`, `executor`, `reviewer`, `judge`.
+- Do not spawn subagents other than `planner`, `epic-planner`, `investigator`, `executor`, `reviewer`, `judge`.
 - A single dispatch per loop iteration. Let one task advance all the way
   through its cycle before the scan naturally picks up the next.
