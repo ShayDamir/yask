@@ -10,7 +10,13 @@ from fastapi.testclient import TestClient
 
 from yask import db
 from yask.api import create_app
-from yask.store import Conflict, NotFound, Store, ValidationError
+from yask.store import (
+    Conflict,
+    NotFound,
+    Store,
+    ValidationError,
+    TELEGRAM_LOGIN_MAX_ATTEMPTS,
+)
 
 
 @pytest.fixture()
@@ -261,3 +267,93 @@ def test_telegram_users_api_password_verifiable(tmp_path):
         assert "rotated" not in row["password_hash"]
     finally:
         conn.close()
+
+
+# --- store: login throttle / lockout (task #69) -------------------------------
+
+
+def _tg_failures(store, chat_id=7):
+    row = store.conn.execute(
+        "SELECT login_failures, locked_until FROM telegram_users WHERE chat_id = ?",
+        (chat_id,),
+    ).fetchone()
+    return row["login_failures"], row["locked_until"]
+
+
+def _set_locked_until(store, chat_id, value):
+    store.conn.execute(
+        "UPDATE telegram_users SET locked_until = ? WHERE chat_id = ?",
+        (value, chat_id),
+    )
+
+
+def test_login_locks_out_after_threshold():
+    store = Store(db.connect(":memory:"))
+    store.add_telegram_user(7, "pw")
+    # the threshold failures: 5 wrong passwords
+    for _ in range(TELEGRAM_LOGIN_MAX_ATTEMPTS):
+        assert store.login_telegram_user(7, "wrong") is False
+    assert _tg_failures(store)[0] == TELEGRAM_LOGIN_MAX_ATTEMPTS
+    assert _tg_failures(store)[1] is not None  # a lockout stamp is set
+    # the 6th attempt — even the *correct* password — is locked out
+    assert store.login_telegram_user(7, "pw") is False
+    locked = _tg_failures(store)[1]
+    assert locked is not None and locked > db.utcnow()
+
+
+def test_locked_out_returns_false_without_scrypt():
+    """Once locked, the correct password still fails — proving the throttle
+    gates *before* the scrypt cost, not by simply getting a wrong answer."""
+    store = Store(db.connect(":memory:"))
+    store.add_telegram_user(7, "pw")
+    for _ in range(TELEGRAM_LOGIN_MAX_ATTEMPTS):
+        store.login_telegram_user(7, "wrong")
+    # force a far-future lock: the attempt must fail without ever verifying
+    _set_locked_until(store, 7, "2999-01-01T00:00:00Z")
+    assert store.login_telegram_user(7, "pw") is False
+
+
+def test_lockout_expires():
+    store = Store(db.connect(":memory:"))
+    store.add_telegram_user(7, "pw")
+    for _ in range(TELEGRAM_LOGIN_MAX_ATTEMPTS):
+        store.login_telegram_user(7, "wrong")
+    # simulate the window elapsing: a past ``locked_until`` is not in force
+    _set_locked_until(store, 7, "2000-01-01T00:00:00Z")
+    assert store.login_telegram_user(7, "pw") is True
+
+
+def test_success_resets_failure_counter():
+    store = Store(db.connect(":memory:"))
+    store.add_telegram_user(7, "pw")
+    for _ in range(TELEGRAM_LOGIN_MAX_ATTEMPTS - 2):
+        store.login_telegram_user(7, "wrong")
+    assert _tg_failures(store)[0] == TELEGRAM_LOGIN_MAX_ATTEMPTS - 2
+    assert store.login_telegram_user(7, "pw") is True
+    # the counter is cleared on success — a fresh window begins
+    assert _tg_failures(store)[0] == 0
+    assert _tg_failures(store)[1] is None
+
+
+def test_unknown_chat_is_not_locked():
+    """Failed attempts against an unknown chat stay indistinguishable from a
+    wrong password and never touch a row."""
+    store = Store(db.connect(":memory:"))
+    for _ in range(TELEGRAM_LOGIN_MAX_ATTEMPTS + 3):
+        assert store.login_telegram_user(12345, "pw") is False
+    # no row was ever created
+    assert store.conn.execute(
+        "SELECT COUNT(*) AS c FROM telegram_users WHERE chat_id = 12345"
+    ).fetchone()["c"] == 0
+
+
+def test_lockout_is_independently_keyed_by_chat():
+    store = Store(db.connect(":memory:"))
+    store.add_telegram_user(7, "pw")
+    store.add_telegram_user(8, "pw")
+    for _ in range(TELEGRAM_LOGIN_MAX_ATTEMPTS):
+        store.login_telegram_user(7, "wrong")
+    # chat 7 is locked...
+    assert store.login_telegram_user(7, "pw") is False
+    # ...but chat 8, a different chat, still logs in
+    assert store.login_telegram_user(8, "pw") is True

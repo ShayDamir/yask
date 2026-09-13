@@ -113,6 +113,8 @@ CREATE TABLE IF NOT EXISTS telegram_users (
     chat_id       INTEGER PRIMARY KEY,
     password_hash TEXT NOT NULL,
     authenticated_at TEXT,
+    login_failures INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT,
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
@@ -206,6 +208,14 @@ def _ensure_missing_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE telegram_users ADD COLUMN authenticated_at TEXT"
         )
+    if "login_failures" not in tg_user_cols:
+        conn.execute(
+            "ALTER TABLE telegram_users ADD COLUMN login_failures "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+    if "locked_until" not in tg_user_cols:
+        # NULL for legacy rows: not currently locked out.
+        conn.execute("ALTER TABLE telegram_users ADD COLUMN locked_until TEXT")
 
 
 def _seed_task_types(conn: sqlite3.Connection) -> None:

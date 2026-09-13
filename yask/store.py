@@ -52,6 +52,16 @@ SALT_BYTES = 16
 # at — pass an explicit headroom so hashing works on any build.
 SCRYPT_MAXMEM = 64 * 1024 * 1024
 
+# Telegram `/login` throttle (task #69). A chat that fails to authenticate is
+# temporarily locked out after `MAX_ATTEMPTS` consecutive failures, so the
+# `/login` replay loop the bot runs on every message can no longer brute-force
+# a weak password an unlimited number of times. The lockout is enforced
+# *before* scrypt is computed, so a locked-out attempt costs the server no hash.
+# Keyed by chat id — Telegram messages arrive via Meta's servers, so IP-based
+# throttling is unavailable and a single chat is the only practical key.
+TELEGRAM_LOGIN_MAX_ATTEMPTS = 5
+TELEGRAM_LOGIN_LOCK_SECONDS = 15 * 60
+
 
 def _hash_password(password: str) -> str:
     """Salted scrypt hash of ``password`` (``scrypt$n$r$p$salt$hash``)."""
@@ -65,6 +75,27 @@ def _hash_password(password: str) -> str:
         maxmem=SCRYPT_MAXMEM,
     )
     return f"scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}${salt.hex()}${digest.hex()}"
+
+
+def _is_locked(row) -> bool:
+    """Whether a ``telegram_users`` row is within a lockout window.
+
+    ``locked_until`` is an ISO-8601 UTC string; because those compare
+    chronologically lexicographically, a value greater than "now" means the
+    lock is still in force. A NULL / absent ``locked_until`` is not locked.
+    """
+    locked_until = row["locked_until"]
+    return locked_until is not None and locked_until > db.utcnow()
+
+
+def _lock_expiry() -> str:
+    """ISO-8601 UTC timestamp ``TELEGRAM_LOGIN_LOCK_SECONDS`` from now."""
+    from datetime import datetime, timezone, timedelta
+
+    expiry = datetime.now(timezone.utc) + timedelta(
+        seconds=TELEGRAM_LOGIN_LOCK_SECONDS
+    )
+    return expiry.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _verify_password(password: str, stored: str) -> bool:
@@ -1309,20 +1340,66 @@ class Store:
 
         Verifies the password with the same contract as
         :meth:`verify_telegram_user` (unknown chat, wrong or empty password
-        all return ``False`` indistinguishably). On success the chat's
-        ``authenticated_at`` is stamped with the current time — the session
-        lives in the database, so it survives bot restarts. A re-login
-        simply re-stamps the timestamp (idempotent).
+        all return ``False`` indistinguishably — no allowlist enumeration).
+        A chat is temporarily **locked out** after
+        :data:`TELEGRAM_LOGIN_MAX_ATTEMPTS` consecutive failed attempts; the
+        lockout is enforced *before* scrypt is computed, so a locked-out or
+        unknown attempt costs the server no hash. This is the throttle that
+        closes CWE-307 on the bot's ``/login`` (task #69): an attacker who
+        replays ``/login`` can no longer brute-force a weak password an
+        unlimited number of times. On success the chat's
+        ``authenticated_at`` is stamped with the current time and the failure
+        counter is reset — the session lives in the database, so it survives
+        bot restarts. A re-login simply re-stamps the timestamp (idempotent).
         """
+        # Unknown chat short-circuits with no state written; a locked-out chat
+        # short-circuits *before* scrypt — the throttle gates verification, not
+        # merely the result of it.
+        row = self._get_telegram_user_row(chat_id)
+        if row is None:
+            return False
+        if _is_locked(row):
+            return False
         if not self.verify_telegram_user(chat_id, password):
+            self._record_login_failure(chat_id)
             return False
         with self.conn:
             self.conn.execute(
-                "UPDATE telegram_users SET authenticated_at = ? "
+                "UPDATE telegram_users SET authenticated_at = ?, "
+                "login_failures = 0, locked_until = NULL "
                 "WHERE chat_id = ?",
                 (self._now(), chat_id),
             )
         return True
+
+    def _record_login_failure(self, chat_id: int) -> None:
+        """Record one failed ``/login`` and lock the chat out at the threshold.
+
+        Called only after a failed verification of a *known* chat. If a
+        previously-set lockout has already expired the count starts fresh
+        (each attempt begins a new window); once failures reach
+        :data:`TELEGRAM_LOGIN_MAX_ATTEMPTS` a ``locked_until`` stamp is set so
+        subsequent attempts short-circuit before scrypt.
+        """
+        row = self._get_telegram_user_row(chat_id)
+        if row is None:
+            return
+        failures = row["login_failures"]
+        # A lockout that has already expired means the window elapsed: start
+        # a fresh count rather than persisting a stale, exceeded total.
+        if row["locked_until"] is not None and not _is_locked(row):
+            failures = 0
+        failures = failures + 1
+        locked_until = None
+        if failures >= TELEGRAM_LOGIN_MAX_ATTEMPTS:
+            locked_until = _lock_expiry()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE telegram_users SET login_failures = ?, "
+                "locked_until = ?, updated_at = ? "
+                "WHERE chat_id = ?",
+                (failures, locked_until, self._now(), chat_id),
+            )
 
     def is_telegram_user_authenticated(self, chat_id: int) -> bool:
         """Whether the chat is permitted *and* holds a persisted session.
