@@ -2003,6 +2003,63 @@ class BotAPI:
         result = await self._call("editMessageText", **params)
         return result if isinstance(result, dict) else {}
 
+    async def set_my_commands(
+        self,
+        commands: list[dict],
+        scope: Optional[dict] = None,
+        language_code: Optional[str] = None,
+    ) -> bool:
+        """Replace the bot's command menu with ``commands`` (full overwrite).
+
+        Full overwrite: any command not listed here is removed. Idempotent and
+        safe to call at every startup. ``scope`` narrows the change to a
+        specific ``BotCommandScope``; ``language_code`` to one language.
+        ``commands`` is a list of ``{"command": ..., "description": ...}`` dicts.
+        """
+        params: dict[str, Any] = {"commands": list(commands)}
+        if scope is not None:
+            params["scope"] = scope
+        if language_code:
+            params["language_code"] = language_code
+        result = await self._call("setMyCommands", **params)
+        return bool(result)
+
+    async def get_my_commands(
+        self,
+        scope: Optional[dict] = None,
+        language_code: Optional[str] = None,
+    ) -> list[dict]:
+        """Return the bot's command menu as a list of ``{command, description}``.
+
+        ``scope`` / ``language_code`` narrow the query; both optional.
+        """
+        params: dict[str, Any] = {}
+        if scope is not None:
+            params["scope"] = scope
+        if language_code:
+            params["language_code"] = language_code
+        result = await self._call("getMyCommands", **params)
+        return list(result) if result else []
+
+    async def delete_my_commands(
+        self,
+        scope: Optional[dict] = None,
+        language_code: Optional[str] = None,
+    ) -> bool:
+        """Remove the bot's command menu.
+
+        Uses the dedicated ``deleteMyCommands`` endpoint (not the empty-array
+        ``setMyCommands`` trick): it is the documented method and its
+        ``scope`` / ``language_code`` arguments match this signature exactly.
+        """
+        params: dict[str, Any] = {}
+        if scope is not None:
+            params["scope"] = scope
+        if language_code:
+            params["language_code"] = language_code
+        result = await self._call("deleteMyCommands", **params)
+        return bool(result)
+
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()

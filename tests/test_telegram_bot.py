@@ -112,9 +112,10 @@ class Script:
     file uploads (sendDocument/sendPhoto): one dict per upload with the
     method, chat id, caption, filename, bytes and the ``reply_markup`` form
     field (None when absent); ``answered`` records answerCallbackQuery
-    bodies; ``edited`` records editMessageText bodies; ``allowed_updates``
-    records the allowed_updates of every getUpdates call; ``offsets`` the
-    getUpdates offsets.
+    bodies; ``edited`` records editMessageText bodies; ``command_requests``
+    records (method, body) tuples for setMyCommands / getMyCommands /
+    deleteMyCommands; ``allowed_updates`` records the allowed_updates of every
+    getUpdates call; ``offsets`` the getUpdates offsets.
     """
 
     def __init__(self, get_updates, get_me_ok=True, fail_once_with=None):
@@ -126,6 +127,7 @@ class Script:
         self.sent_files = []
         self.answered = []
         self.edited = []
+        self.command_requests = []
         self.allowed_updates = []
         self.offsets = []
         self.stop = None
@@ -181,6 +183,17 @@ class Script:
             return httpx.Response(200, json={"ok": True, "result": True})
         if method == "editMessageText":
             self.edited.append(body)
+            return httpx.Response(200, json={"ok": True, "result": True})
+        if method in ("setMyCommands", "getMyCommands", "deleteMyCommands"):
+            self.command_requests.append((method, body))
+            if method == "getMyCommands":
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "result": [{"command": "/start", "description": "main"}],
+                    },
+                )
             return httpx.Response(200, json={"ok": True, "result": True})
         raise AssertionError(f"unexpected Bot API method: {method}")
 
@@ -2696,6 +2709,85 @@ def test_edit_message_text_params():
         # no markup → no key
         {"chat_id": 7, "message_id": 99, "text": "plain"},
     ]
+
+
+def test_set_my_commands_serializes_commands():
+    script = Script([])
+
+    async def calls(api):
+        await api.set_my_commands(
+            [{"command": "/start", "description": "main"}]
+        )
+
+    bot_api_call(script, calls)
+    assert len(script.command_requests) == 1
+    method, body = script.command_requests[0]
+    assert method == "setMyCommands"
+    assert body["commands"] == [
+        {"command": "/start", "description": "main"}
+    ]
+    # no scope/language_code when left default
+    assert "scope" not in body
+    assert "language_code" not in body
+
+
+def test_set_my_commands_scope_and_language():
+    script = Script([])
+    scope = {"type": "all_private_chats", "chat_id": 7}
+
+    async def calls(api):
+        await api.set_my_commands(
+            [{"command": "/start", "description": "main"}],
+            scope=scope,
+            language_code="en",
+        )
+
+    bot_api_call(script, calls)
+    _, body = script.command_requests[0]
+    assert body["commands"] == [{"command": "/start", "description": "main"}]
+    assert body["scope"] == scope
+    assert body["language_code"] == "en"
+
+
+def test_get_my_commands_returns_parsed_list():
+    script = Script([])
+
+    async def calls(api):
+        result = await api.get_my_commands()
+
+    bot_api_call(script, calls)
+    method, body = script.command_requests[0]
+    assert method == "getMyCommands"
+    # empty body when no scope/language
+    assert body == {}
+
+
+def test_get_my_commands_return_value():
+    script = Script([])
+    seen = {}
+
+    async def calls(api):
+        seen["result"] = await api.get_my_commands()
+
+    bot_api_call(script, calls)
+    assert seen["result"] == [
+        {"command": "/start", "description": "main"}
+    ]
+
+
+def test_delete_my_commands_uses_delete_endpoint():
+    script = Script([])
+    seen = {}
+
+    async def calls(api):
+        seen["result"] = await api.delete_my_commands()
+
+    bot_api_call(script, calls)
+    method, body = script.command_requests[0]
+    # dedicated deleteMyCommands endpoint, not an empty-array setMyCommands
+    assert method == "deleteMyCommands"
+    assert body == {}  # empty when no scope/language
+    assert seen["result"] is True
 
 
 def test_send_message_reply_markup_threaded():
