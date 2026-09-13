@@ -162,6 +162,45 @@ def test_add_attachment_bad_base64(store, project):
     assert "data_base64" in data["error"]
 
 
+def test_add_attachment_data_base64_rejects_before_decode(store, project, monkeypatch):
+    t = store.create_task(project["id"], "T")
+    # ~14 M-char base64 string decodes to ~11 MB, over the 10 MB cap.
+    b64 = "A" * (14 * 1024 * 1024)
+
+    def _never_decode(s):
+        raise AssertionError("b64decode must not be reached on oversized input")
+
+    monkeypatch.setattr(base64, "b64decode", _never_decode)
+    res = call(
+        store,
+        "add_attachment",
+        project=project["name"],
+        number=t["number"],
+        filename="big.md",
+        data_base64=b64,
+    )
+    data = json.loads(texts(res)[0].text)
+    assert data["ok"] is False
+    assert "exceeds 10 MB" in data["error"]
+
+
+def test_add_attachment_data_base64_under_limit_ok(store, project):
+    t = store.create_task(project["id"], "T")
+    # ~9 MB payload, valid base64, still attaches (pre-check is not too strict).
+    content = b"x" * (9 * 1024 * 1024)
+    res = call(
+        store,
+        "add_attachment",
+        project=project["name"],
+        number=t["number"],
+        filename="b64.md",
+        data_base64=base64.b64encode(content).decode(),
+    )
+    meta = json.loads(texts(res)[0].text)
+    got_meta, data = store.get_attachment(meta["id"])
+    assert data == content
+
+
 def test_get_attachment_image(store, project):
     t = store.create_task(project["id"], "T")
     att = store.add_attachment(project["id"], t["number"], "px.png", "image/png", PNG_1X1)

@@ -343,6 +343,13 @@ def build_server(store: Store) -> FastMCP:
                 raise ValidationError("provide data_base64 or file_path")
             import base64
 
+            # Reject before decoding: base64 expands to ~3/4 its length in
+            # bytes, so an upper bound on the decoded size is O(1) and avoids
+            # allocating a large decoded blob before the cap is enforced
+            # (guards against memory-exhaustion DoS; CWE-400/CWE-770).
+            if len(data_base64) * 3 // 4 > Store.MAX_ATTACHMENT_SIZE:
+                raise ValidationError("attachment exceeds 10 MB limit")
+
             try:
                 data = base64.b64decode(data_base64)
             except (ValueError, TypeError) as e:
