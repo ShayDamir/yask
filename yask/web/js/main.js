@@ -269,81 +269,79 @@ const actions = {
   onDrop: (number, intent) => handleDrop(number, intent),
 };
 
-async function doMove(task, toState, position = {}) {
-  if (task.state === toState) return;
+// Shared flow for cascading actions (move/archive/restore): run the API
+// call; on 409 requires_confirmation show a confirm dialog and re-run with
+// confirm: true. Always refresh unless the user cancels or the call fails
+// with another error.
+// done(res, count) builds the success toast: count is null on the direct
+// path, the number of affected tasks after confirmation.
+async function confirmAndRun({ title, message, confirmLabel, run, done }) {
   try {
-    const res = await api.moveTask(state.project.id, task.number, toState, position);
-    toast(`Moved #${task.number} to ${toState}`, "success");
+    const res = await run(false);
+    toast(done(res, null), "success");
   } catch (err) {
     if (err.needsConfirmation) {
       const ok = await confirmDialog({
-        title: `Move #${task.number} to ${toState}?`,
-        message:
-          "This also moves its prerequisites that have not reached this stage yet.",
+        title,
+        message,
         affected: err.affected,
-        confirmLabel: "Move all",
+        confirmLabel,
       });
       if (!ok) return;
-      await api.moveTask(state.project.id, task.number, toState, {
-        ...position,
-        confirm: true,
-      });
-      toast(`Moved ${err.affected.length} tasks to ${toState}`, "success");
+      const res = await run(true);
+      toast(done(res, err.affected.length), "success");
     } else {
       toastError(err);
       return;
     }
   }
   await refresh();
+}
+
+async function doMove(task, toState, position = {}) {
+  if (task.state === toState) return;
+  await confirmAndRun({
+    title: `Move #${task.number} to ${toState}?`,
+    message:
+      "This also moves its prerequisites that have not reached this stage yet.",
+    confirmLabel: "Move all",
+    run: (confirm) =>
+      api.moveTask(
+        state.project.id,
+        task.number,
+        toState,
+        confirm ? { ...position, confirm } : position
+      ),
+    done: (res, count) =>
+      count === null
+        ? `Moved #${task.number} to ${toState}`
+        : `Moved ${count} tasks to ${toState}`,
+  });
 }
 
 async function doArchive(task) {
-  try {
-    await api.archiveTask(state.project.id, task.number);
-    toast(`Archived #${task.number}`, "success");
-  } catch (err) {
-    if (err.needsConfirmation) {
-      const ok = await confirmDialog({
-        title: `Archive epic #${task.number}?`,
-        message: "Archiving an epic also archives everything inside it.",
-        affected: err.affected,
-        confirmLabel: "Archive all",
-      });
-      if (!ok) return;
-      await api.archiveTask(state.project.id, task.number, true);
-      toast(`Archived ${err.affected.length} tasks`, "success");
-    } else {
-      toastError(err);
-      return;
-    }
-  }
-  await refresh();
+  await confirmAndRun({
+    title: `Archive epic #${task.number}?`,
+    message: "Archiving an epic also archives everything inside it.",
+    confirmLabel: "Archive all",
+    run: (confirm) => api.archiveTask(state.project.id, task.number, confirm),
+    done: (res, count) =>
+      count === null ? `Archived #${task.number}` : `Archived ${count} tasks`,
+  });
 }
 
 async function doRestore(task) {
-  try {
-    const res = await api.restoreTask(state.project.id, task.number);
-    toast(
-      `Restored #${task.number} to ${res.affected[0]?.to ?? "Backlog"}`,
-      "success"
-    );
-  } catch (err) {
-    if (err.needsConfirmation) {
-      const ok = await confirmDialog({
-        title: `Restore #${task.number}?`,
-        message: "This also moves its prerequisites that are behind the target stage.",
-        affected: err.affected,
-        confirmLabel: "Restore all",
-      });
-      if (!ok) return;
-      await api.restoreTask(state.project.id, task.number, "Backlog", true);
-      toast(`Restored ${err.affected.length} tasks`, "success");
-    } else {
-      toastError(err);
-      return;
-    }
-  }
-  await refresh();
+  await confirmAndRun({
+    title: `Restore #${task.number}?`,
+    message: "This also moves its prerequisites that are behind the target stage.",
+    confirmLabel: "Restore all",
+    run: (confirm) =>
+      api.restoreTask(state.project.id, task.number, "Backlog", confirm),
+    done: (res, count) =>
+      count === null
+        ? `Restored #${task.number} to ${res.affected[0]?.to ?? "Backlog"}`
+        : `Restored ${count} tasks`,
+  });
 }
 
 async function doDelete(task) {
