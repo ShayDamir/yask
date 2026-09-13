@@ -1427,11 +1427,37 @@ class Store:
     }
     MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024
 
+    @staticmethod
+    def _sanitize_filename(filename: str) -> str:
+        """Strip control characters (incl. CR/LF) and double quotes from a
+        filename.
+
+        A stored attachment filename is re-emitted verbatim into the
+        ``Content-Disposition`` response header of
+        ``GET /api/attachments/{id}`` (see :func:`yask.api.api_get_attachment`),
+        so a filename containing ``\\r``/``\\n`` (CRLF injection, CWE-113) or a
+        ``"`` (break-out of the quoted param) would be a header-injection hole.
+        Sanitizing centrally in the store means every upload path — web, MCP,
+        and bot — inherits the same safe value; there is one source of truth.
+
+        Rule: drop C0 controls (0x00–0x1F, incl. ``\\r``, ``\\n``, ``\\t``,
+        NUL), DEL (0x7F), C1 controls (0x80–0x9F), and the double-quote
+        character (0x22); keep every other character. Fall back to
+        ``"attachment"`` when nothing printable survives.
+        """
+        name = (filename or "attachment").strip() or "attachment"
+        cleaned = "".join(
+            ch
+            for ch in name
+            if 0x20 <= ord(ch) < 0x7F and ch != '"'
+        )
+        return cleaned or "attachment"
+
     def add_attachment(
         self, project_id: int, number: int, filename: str, content_type: str, data: bytes
     ) -> dict:
         row = self._get_task(project_id, number)
-        filename = (filename or "attachment").strip() or "attachment"
+        filename = self._sanitize_filename(filename)
         if content_type not in self.ALLOWED_ATTACHMENT_TYPES:
             raise ValidationError(
                 f"attachment type '{content_type}' not allowed (markdown or images only)"

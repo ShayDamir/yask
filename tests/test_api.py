@@ -175,6 +175,50 @@ def test_attachment_upload_download(client, pid):
     assert client.get(f"/api/attachments/{att['id']}").status_code == 404
 
 
+def _multipart_body(boundary, filename, data, content_type):
+    """Build a raw multipart/form-data body with the exact filename bytes,
+    so a CRLF inside the filename reaches the parser unescaped."""
+    head = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode()
+    return head + data + f"\r\n--{boundary}--\r\n".encode()
+
+
+def test_attachment_malicious_filename_no_header_injection(client, pid):
+    """Bug #68: a crafted upload filename must not inject HTTP response
+    headers.     The multipart filename carries a raw CRLF; the resulting
+    ``Content-Disposition`` header must contain no control characters and no
+    injected ``X-Attacked`` header.
+    """
+    client.post(f"/api/projects/{pid}/tasks", json={"title": "t"})
+    boundary = "----yaskboundary"
+    body = _multipart_body(
+        boundary,
+        "x\r\nX-Attacked: 1",
+        b"data",
+        "text/markdown",
+    )
+    r = client.post(
+        f"/api/projects/{pid}/tasks/1/attachments",
+        content=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    assert r.status_code == 201
+    att = r.json()
+
+    got = client.get(f"/api/attachments/{att['id']}")
+    assert got.status_code == 200
+    disp = got.headers.get("content-disposition", "")
+    # No control characters (CRLF, tab) survive into the header value.
+    assert "\r" not in disp and "\n" not in disp and "\t" not in disp
+    assert "X-Attacked" not in disp
+    # No injected response header leaked onto the response at all.
+    header_names = {k.lower() for k in got.headers.keys()}
+    assert "x-attacked" not in header_names
+
+
 def test_task_types_over_api(client):
     r = client.get("/api/task-types").json()
     assert {t["name"] for t in r} >= {"Story", "Task", "Bug", "Epic"}

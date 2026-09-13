@@ -191,10 +191,46 @@ def test_last_attachment_uses_internal_task_id(store, project):
 
     store.add_attachment(pid_a, t_a["number"], "a_file.md", "text/markdown", b"a content")
     store.add_attachment(pid_b, t_b["number"], "b_file.md", "text/markdown", b"b content")
-
     meta, data = store.last_attachment(pid_b, t_b["number"])
     assert meta["filename"] == "b_file.md"
     assert data == b"b content"
+
+
+def test_attachment_malicious_filename_is_sanitized(store, project):
+    """CRLF / quote characters in an uploaded filename must never be stored
+    (Bug #68: HTTP header injection via unsanitized attachment filename).
+
+    The stored filename is re-emitted into the ``Content-Disposition`` header
+    of ``GET /api/attachments/{id}``, so a value like ``x\\r\\nX-Attacked: 1``
+    would inject a response header. The store strips C0/C1 controls, DEL and
+    the double quote before persisting.
+    """
+    pid = project["id"]
+    t = store.create_task(pid, "t")
+    meta = store.add_attachment(
+        pid,
+        t["number"],
+        "x\r\nX-Attacked: 1",
+        "text/markdown",
+        b"data",
+    )
+    assert meta["filename"] == "xX-Attacked: 1"
+    assert "\r" not in meta["filename"]
+    assert "\n" not in meta["filename"]
+    assert '"' not in meta["filename"]
+    assert "\t" not in meta["filename"]
+
+    # A filename that becomes empty after sanitization falls back to the default.
+    meta2 = store.add_attachment(
+        pid, t["number"], '\r\n"\t', "text/markdown", b"data"
+    )
+    assert meta2["filename"] == "attachment"
+
+    # Normal filenames are unchanged.
+    meta3 = store.add_attachment(
+        pid, t["number"], "notes.md", "text/markdown", b"ok"
+    )
+    assert meta3["filename"] == "notes.md"
 
 
 def test_description_field_optional(store, project):
