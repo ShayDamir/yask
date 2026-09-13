@@ -110,23 +110,114 @@ START_TEXT = (
     "Use /help to see what I can do."
 )
 
-HELP_TEXT = (
-    "Commands:\n"
-    "/start — main menu (intro + login guidance)\n"
-    "/help — this help\n"
-    "/login <password> — authenticate this chat (required for board commands)\n"
-    "/whoami — show this chat's id (give it to the yask administrator)\n"
-    "/projects — list of projects with per-state task counts\n"
-    "/tasks [project] — tasks in Todo, Planning, In progress and Review\n"
-    "/task <project> <number|title> — task details (state, description, prereqs, attachments, history)\n"
-    "/move <project> <task> <state> — move a task to another state\n"
-    "/add <project> <title> — add a task to the project's backlog\n"
-    "/attachment <project> <task> <id> — show a task's attachment (small markdown inline, images as a photo)\n"
-    "/subscribe [project] — subscribe to task state-change notifications\n"
-    "/unsubscribe [project] — stop notifications for a project\n\n"
+# The single command registry: the source of truth for what this bot offers.
+# A command's name, one-line description and auth-gate flag live in exactly
+# one place. HELP_TEXT (:func:`render_help`) is derived from it, and the menu
+# payload (setMyCommands, #65) will be derived from it too, so help and the
+# command menu can never diverge. The dispatch table (COMMANDS /
+# make_dispatch) lists the same commands today but is refactored to read from
+# this registry in a separate follow-up task; until then the two coexist.
+
+@dataclass(frozen=True)
+class Command:
+    """One bot command: its name, a one-line description and whether board
+    access (a /login session) is required to use it."""
+
+    name: str
+    description: str
+    auth_gated: bool
+
+    def __post_init__(self) -> None:
+        # Telegram caps a command at 32 chars and a description at 256;
+        # enforce both at construction so the source of truth can never
+        # exceed an API limit.
+        if len(self.name) > 32:
+            raise ValueError(
+                f"command name too long ({len(self.name)} > 32): {self.name!r}"
+            )
+        if len(self.description) > 256:
+            raise ValueError(
+                f"description too long ({len(self.description)} > 256): "
+                f"{self.description!r}"
+            )
+
+
+COMMAND_REGISTRY: list[Command] = [
+    Command("/start", "main menu (intro + login guidance)", auth_gated=False),
+    Command("/help", "this help", auth_gated=False),
+    Command(
+        "/login",
+        "authenticate this chat with its password (required for board commands)",
+        auth_gated=False,
+    ),
+    Command(
+        "/whoami",
+        "show this chat's id (give it to the yask administrator)",
+        auth_gated=False,
+    ),
+    Command("/projects", "list of projects with per-state task counts", auth_gated=True),
+    Command(
+        "/tasks",
+        "tasks in Todo, Planning, In progress and Review (optionally [project])",
+        auth_gated=True,
+    ),
+    Command(
+        "/task",
+        "details of one task (/task <project> <number|title>)",
+        auth_gated=True,
+    ),
+    Command(
+        "/move",
+        "move a task to another state (/move <project> <task> <state>)",
+        auth_gated=True,
+    ),
+    Command(
+        "/add",
+        "add a task to the project's backlog (/add <project> <title>)",
+        auth_gated=True,
+    ),
+    Command(
+        "/attachment",
+        "show a task's attachment (/attachment <project> <task> <id>)",
+        auth_gated=True,
+    ),
+    Command(
+        "/subscribe",
+        "subscribe to task state-change notifications (optionally [project])",
+        auth_gated=True,
+    ),
+    Command(
+        "/unsubscribe",
+        "stop notifications for a project (optionally [project])",
+        auth_gated=True,
+    ),
+]
+
+HELP_FOOTER = (
     "I read the yask board that this process was started with\n"
     "(yask telegram --data DIR). More commands are on the way."
 )
+
+
+def render_help(commands: list[Command]) -> str:
+    """Build the ``/help`` reference from a command list (``COMMAND_REGISTRY``).
+
+    One ``<name> — <description>`` line per command, in registry order, under a
+    ``Commands:`` header and :data:`HELP_FOOTER`. Every command is listed
+    (auth-gated ones included) so the help always covers the full set; the
+    text is generated, not hand-written, so help can never omit or misspell a
+    command that lives in the registry. ``commands`` is a parameter (not a
+    closure over ``COMMAND_REGISTRY``) so the formatter is unit-testable.
+    """
+    lines = ["Commands:"]
+    for command in commands:
+        lines.append(f"{command.name} — {command.description}")
+    lines.append("")
+    lines.append(HELP_FOOTER)
+    return "\n".join(lines)
+
+
+HELP_TEXT = render_help(COMMAND_REGISTRY)
 
 # Board access is gated: unauthenticated chats get this instead of any
 # board data (commands and inline-keyboard callbacks alike).

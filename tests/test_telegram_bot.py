@@ -2309,6 +2309,38 @@ def test_help_mentions_subscribe():
     assert "/unsubscribe" in telegram_bot.HELP_TEXT
 
 
+# --- command registry (source of truth for /help + setMyCommands) ---------
+
+_REGISTRY_NAMES = (
+    "/start", "/help", "/login", "/whoami", "/projects", "/tasks", "/task",
+    "/attachment", "/move", "/add", "/subscribe", "/unsubscribe",
+)
+
+
+def test_registry_covers_all_commands():
+    names = [c.name for c in telegram_bot.COMMAND_REGISTRY]
+    assert set(_REGISTRY_NAMES).issubset(set(names))
+
+
+def test_registry_invariants():
+    for command in telegram_bot.COMMAND_REGISTRY:
+        assert len(command.name) <= 32
+        assert len(command.description) <= 256
+        assert isinstance(command.auth_gated, bool)
+
+
+def test_help_lists_every_registry_command():
+    for command in telegram_bot.COMMAND_REGISTRY:
+        assert command.name in telegram_bot.HELP_TEXT
+        assert command.description in telegram_bot.HELP_TEXT
+
+
+def test_help_order_matches_registry_order():
+    text = telegram_bot.HELP_TEXT
+    positions = [text.index(c.name) for c in telegram_bot.COMMAND_REGISTRY]
+    assert positions == sorted(positions)
+
+
 # --- state-change notifications (the Notifier) --------------------------------
 
 
