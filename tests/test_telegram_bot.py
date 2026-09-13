@@ -580,12 +580,14 @@ def test_projects_populated_board(store):
         f"{yask}. yask — Backlog: 3, Todo: 2, In progress: 1\n"
         f"{zeta}. zeta — Blocked: 2"
     )
-    # one button per project, in display order (the p: callback payloads)
+    # one button per project, in display order (the p: callback payloads),
+    # then the Main-menu row (payload h)
     assert script.sent[0]["reply_markup"] == {
         "inline_keyboard": [
             [{"text": "side-project", "callback_data": f"p:{side}"}],
             [{"text": "yask", "callback_data": f"p:{yask}"}],
             [{"text": "zeta", "callback_data": f"p:{zeta}"}],
+            [{"text": "Main menu", "callback_data": "h"}],
         ]
     }
     # every payload is well under the Bot API's 64-byte callback_data limit
@@ -645,7 +647,10 @@ def test_projects_button_opens_tasks_view(store):
         dispatch=telegram_bot.make_dispatch(store),
     )
     rows = first.sent[0]["reply_markup"]["inline_keyboard"]
-    assert rows == [[{"text": "yask", "callback_data": f"p:{pid}"}]]
+    assert rows == [
+        [{"text": "yask", "callback_data": f"p:{pid}"}],
+        [{"text": "Main menu", "callback_data": "h"}],
+    ]
     payload = rows[0][0]["callback_data"]
     script = run_bot_until_stop(
         Script([[callback_update(94, payload, chat_id=11)]]),
@@ -658,6 +663,39 @@ def test_projects_button_opens_tasks_view(store):
     assert script.answered == [{"callback_query_id": "cbq-94"}]
     assert len(script.sent) == 1
     expected = telegram_bot.tasks_view(store, str(pid))
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"] == expected.text
+    assert script.sent[0]["reply_markup"] == expected.reply_markup
+    assert script.edited == []
+
+
+def test_main_menu_button_from_projects_opens_menu(store):
+    """Pressing the /projects board's Main-menu row opens the menu hub.
+
+    The button is ``label "Main menu", payload "h"`` — the exact payload
+    the /tasks, /task and notification keyboards emit too, and the h:
+    family already pins (bare ``h`` → menu view as a new message), so one
+    seeded-from-a-view press covers all of them.
+    """
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "working")
+    first = run_bot_until_stop(
+        Script([[message_update(97, "/projects")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    rows = first.sent[0]["reply_markup"]["inline_keyboard"]
+    assert rows[-1] == [{"text": "Main menu", "callback_data": "h"}]
+    payload = rows[-1][0]["callback_data"]
+    script = run_bot_until_stop(
+        Script([[callback_update(98, payload, chat_id=11)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the press is answered (no toast) and the menu text+markup go out as
+    # a new message to the button's chat; nothing is edited
+    assert script.answered == [{"callback_query_id": "cbq-98"}]
+    assert len(script.sent) == 1
+    expected = telegram_bot.menu_view()
     assert script.sent[0]["chat_id"] == 11
     assert script.sent[0]["text"] == expected.text
     assert script.sent[0]["reply_markup"] == expected.reply_markup
@@ -965,7 +1003,8 @@ def test_tasks_populated_board_exact(store):
         "  In progress:\n"
         f"    #1 z working"
     )
-    # one button per task, in reading order (the t: callback payloads)
+    # one button per task, in reading order (the t: callback payloads),
+    # then the Main-menu row (payload h)
     assert script.sent[0]["reply_markup"] == {
         "inline_keyboard": [
             [{"text": "#2 todo 1", "callback_data": f"t:{alpha}:2"}],
@@ -973,6 +1012,7 @@ def test_tasks_populated_board_exact(store):
             [{"text": "#4 working", "callback_data": f"t:{alpha}:4"}],
             [{"text": "#5 review 1", "callback_data": f"t:{alpha}:5"}],
             [{"text": "#1 z working", "callback_data": f"t:{zeta}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
         ]
     }
 
@@ -998,7 +1038,8 @@ def test_tasks_filter_by_id_and_name(store):
     )
     assert script.sent[0]["reply_markup"] == {
         "inline_keyboard": [
-            [{"text": "#1 alpha working", "callback_data": f"t:{alpha}:1"}]
+            [{"text": "#1 alpha working", "callback_data": f"t:{alpha}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
         ]
     }
 
@@ -1015,7 +1056,8 @@ def test_tasks_filter_by_id_and_name(store):
     )
     assert script.sent[0]["reply_markup"] == {
         "inline_keyboard": [
-            [{"text": "#1 zeta working", "callback_data": f"t:{zeta}:1"}]
+            [{"text": "#1 zeta working", "callback_data": f"t:{zeta}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
         ]
     }
 
@@ -1036,7 +1078,8 @@ def test_tasks_filter_name_with_spaces(store):
     )
     assert script.sent[0]["reply_markup"] == {
         "inline_keyboard": [
-            [{"text": "#1 working", "callback_data": f"t:{pid}:1"}]
+            [{"text": "#1 working", "callback_data": f"t:{pid}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
         ]
     }
 
@@ -1424,7 +1467,8 @@ def test_tasks_drill_down_to_task_view(store):
                 "text": f"#{t['number']} drill down",
                 "callback_data": f"t:{pid}:{t['number']}",
             }
-        ]
+        ],
+        [{"text": "Main menu", "callback_data": "h"}],
     ]
     payload = rows[0][0]["callback_data"]
     script = run_bot_until_stop(
@@ -1478,6 +1522,7 @@ def test_task_view_attachment_and_toggle_buttons(store):
         "inline_keyboard": attachment_rows
         + state_rows
         + [[{"text": "Subscribe", "callback_data": f"s:{pid}"}]]
+        + [[{"text": "Main menu", "callback_data": "h"}]]
     }
     # subscribing the chat flips only the toggle button
     store.subscribe_project(7, pid)
@@ -1488,7 +1533,8 @@ def test_task_view_attachment_and_toggle_buttons(store):
     rows = script.sent[0]["reply_markup"]["inline_keyboard"]
     assert rows[:2] == attachment_rows
     assert rows[2:4] == state_rows
-    assert rows[-1] == [{"text": "Unsubscribe", "callback_data": f"u:{pid}"}]
+    assert rows[4] == [{"text": "Unsubscribe", "callback_data": f"u:{pid}"}]
+    assert rows[-1] == [{"text": "Main menu", "callback_data": "h"}]
 
 
 def test_format_task_view_without_chat_is_plain_str(store):
@@ -2215,7 +2261,8 @@ def _notification(pid, t, title, to_state):
 
 
 def _notification_markup(pid, t, title):
-    """The single-button keyboard a notification message carries."""
+    """The two-row keyboard a notification message carries: the task button
+    and, under it, the Main-menu row."""
     return {
         "inline_keyboard": [
             [
@@ -2223,7 +2270,8 @@ def _notification_markup(pid, t, title):
                     "text": f"#{t['number']} {title}",
                     "callback_data": f"t:{pid}:{t['number']}",
                 }
-            ]
+            ],
+            [{"text": "Main menu", "callback_data": "h"}],
         ]
     }
 
@@ -2355,7 +2403,8 @@ def test_notification_message_carries_task_button(store):
                     "text": f"#{t['number']} working",
                     "callback_data": f"t:{pid}:{t['number']}",
                 }
-            ]
+            ],
+            [{"text": "Main menu", "callback_data": "h"}],
         ]
     }
 
@@ -2870,6 +2919,7 @@ def test_callback_dispatch_task_detail_round_trip(store):
                 {"text": "Done", "callback_data": f"m:{pid}:{n}:5"},
             ],
             [{"text": "Subscribe", "callback_data": f"s:{pid}"}],
+            [{"text": "Main menu", "callback_data": "h"}],
         ]
     }
     assert script.edited == []
@@ -3144,7 +3194,9 @@ def test_callback_dispatch_subscribe_toggle(store):
     assert e["text"] == detail["text"]
     rows = e["reply_markup"]["inline_keyboard"]
     assert rows[:2] == detail["reply_markup"]["inline_keyboard"][:2]
-    assert rows[-1] == [{"text": "Unsubscribe", "callback_data": f"u:{pid}"}]
+    assert rows[-2] == [{"text": "Unsubscribe", "callback_data": f"u:{pid}"}]
+    # the Main-menu row survives the in-place toggle flip
+    assert rows[-1] == [{"text": "Main menu", "callback_data": "h"}]
 
 
 def test_callback_dispatch_unsubscribe_toggle(store):
@@ -3157,9 +3209,13 @@ def test_callback_dispatch_unsubscribe_toggle(store):
         dispatch=telegram_bot.make_dispatch(store),
     )
     detail = first.sent[0]
-    # the detail shows Unsubscribe for the subscribed chat
-    assert detail["reply_markup"]["inline_keyboard"][-1] == [
+    # the detail shows Unsubscribe for the subscribed chat, followed by
+    # the Main-menu row
+    assert detail["reply_markup"]["inline_keyboard"][-2] == [
         {"text": "Unsubscribe", "callback_data": f"u:{pid}"}
+    ]
+    assert detail["reply_markup"]["inline_keyboard"][-1] == [
+        {"text": "Main menu", "callback_data": "h"}
     ]
     update = _detail_callback(301, f"u:{pid}", chat_id, detail)
     script = run_bot_until_stop(
@@ -3176,7 +3232,9 @@ def test_callback_dispatch_unsubscribe_toggle(store):
     e = script.edited[0]
     rows = e["reply_markup"]["inline_keyboard"]
     assert rows[:2] == detail["reply_markup"]["inline_keyboard"][:2]
-    assert rows[-1] == [{"text": "Subscribe", "callback_data": f"s:{pid}"}]
+    assert rows[-2] == [{"text": "Subscribe", "callback_data": f"s:{pid}"}]
+    # the Main-menu row survives the in-place toggle flip
+    assert rows[-1] == [{"text": "Main menu", "callback_data": "h"}]
 
 
 def test_callback_s_store_failure_replies_and_recovers(store, monkeypatch):

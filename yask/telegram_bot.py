@@ -53,12 +53,16 @@ confirmed first (``c:`` confirms the cascade, ``x:`` cancels). The ``h:``
 payload (the main-menu hub's buttons) opens the menu view itself (``h``)
 or one of its routes — the project list (``h:p``), the all-projects task
 list (``h:t``), the chat's subscription list (``h:s``), the add-task usage
-(``h:a``) and the help text (``h:h``). While the
+(``h:a``) and the help text (``h:h``); every board view's keyboard
+(``/projects``, ``/tasks``, ``/task`` and the notifications) carries a
+trailing ``Main menu`` row with the bare ``h`` payload, so the hub is one
+tap away from anywhere in the chat. While the
 bot runs, the
 :class:`Notifier` polls ``state_history`` after each successful
 ``getUpdates`` batch and pushes a message per transition to every
 subscribed chat, each carrying one inline button (payload
-``t:<project-id>:<number>``) that opens the task's detail view; latency is
+``t:<project-id>:<number>``) that opens the task's detail view and a
+Main-menu row (payload ``h``); latency is
 at most one poll interval. Later features of the Telegram interface (Epic #27)
 extend the dispatch layer on top of the store passed in here.
 
@@ -313,7 +317,9 @@ def project_view(store: Store) -> Reply:
     reading order, become one inline-keyboard row each with a single
     button — label = the project name, ``callback_data`` =
     ``p:<project-id>`` (the project drill-down button, answered by
-    :func:`make_callback_dispatch`). An empty board is just ``Projects:``
+    :func:`make_callback_dispatch`) — and a final row carrying the
+    Main-menu button (:func:`_main_menu_button`, payload ``h``). An empty
+    board is just ``Projects:``
     and ``(none)`` as a plain ``str`` — the Bot API rejects an empty
     inline keyboard, and there are no tap targets anyway.
     """
@@ -332,6 +338,7 @@ def project_view(store: Store) -> Reply:
         rows.append(
             [{"text": ov["name"], "callback_data": f"p:{ov['id']}"}]
         )
+    rows.append([_main_menu_button()])
     return KeyboardReply("\n".join(lines), {"inline_keyboard": rows})
 
 
@@ -438,9 +445,10 @@ def tasks_view(store: Store, project_arg: Optional[str] = None) -> Reply:
     same tasks, in reading order, become one inline-keyboard row each with
     label ``#<n> <title>`` and ``callback_data``
     ``t:<project-id>:<number>`` (the task-detail button, answered by
-    :func:`make_callback_dispatch`). A reply with no tasks is a plain
-    ``str`` — the Bot API rejects an empty inline keyboard, and there are
-    no tap targets anyway.
+    :func:`make_callback_dispatch`), followed by a final row carrying the
+    Main-menu button (:func:`_main_menu_button`, payload ``h``). A reply
+    with no tasks is a plain ``str`` — the Bot API rejects an empty inline
+    keyboard, and there are no tap targets anyway.
     """
     if project_arg is None:
         projects = []
@@ -477,6 +485,7 @@ def tasks_view(store: Store, project_arg: Optional[str] = None) -> Reply:
                         }
                     ]
                 )
+    rows.append([_main_menu_button()])
     return KeyboardReply("\n".join(lines), {"inline_keyboard": rows})
 
 
@@ -598,6 +607,16 @@ def _toggle_button(project_id: int, subscribed: bool) -> dict:
     return {"text": "Subscribe", "callback_data": f"s:{project_id}"}
 
 
+def _main_menu_button() -> dict:
+    """The Main-menu button every board view's keyboard carries (#61).
+
+    Label ``Main menu``, payload the bare ``h`` (the menu hub's own button,
+    answered by :func:`make_callback_dispatch` → :func:`menu_view`). One
+    factory so the views can never diverge.
+    """
+    return {"text": "Main menu", "callback_data": "h"}
+
+
 def _flip_toggle(
     rows: list, project_id: int, old_payload: str, subscribed: bool
 ) -> list:
@@ -670,8 +689,10 @@ def format_task_view(
     :func:`make_callback_dispatch`) in id order, then the workflow-state
     rows (:func:`_state_button_rows` — hidden on an archived task), then
     the subscribe/unsubscribe toggle row (:func:`_toggle_button`, driven by
-    ``subscribed``). The keyboard always has at least one row (the toggle),
-    so the Bot API's empty-inline-keyboard rejection never triggers.
+    ``subscribed``), then the Main-menu row (:func:`_main_menu_button`,
+    payload ``h``). The keyboard always has at least one row (the toggle,
+    and with it the Main-menu row), so the Bot API's
+    empty-inline-keyboard rejection never triggers.
     """
     lines = [f"#{task['number']} {task['title']} — {task['type']}"]
     lines.append(f"State: {task['state']}")
@@ -733,6 +754,7 @@ def format_task_view(
             _state_button_rows(project["id"], task["number"], task["state"])
         )
     rows.append([_toggle_button(project["id"], subscribed)])
+    rows.append([_main_menu_button()])
     return KeyboardReply(text, {"inline_keyboard": rows})
 
 
@@ -1089,11 +1111,13 @@ def format_notification(change: dict) -> KeyboardReply:
     The text is ``{project_name}: #{number} {title} — {from_state} →
     {to_state} (/task {project_id} {number})`` — the trailing ``/task``
     reference follows the ``/tasks`` drill-down convention and is answered
-    by the ``/task`` command. The message carries one inline button: label
-    ``#<number> <title>`` (truncated to
-    :data:`NOTIFICATION_BUTTON_TEXT_MAX` chars), payload
+    by the ``/task`` command. The message carries a two-row inline
+    keyboard: the task button (label ``#<number> <title>``, truncated to
+    :data:`NOTIFICATION_BUTTON_TEXT_MAX` chars, payload
     ``t:<project_id>:<number>`` — answered by :func:`make_callback_dispatch`
-    (the ``t:`` handler), which opens the task's detail view. No
+    (the ``t:`` handler), which opens the task's detail view) and, under
+    it, the Main-menu row (:func:`_main_menu_button`, payload ``h``), so
+    the menu hub is reachable from the notification too (#61). No
     subscribe/unsubscribe toggle: the Notifier only fans out to subscribed
     chats, so the receiving chat is subscribed by definition.
     """
@@ -1106,7 +1130,9 @@ def format_notification(change: dict) -> KeyboardReply:
         "text": _truncate_button_label(f"#{change['number']} {change['title']}"),
         "callback_data": f"t:{change['project_id']}:{change['number']}",
     }
-    return KeyboardReply(text, {"inline_keyboard": [[button]]})
+    return KeyboardReply(
+        text, {"inline_keyboard": [[button], [_main_menu_button()]]}
+    )
 
 
 def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Optional[Reply]]:
