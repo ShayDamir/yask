@@ -2354,6 +2354,64 @@ def test_help_order_matches_registry_order():
     assert positions == sorted(positions)
 
 
+# --- command menu (setMyCommands, #66) ----------------------------------------
+
+
+def test_build_my_commands_shape_and_order():
+    payload = telegram_bot.build_my_commands(telegram_bot.COMMAND_REGISTRY)
+    assert payload == [
+        {"command": c.name, "description": c.description}
+        for c in telegram_bot.COMMAND_REGISTRY
+    ]
+    # registry order preserved
+    assert [entry["command"] for entry in payload] == [
+        c.name for c in telegram_bot.COMMAND_REGISTRY
+    ]
+    # auth-gated commands are included (scope is presentation-only; the bot
+    # still gates them — see #66 decision log). build_my_commands returns an
+    # entry for every registry command, so assert the gated ones are a subset.
+    assert {e["command"] for e in payload}.issuperset(
+        {"/projects", "/tasks", "/task", "/move", "/add",
+         "/attachment", "/subscribe", "/unsubscribe"}
+    )
+    assert len(payload) == len(telegram_bot.COMMAND_REGISTRY)
+
+
+def test_register_my_commands_posts_scope_all_private_chats():
+    script = Script([])
+
+    async def calls(api):
+        await telegram_bot.register_my_commands(api)
+
+    bot_api_call(script, calls)
+    assert len(script.command_requests) == 1
+    method, body = script.command_requests[0]
+    assert method == "setMyCommands"
+    assert body["scope"] == {"type": "all_private_chats"}
+    assert body["commands"] == telegram_bot.build_my_commands(
+        telegram_bot.COMMAND_REGISTRY
+    )
+    # no language_code when unset
+    assert "language_code" not in body
+
+
+def test_register_my_commands_logs_failure_not_raises(capsys):
+    script = Script([])
+    api = telegram_bot.BotAPI(BOT_TOKEN)
+
+    async def boom(api):
+        async def set_my_commands(*a, **k):
+            raise telegram_bot.BotAPIError("telegram unreachable")
+        api.set_my_commands = set_my_commands
+        await telegram_bot.register_my_commands(api)
+
+    asyncio.run(boom(api))
+    # returns cleanly (no exception propagates) and logs "not set"
+    out = capsys.readouterr()
+    assert "not set" in out.err
+    assert script.command_requests == []
+
+
 # --- state-change notifications (the Notifier) --------------------------------
 
 

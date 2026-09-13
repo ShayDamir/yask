@@ -193,6 +193,10 @@ COMMAND_REGISTRY: list[Command] = [
     ),
 ]
 
+# setMyCommands scope: the bot is a private-chat, password-gated bot, so the
+# command menu applies to all of this bot's private chats. See #66 decision log.
+MENU_SCOPE = {"type": "all_private_chats"}
+
 HELP_FOOTER = (
     "I read the yask board that this process was started with\n"
     "(yask telegram --data DIR). More commands are on the way."
@@ -218,6 +222,21 @@ def render_help(commands: list[Command]) -> str:
 
 
 HELP_TEXT = render_help(COMMAND_REGISTRY)
+
+
+def build_my_commands(commands: list[Command]) -> list[dict]:
+    """One ``{command, description}`` entry per command, in registry order.
+
+    The source of truth for the command menu (setMyCommands, #65), so the menu
+    and ``/help`` can never diverge. Every command is listed (auth-gated ones
+    included — the menu is presentation-only; the bot still gates them).
+    ``commands`` is a parameter (not a closure over ``COMMAND_REGISTRY``) so
+    the builder is unit-testable.
+    """
+    return [
+        {"command": c.name, "description": c.description} for c in commands
+    ]
+
 
 # Board access is gated: unauthenticated chats get this instead of any
 # board data (commands and inline-keyboard callbacks alike).
@@ -2065,6 +2084,22 @@ class BotAPI:
             await self._client.aclose()
 
 
+async def register_my_commands(api, commands=None) -> None:
+    """Post the command menu via setMyCommands to all private chats.
+
+    Failure is logged, not raised: this runs at startup when Telegram may be
+    unreachable, and setMyCommands is a full overwrite (idempotent), so a
+    failed call must never abort polling — a later start retried it.
+    """
+    try:
+        await api.set_my_commands(
+            build_my_commands(commands if commands is not None else COMMAND_REGISTRY),
+            scope=MENU_SCOPE,
+        )
+    except BotAPIError as exc:
+        print(f"yask: telegram command menu not set ({exc})", file=sys.stderr)
+
+
 class Notifier:
     """Push task state-change notifications to subscribed chats.
 
@@ -2286,6 +2321,10 @@ async def _amain(
         print(f"yask: invalid Telegram bot token: {exc}", file=sys.stderr)
         return 1
     print(f"yask: telegram bot @{me.get('username')} (data: {data_dir})")
+
+    # Post the command menu at startup (setMyCommands, #65). Logged, never
+    # raised: Telegram may be unreachable here and must not abort polling.
+    await register_my_commands(api)
 
     conn = db.connect(data_dir / "yask.db")
     # Bot-initiated actions (created tasks, state moves) are recorded in
