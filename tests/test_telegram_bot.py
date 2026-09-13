@@ -118,11 +118,13 @@ class Script:
     getUpdates call; ``offsets`` the getUpdates offsets.
     """
 
-    def __init__(self, get_updates, get_me_ok=True, fail_once_with=None):
+    def __init__(self, get_updates, get_me_ok=True, fail_once_with=None, fail_set_my_commands=False):
         self.get_updates = list(get_updates)
         self.get_me_ok = get_me_ok
         self.fail_once_with = fail_once_with
         self.failed_once = False
+        self.fail_set_my_commands = fail_set_my_commands
+        self.failed_set_my_commands = False
         self.sent = []
         self.sent_files = []
         self.answered = []
@@ -186,6 +188,20 @@ class Script:
             return httpx.Response(200, json={"ok": True, "result": True})
         if method in ("setMyCommands", "getMyCommands", "deleteMyCommands"):
             self.command_requests.append((method, body))
+            if (
+                method == "setMyCommands"
+                and self.fail_set_my_commands
+                and not self.failed_set_my_commands
+            ):
+                self.failed_set_my_commands = True
+                return httpx.Response(
+                    500,
+                    json={
+                        "ok": False,
+                        "error_code": 500,
+                        "description": "telegram unreachable",
+                    },
+                )
             if method == "getMyCommands":
                 return httpx.Response(
                     200,
@@ -2354,6 +2370,19 @@ def test_help_order_matches_registry_order():
     assert positions == sorted(positions)
 
 
+def test_help_and_registry_have_same_command_set():
+    # Vice-versa of test_help_lists_every_registry_command: every command
+    # rendered in /help is in the registry (the inverse direction is
+    # untested by the forward check). HELP_TEXT is generated from the
+    # registry (render_help), so parse its command lines and compare.
+    rendered = [
+        line.split(" — ")[0]
+        for line in telegram_bot.HELP_TEXT.splitlines()
+        if line != "Commands:" and " — " in line
+    ]
+    assert rendered == [c.name for c in telegram_bot.COMMAND_REGISTRY]
+
+
 # --- command menu (setMyCommands, #66) ----------------------------------------
 
 
@@ -2410,6 +2439,54 @@ def test_register_my_commands_logs_failure_not_raises(capsys):
     out = capsys.readouterr()
     assert "not set" in out.err
     assert script.command_requests == []
+
+
+def test_startup_posts_registry_commands_via_setmycommands(tmp_path):
+    # Exercise the real startup path: main() -> getMe -> register_my_commands
+    # -> poll loop. The menu is posted at startup from the registry, so the
+    # exact payload must match build_my_commands(COMMAND_REGISTRY).
+    script = Script([[message_update(71, "/start")]])
+    script.stop = asyncio.Event()
+    client = make_client(script.handler)
+    code = telegram_bot.main(
+        BOT_TOKEN, tmp_path, client=client, stop_event=script.stop
+    )
+    assert code == 0
+    # exactly one command-registry call, posted at startup via setMyCommands
+    assert len(script.command_requests) == 1
+    method, body = script.command_requests[0]
+    assert method == "setMyCommands"
+    assert body["scope"] == {"type": "all_private_chats"}
+    assert body["commands"] == telegram_bot.build_my_commands(
+        telegram_bot.COMMAND_REGISTRY
+    )
+    # strong exactness: registry names in order, all 12, well-formed entries
+    assert [e["command"] for e in body["commands"]] == [
+        c.name for c in telegram_bot.COMMAND_REGISTRY
+    ]
+    assert len(body["commands"]) == 12
+    for entry in body["commands"]:
+        assert set(entry) == {"command", "description"}
+
+
+def test_startup_menu_registration_failure_does_not_break_polling(tmp_path, capsys):
+    # setMyCommands fails specifically at startup; registration failure is
+    # logged, not fatal, so polling still proceeds and answers /start.
+    script = Script(
+        [[message_update(71, "/start")]], fail_set_my_commands=True
+    )
+    script.stop = asyncio.Event()
+    client = make_client(script.handler)
+    code = telegram_bot.main(
+        BOT_TOKEN, tmp_path, client=client, stop_event=script.stop
+    )
+    assert code == 0
+    assert "command menu not set" in capsys.readouterr().err
+    # polling still answered /start
+    assert len(script.sent) == 1
+    assert script.sent[0]["text"] == telegram_bot.START_TEXT
+    # the failed call was still made / recorded (registration was attempted)
+    assert script.command_requests[0][0] == "setMyCommands"
 
 
 # --- state-change notifications (the Notifier) --------------------------------

@@ -130,6 +130,10 @@ and the state-change notifications) and `/help` carry a "Main menu" button
 back to it. The menu's board buttons are auth-gated like every other inline
 button.
 
+At startup the bot also registers a native command menu (the Telegram app's
+menu button and `/` command suggestions) via `setMyCommands`, listing the
+same commands.
+
 **Authentication.** Board commands are password-gated. Permitted users — a
 Telegram chat id plus a password, stored only as a salted scrypt hash — are
 managed in the web UI (topbar → ✈ "Telegram bot users"), not via Telegram.
