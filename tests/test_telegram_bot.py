@@ -714,6 +714,193 @@ def test_callback_p_store_failure_replies_and_recovers(store, monkeypatch):
     assert script.offsets == [None, 323]
 
 
+# --- main-menu hub (menu_view + the h: callback family) ----------------------
+
+
+def test_menu_view_layout():
+    """The exact menu text and keyboard the tests pin down."""
+    view = telegram_bot.menu_view()
+    assert view.text == "Main menu — tap a button to open a board view."
+    assert view.reply_markup == {
+        "inline_keyboard": [
+            [
+                {"text": "Projects", "callback_data": "h:p"},
+                {"text": "Tasks", "callback_data": "h:t"},
+            ],
+            [
+                {"text": "Subscriptions", "callback_data": "h:s"},
+                {"text": "Add task", "callback_data": "h:a"},
+                {"text": "Help", "callback_data": "h:h"},
+            ],
+        ]
+    }
+    # every payload stays well under Telegram's 64-byte callback_data cap
+    for row in view.reply_markup["inline_keyboard"]:
+        for button in row:
+            assert len(button["callback_data"].encode()) < 64
+
+
+def test_menu_home_renders_menu(store):
+    """Pressing the bare h (home) payload sends the menu view, no toast."""
+    script = run_bot_until_stop(
+        Script([[callback_update(400, "h", chat_id=11)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the press is answered (no toast) and the menu's text+markup go out
+    # as a new message to the button's chat; nothing is edited
+    assert script.answered == [{"callback_query_id": "cbq-400"}]
+    assert len(script.sent) == 1
+    expected = telegram_bot.menu_view()
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"] == expected.text
+    assert script.sent[0]["reply_markup"] == expected.reply_markup
+    assert script.edited == []
+
+
+def test_menu_button_projects_opens_projects_view(store):
+    """h:p opens the same view /projects sends."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "backlog item")
+    script = run_bot_until_stop(
+        Script([[callback_update(401, "h:p", chat_id=11)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert script.answered == [{"callback_query_id": "cbq-401"}]
+    assert len(script.sent) == 1
+    expected = telegram_bot.project_view(store)
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"] == expected.text
+    assert script.sent[0]["reply_markup"] == expected.reply_markup
+    assert script.edited == []
+
+
+def test_menu_button_tasks_opens_tasks_view(store):
+    """h:t opens the same all-projects view /tasks sends."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    store.move_task(pid, t["number"], "In progress", confirm=True)
+    script = run_bot_until_stop(
+        Script([[callback_update(402, "h:t", chat_id=11)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert script.answered == [{"callback_query_id": "cbq-402"}]
+    assert len(script.sent) == 1
+    expected = telegram_bot.tasks_view(store)
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"] == expected.text
+    assert script.sent[0]["reply_markup"] == expected.reply_markup
+    assert script.edited == []
+
+
+def test_menu_button_subscriptions(store):
+    """h:s lists the button's chat's subscriptions (the /subscribe view)."""
+    script = run_bot_until_stop(
+        Script([[callback_update(403, "h:s")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert script.sent[0]["chat_id"] == 7
+    assert script.sent[0]["text"] == "Your subscriptions:\n(none)"
+
+    zeta = store.create_project("zeta")["id"]
+    alpha = store.create_project("alpha")["id"]
+    store.subscribe_project(7, zeta)
+    store.subscribe_project(7, alpha)
+    script = run_bot_until_stop(
+        Script([[callback_update(404, "h:s")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # same shape as /subscribe: id-prefixed lines in name order, no keyboard
+    assert script.sent[0]["chat_id"] == 7
+    assert script.sent[0]["text"] == (
+        "Your subscriptions:\n"
+        f"{alpha}. alpha\n"
+        f"{zeta}. zeta"
+    )
+    assert "reply_markup" not in script.sent[0]
+    assert script.edited == []
+
+
+def test_menu_button_add_task(store):
+    """h:a answers with the static /add usage text."""
+    script = run_bot_until_stop(
+        Script([[callback_update(405, "h:a", chat_id=11)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert script.answered == [{"callback_query_id": "cbq-405"}]
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"] == telegram_bot.ADD_USAGE_TEXT
+    assert "reply_markup" not in script.sent[0]
+    assert script.edited == []
+
+
+def test_menu_button_help(store):
+    """h:h answers with the static help text."""
+    script = run_bot_until_stop(
+        Script([[callback_update(406, "h:h", chat_id=11)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert script.answered == [{"callback_query_id": "cbq-406"}]
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"] == telegram_bot.HELP_TEXT
+    assert "reply_markup" not in script.sent[0]
+    assert script.edited == []
+
+
+def test_menu_store_failure_replies_and_recovers(store, monkeypatch):
+    """A store failure on an h: board route replies with the error text."""
+    store.create_project("yask")
+
+    def boom_overviews():
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "list_project_overviews", boom_overviews)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [callback_update(407, "h:p", chat_id=11), message_update(408, "/start")]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the press is answered (no toast), the failure produces an error reply,
+    # and the loop survives: the follow-up message is still answered
+    assert script.answered == [{"callback_query_id": "cbq-407"}]
+    assert len(script.sent) == 2
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"] == telegram_bot.PROJECTS_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+    assert script.offsets == [None, 409]
+
+    def boom_subs(chat_id):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "list_subscriptions", boom_subs)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [callback_update(409, "h:s", chat_id=11), message_update(410, "/start")]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert script.answered == [{"callback_query_id": "cbq-409"}]
+    assert len(script.sent) == 2
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"] == telegram_bot.SUBSCRIBE_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+
+
 # --- /tasks (store-backed dispatch) ----------------------------------------
 
 
@@ -3423,6 +3610,7 @@ def test_callback_c_store_failure_replies_and_recovers(store, monkeypatch):
         "m:", "m:1", "m:1:2", "m:1:2:3:4", "m:x:2:3", "m:1:x:3",
         "m:1:2:x", "m:1:2:99", "c:", "c:1:2", "c:1:2:99",
         "x:", "x:1", "x:1:2:3", "x:abc:1", "x:1:abc",
+        "h:", "h:x", "h:1", "h:p:1", "h::", "H",
     ],
 )
 def test_callback_dispatch_unhandled_payloads(store, payload):
@@ -3657,6 +3845,12 @@ def test_all_callback_families_gated_until_login(store):
         f"m:{pid}:{t['number']}:{DONE_IDX}",
         f"c:{pid}:{t['number']}:{DONE_IDX}",
         f"x:{pid}:{t['number']}",
+        "h",
+        "h:p",
+        "h:t",
+        "h:s",
+        "h:a",
+        "h:h",
     ):
         action = dispatch(
             callback_update(642, payload, chat_id=11)["callback_query"]
@@ -3665,7 +3859,7 @@ def test_all_callback_families_gated_until_login(store):
         assert action.answer_text == telegram_bot.AUTH_REQUIRED_TEXT, payload
         assert action.reply == telegram_bot.AUTH_REQUIRED_TEXT, payload
         assert action.edit is None, payload
-    # the gated s: press created no subscription, and the gated m:/c:
+    # the gated s:/h:s presses created no subscription, and the gated m:/c:
     # presses moved no task
     assert store.list_subscriptions(11) == []
     assert store.get_task(pid, t["number"])["state"] == "In progress"

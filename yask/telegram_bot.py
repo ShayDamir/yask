@@ -49,7 +49,11 @@ subscribe/unsubscribe toggle of the ``/task`` view) toggles the chat's
 subscription and flips the button in place, and the ``m:``/``c:``/``x:``
 payload (the per-state buttons of the ``/task`` view) moves the task to a
 workflow state in place — a move that would pull prerequisites along is
-confirmed first (``c:`` confirms the cascade, ``x:`` cancels). While the
+confirmed first (``c:`` confirms the cascade, ``x:`` cancels). The ``h:``
+payload (the main-menu hub's buttons) opens the menu view itself (``h``)
+or one of its routes — the project list (``h:p``), the all-projects task
+list (``h:t``), the chat's subscription list (``h:s``), the add-task usage
+(``h:a``) and the help text (``h:h``). While the
 bot runs, the
 :class:`Notifier` polls ``state_history`` after each successful
 ``getUpdates`` batch and pushes a message per transition to every
@@ -474,6 +478,34 @@ def tasks_view(store: Store, project_arg: Optional[str] = None) -> Reply:
                     ]
                 )
     return KeyboardReply("\n".join(lines), {"inline_keyboard": rows})
+
+
+def menu_view() -> KeyboardReply:
+    """Format the main-menu hub reply.
+
+    A short text and a compact inline keyboard: a Projects and a Tasks
+    button on the first row (the board's two top-level list views), then
+    Subscriptions, Add task and Help on the second row. Each button's
+    ``callback_data`` is the ``h:<route>`` payload (``h:p``, ``h:t``,
+    ``h:s``, ``h:a``, ``h:h``), answered by
+    :func:`make_callback_dispatch`; the bare ``h`` payload — the button
+    the other views' Main-menu rows carry (#61) — opens this same hub.
+    The reply is always a :class:`KeyboardReply`: the menu's buttons are
+    the point of the view.
+    """
+    text = "Main menu — tap a button to open a board view."
+    rows = [
+        [
+            {"text": "Projects", "callback_data": "h:p"},
+            {"text": "Tasks", "callback_data": "h:t"},
+        ],
+        [
+            {"text": "Subscriptions", "callback_data": "h:s"},
+            {"text": "Add task", "callback_data": "h:a"},
+            {"text": "Help", "callback_data": "h:h"},
+        ],
+    ]
+    return KeyboardReply(text, {"inline_keyboard": rows})
 
 
 # An inline-keyboard payload for a reply: the JSON object the Bot API takes
@@ -1273,7 +1305,7 @@ def make_callback_dispatch(
     :class:`CallbackAction` (or None for "nothing to do" — answered with
     the out-of-date toast by ``run_bot``).
 
-    There are seven payload families. ``p:<project-id>`` (the per-project
+    There are eight payload families. ``p:<project-id>`` (the per-project
     buttons of the ``/projects`` view) opens that project's task list view
     — :func:`tasks_view` resolved by id, the same view the user would get
     typing ``/tasks <id>`` — as a new message.
@@ -1303,9 +1335,24 @@ def make_callback_dispatch(
     writes nothing. ``c:<project-id>:<number>:<state-index>`` confirms such
     a cascade (applies it with ``confirm=True``, re-renders the detail in
     place); ``x:<project-id>:<number>`` cancels it (re-renders the plain
-    detail, no store change). All seven are strictly shaped payloads
-    (``:``-separated with the right prefix, arity, integer fields and — for
-    the state index — an in-range value); an unknown project, task or
+    detail, no store change).
+    ``h`` (the main-menu hub's own button) opens the menu view
+    (:func:`menu_view`) and the ``h:<route>`` payloads open the menu's
+    targets as new messages: ``h:p`` the project list (:func:`project_view`),
+    ``h:t`` the all-projects task list (:func:`tasks_view` with no
+    argument), ``h:s`` the button's chat's subscription list
+    (:func:`subscribe_view` with no argument — an inaccessible message,
+    with no chat, returns the out-of-date toast), ``h:a`` the add-task
+    usage text and ``h:h`` the help text. The ``p``/``t``/``s`` routes are
+    store-backed, so a non-NotFound store failure answers
+    :data:`PROJECTS_ERROR_TEXT`/:data:`TASKS_ERROR_TEXT`/
+    :data:`SUBSCRIBE_ERROR_TEXT`; the home, add-task and help routes are
+    static.
+    All eight families are strictly shaped payloads
+    (the right prefix and arity — ``h`` alone or ``h:<route>`` with the
+    route among ``p``/``t``/``s``/``a``/``h``, integer ``:``-separated
+    fields where ids appear, and — for the state index — an in-range
+    value); an unknown project, task or
     attachment gets an informative text reply (the same wording as the
     corresponding command's not-found reply); any other shape returns None
     for the out-of-date toast. A non-NotFound store failure in any family
@@ -1566,6 +1613,39 @@ def make_callback_dispatch(
             if not isinstance(detail, MessageEdit):
                 return detail
             return CallbackAction(answer_text="Cancelled.", edit=detail)
+        if len(parts) == 1 and parts[0] == "h":
+            # The main-menu hub's own button (what the other views'
+            # Main-menu rows will send): opens the menu view, static.
+            return CallbackAction(reply=menu_view())
+        if len(parts) == 2 and parts[0] == "h" and parts[1] in ("p", "t", "s", "a", "h"):
+            # The menu's route buttons (#61 sends the same payloads). The
+            # store-backed routes report a non-NotFound store failure with
+            # the board family's error text; the static routes cannot fail.
+            route = parts[1]
+            if route == "p":
+                try:
+                    return CallbackAction(reply=project_view(store))
+                except Exception:
+                    return CallbackAction(reply=PROJECTS_ERROR_TEXT)
+            if route == "t":
+                try:
+                    return CallbackAction(reply=tasks_view(store))
+                except Exception:
+                    return CallbackAction(reply=TASKS_ERROR_TEXT)
+            if route == "s":
+                # The subscription list is per chat: an inaccessible
+                # message (no chat) → the out-of-date toast.
+                message = callback_query.get("message") or {}
+                chat_id = (message.get("chat") or {}).get("id")
+                if chat_id is None:
+                    return None
+                try:
+                    return CallbackAction(reply=subscribe_view(store, chat_id))
+                except Exception:
+                    return CallbackAction(reply=SUBSCRIBE_ERROR_TEXT)
+            if route == "a":
+                return CallbackAction(reply=ADD_USAGE_TEXT)
+            return CallbackAction(reply=HELP_TEXT)
         # Any other shape (wrong family, arity, or non-numeric fields):
         # nothing to do → run_bot's out-of-date toast.
         return None
