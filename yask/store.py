@@ -172,6 +172,17 @@ def _normalize_color(raw: str | None) -> str:
     return f"#{hexval}".upper()
 
 
+def _in_clause(seq) -> tuple[str, list]:
+    """Placeholder text and params for a variable-length ``IN`` clause.
+
+    ``seq`` may be any iterable of query parameters. Empty input yields
+    ``"NULL"`` so the clause reads ``col IN (NULL)``, which matches nothing,
+    instead of the malformed ``col IN ()``.
+    """
+    seq = list(seq)
+    return (",".join("?" * len(seq)) if seq else "NULL"), seq
+
+
 class Store:
     def __init__(self, conn: sqlite3.Connection, source: str = "web"):
         if source not in ("web", "mcp", "telegram"):
@@ -249,13 +260,13 @@ class Store:
         mirrors the visible board.
         """
         states = [s for s in db.ALL_STATES if s != db.ARCHIVED_STATE]
+        placeholders, state_params = _in_clause(states)
         counts = {
             (r["project_id"], r["state"]): r["n"]
             for r in self.conn.execute(
                 "SELECT project_id, state, COUNT(*) AS n FROM tasks "
-                "WHERE state IN (%s) GROUP BY project_id, state"
-                % ",".join("?" * len(states)),
-                states,
+                f"WHERE state IN ({placeholders}) GROUP BY project_id, state",
+                state_params,
             )
         }
         out = []
@@ -281,11 +292,11 @@ class Store:
         project id.
         """
         self._get_project(project_id)
+        placeholders, state_params = _in_clause(db.IN_PROGRESS_STATES)
         rows = self.conn.execute(
             "SELECT number, title, state, sort_order, id FROM tasks "
-            "WHERE project_id = ? AND state IN (%s)"
-            % ",".join("?" * len(db.IN_PROGRESS_STATES)),
-            [project_id, *db.IN_PROGRESS_STATES],
+            f"WHERE project_id = ? AND state IN ({placeholders})",
+            [project_id, *state_params],
         ).fetchall()
         rows = sorted(
             rows, key=lambda r: (db.STATE_RANK[r["state"]], r["sort_order"], r["id"])
@@ -567,10 +578,10 @@ class Store:
         frontier = [task_id]
         seen: set[int] = set()
         while frontier:
+            placeholders, params = _in_clause(frontier)
             rows = self.conn.execute(
-                "SELECT * FROM tasks WHERE parent_id IN (%s)"
-                % ",".join("?" * len(frontier)),
-                frontier,
+                f"SELECT * FROM tasks WHERE parent_id IN ({placeholders})",
+                params,
             ).fetchall()
             frontier = []
             for r in rows:
@@ -822,10 +833,11 @@ class Store:
         frontier = [from_id]
         seen: set[int] = set()
         while frontier:
+            placeholders, params = _in_clause(frontier)
             rows = self.conn.execute(
-                "SELECT prereq_id FROM task_prereqs WHERE task_id IN (%s)"
-                % ",".join("?" * len(frontier)),
-                frontier,
+                f"SELECT prereq_id FROM task_prereqs "
+                f"WHERE task_id IN ({placeholders})",
+                params,
             ).fetchall()
             frontier = []
             for r in rows:
@@ -890,10 +902,11 @@ class Store:
         seen = {row["id"]}
         frontier = [row["id"]]
         while frontier:
+            placeholders, params = _in_clause(frontier)
             rows = self.conn.execute(
                 "SELECT p2.* FROM task_prereqs pr JOIN tasks p2 ON p2.id = pr.prereq_id "
-                "WHERE pr.task_id IN (%s)" % ",".join("?" * len(frontier)),
-                frontier,
+                f"WHERE pr.task_id IN ({placeholders})",
+                params,
             ).fetchall()
             frontier = []
             for p in rows:

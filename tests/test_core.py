@@ -2,7 +2,7 @@
 
 import pytest
 
-from yask.store import Conflict, NotFound, ValidationError
+from yask.store import Conflict, NotFound, ValidationError, _in_clause
 
 
 def test_task_numbers_start_at_one_and_increase(store, project):
@@ -521,3 +521,31 @@ def test_new_state_changes(store):
     assert all(c["id"] > mid for c in tail)
     # nothing after the newest change
     assert store.new_state_changes(changes[-1]["id"]) == []
+
+
+def test_in_clause_single_element():
+    placeholders, params = _in_clause(["Todo"])
+    assert placeholders == "?"
+    assert params == ["Todo"]
+
+
+def test_in_clause_multiple_elements():
+    placeholders, params = _in_clause(["Todo", "Planning", "Review"])
+    assert placeholders == "?,?,?"
+    assert params == ["Todo", "Planning", "Review"]
+
+
+def test_in_clause_empty_yields_null():
+    placeholders, params = _in_clause([])
+    assert placeholders == "NULL"
+    assert params == []
+
+
+def test_in_clause_materializes_iterables():
+    placeholders, params = _in_clause(x for x in ("a", "b"))
+    assert placeholders == "?,?"
+    assert params == ["a", "b"]
+    # the returned params are a fresh list, usable repeatedly
+    assert isinstance(params, list)
+    placeholders, params = _in_clause(("x",))
+    assert (placeholders, params) == ("?", ["x"])
