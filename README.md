@@ -110,8 +110,9 @@ found by number or by title), `/attachment <project> <task> <id>`
 a message, images as a photo, larger content as a file) and `/move
 <project> <task> <state>` (moves a task to another state; a move that
 would pull prerequisites along asks for confirmation via inline buttons
-first) and `/add <project> <title>` (creates a new task in the
-project's backlog). A chat can `/subscribe [project]` to receive
+first) and `/add <project> <title> [as <type>]` (creates a new task in
+the project's backlog, of the given task type — any of the board's types,
+default `Task`). A chat can `/subscribe [project]` to receive
 notifications about
 every task state change in that project, and `/unsubscribe [project]` to
 stop them —

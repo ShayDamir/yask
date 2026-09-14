@@ -28,8 +28,10 @@ larger content as a file, via ``sendDocument``/``sendPhoto``),
 ``/move <project> <task> <state>`` (moves a task to another workflow
 state — a move that would pull prerequisites along is confirmed with
 inline buttons first, nothing is applied before the confirmation) and
-``/add <project> <title>`` (creates a new task in the project's
-backlog); all board reads and writes go through the store. A chat can ``/subscribe
+``/add <project> <title> [as <type>]`` (creates a new task of the given
+task type — default ``Task`` — in the project's backlog; ``<type>`` is
+one of the board's task types, so custom types can be created too); all
+board reads and writes go through the store. A chat can ``/subscribe
 <project>`` to receive
 task state-change notifications for that project (``/unsubscribe
 <project>`` to stop; subscriptions are per chat, per project, and persist
@@ -174,7 +176,8 @@ COMMAND_REGISTRY: list[Command] = [
     ),
     Command(
         "/add",
-        "add a task to the project's backlog (/add <project> <title>)",
+        "add a task to the project's backlog "
+        "(/add <project> <title> [as <type>])",
         auth_gated=True,
     ),
     Command(
@@ -302,11 +305,20 @@ MOVE_USAGE_TEXT = (
     "Example: /move yask 4 In progress"
 )
 
-ADD_USAGE_TEXT = (
-    "Usage: /add <project> <title>\n"
-    "Creates a new task in the project's backlog.\n"
-    "Example: /add yask fix the login bug"
-)
+def add_usage_text(store: Store) -> str:
+    """The ``/add`` usage, listing the board's current task types.
+
+    The type list is read from the board (``store.list_task_types``), not a
+    hardcode, so custom types (e.g. ``Investigation``) are discoverable.
+    """
+    names = [t["name"] for t in store.list_task_types()]
+    return (
+        "Usage: /add <project> <title> [as <type>]\n"
+        "Creates a new task in the project's backlog; type is one of: "
+        + ", ".join(names)
+        + " (default: Task).\n"
+        "Example: /add yask fix the login bug as Bug"
+    )
 
 # Telegram caps a message at 4096 chars; the task view stays well under it
 # by capping the description and the visible history.
@@ -1084,6 +1096,34 @@ def _match_state_suffix(words: list[str]) -> Optional[tuple[list[str], str]]:
     return None
 
 
+def _match_type_suffix(
+    words: list[str], type_names: list[str]
+) -> tuple[list[str], Optional[str]]:
+    """Split ``words`` into ``(title words, type name)`` on a trailing
+    ``as <type>`` segment.
+
+    The **last** word equal to ``as`` (case-insensitive) is the split
+    point: the words after it, joined, must case-insensitively equal one of
+    ``type_names`` — then the matched type's canonical name is returned and
+    the words before the split are the title. Otherwise (no ``as`` at all,
+    a trailing ``as`` with nothing after it, or a segment that matches no
+    type) the whole ``words`` are the title and the type is ``None`` (the
+    caller applies the default). Only the last ``as`` counts, so a title
+    such as ``a as b as Bug`` yields title ``a as b``, type ``Bug``.
+    """
+    for i in range(len(words) - 1, -1, -1):
+        if words[i].lower() != "as":
+            continue
+        segment = " ".join(words[i + 1 :])
+        for name in type_names:
+            if segment.lower() == name.lower():
+                return words[:i], name
+        # The last "as" does not introduce a known type: the whole
+        # remainder is the title (titles may contain "as" freely).
+        return words, None
+    return words, None
+
+
 def _confirm_move_markup(
     project_id: int, task: dict, target: str, affected: list[dict]
 ) -> KeyboardReply:
@@ -1181,31 +1221,39 @@ def move_view(store: Store, arg: Optional[str]) -> Reply:
 
 
 def add_view(store: Store, arg: Optional[str]) -> str:
-    """Format the ``/add <project> <title>`` reply.
+    """Format the ``/add <project> <title> [as <type>]`` reply.
 
     The argument mixes a project reference and a title, either of which
     may contain spaces: :func:`_split_project` resolves the longest
-    project prefix, and the remaining words (joined back) are the title.
-    No argument, or a project with no title words left, gets the usage
-    text; an unresolvable project gets the not-found reply pointing at
-    ``/projects``. On success the store creates a plain ``Task`` in the
-    project's Backlog (numbering, ordering and history included) and the
-    reply is a confirmation with the new number.
+    project prefix, and the remaining words are the title — unless they
+    end in ``as <type>`` for one of the board's task types
+    (:func:`_match_type_suffix`), in which case that segment names the
+    type. No argument, or a project with no title words left, gets the
+    usage text; an unresolvable project gets the not-found reply pointing
+    at ``/projects``. On success the store creates a task of the given
+    type (default ``Task``) in the project's Backlog (numbering, ordering
+    and history included) and the reply is a confirmation with the new
+    number and type.
     """
     if arg is None or not arg.strip():
-        return ADD_USAGE_TEXT
+        return add_usage_text(store)
     words = arg.split()
     project, rest = _split_project(store, words)
     if project is None:
         return (
             f"Project '{words[0]}' not found. Use /projects to list projects."
         )
-    if not rest:
-        return ADD_USAGE_TEXT
-    task = store.create_task(project["id"], " ".join(rest))
+    type_names = [t["name"] for t in store.list_task_types()]
+    title_words, type_name = _match_type_suffix(rest, type_names)
+    if not title_words:
+        return add_usage_text(store)
+    task = store.create_task(
+        project["id"], " ".join(title_words), type=type_name or "Task"
+    )
     return (
-        f"Created #{task['number']} '{task['title']}' in {project['name']} — "
-        f"Backlog. Use /task {project['name']} {task['number']} to view it."
+        f"Created #{task['number']} '{task['title']}' ({task['type']}) "
+        f"in {project['name']} — Backlog. "
+        f"Use /task {project['name']} {task['number']} to view it."
     )
 
 
@@ -1927,7 +1975,8 @@ def make_callback_dispatch(
     ) -> Optional[CallbackAction]:
         # The menu's route buttons (#61 sends the same payloads). The
         # store-backed routes report a non-NotFound store failure with
-        # the board family's error text; the static routes cannot fail.
+        # the board family's error text; the help route is static and
+        # cannot fail.
         route = parts[1]
         if route not in ("p", "t", "s", "a", "h"):
             return None  # unknown route → run_bot's out-of-date toast
@@ -1952,7 +2001,12 @@ def make_callback_dispatch(
             except Exception:
                 return CallbackAction(reply=SUBSCRIBE_ERROR_TEXT)
         if route == "a":
-            return CallbackAction(reply=ADD_USAGE_TEXT)
+            # The /add usage now lists the board's task types, so it is
+            # a store read like the other board routes.
+            try:
+                return CallbackAction(reply=add_usage_text(store))
+            except Exception:
+                return CallbackAction(reply=TASKS_ERROR_TEXT)
         return CallbackAction(reply=HELP_TEXT)
 
     # The dispatch table: (payload prefix, arity) → the family's handler.

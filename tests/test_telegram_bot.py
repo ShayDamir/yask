@@ -972,7 +972,7 @@ def test_menu_button_subscriptions(store):
 
 
 def test_menu_button_add_task(store):
-    """h:a answers with the static /add usage text."""
+    """h:a answers with the /add usage (the board's task types listed)."""
     script = run_bot_until_stop(
         Script([[callback_update(405, "h:a", chat_id=11)]]),
         dispatch=telegram_bot.make_dispatch(store),
@@ -981,9 +981,27 @@ def test_menu_button_add_task(store):
     assert script.answered == [{"callback_query_id": "cbq-405"}]
     assert len(script.sent) == 1
     assert script.sent[0]["chat_id"] == 11
-    assert script.sent[0]["text"] == telegram_bot.ADD_USAGE_TEXT
+    assert script.sent[0]["text"] == telegram_bot.add_usage_text(store)
     assert "reply_markup" not in script.sent[0]
     assert script.edited == []
+
+
+def test_menu_button_add_task_store_failure(store, monkeypatch):
+    """h:a reads the board's task types; a store failure replies with the
+    read-family error text."""
+
+    def boom():
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "list_task_types", boom)
+    script = run_bot_until_stop(
+        Script([[callback_update(412, "h:a", chat_id=11)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert script.answered == [{"callback_query_id": "cbq-412"}]
+    assert len(script.sent) == 1
+    assert script.sent[0]["text"] == telegram_bot.TASKS_ERROR_TEXT
 
 
 def test_menu_button_help(store):
@@ -2096,7 +2114,7 @@ def test_add_task_creates_task_in_backlog(store):
     assert len(script.sent) == 1
     assert "reply_markup" not in script.sent[0]
     assert script.sent[0]["text"] == (
-        "Created #1 'fix the bug' in yask — Backlog. "
+        "Created #1 'fix the bug' (Task) in yask — Backlog. "
         "Use /task yask 1 to view it."
     )
     tasks = store.list_tasks(pid)
@@ -2114,7 +2132,7 @@ def test_add_task_by_project_id(store):
         dispatch=telegram_bot.make_dispatch(store),
     )
     assert script.sent[0]["text"] == (
-        "Created #1 'new thing' in yask — Backlog. "
+        "Created #1 'new thing' (Task) in yask — Backlog. "
         "Use /task yask 1 to view it."
     )
     assert store.get_task(pid, 1)["title"] == "new thing"
@@ -2129,12 +2147,161 @@ def test_add_task_project_and_title_with_spaces(store):
         dispatch=telegram_bot.make_dispatch(store),
     )
     assert script.sent[0]["text"] == (
-        "Created #1 'fix the bug' in my big project — Backlog. "
+        "Created #1 'fix the bug' (Task) in my big project — Backlog. "
         "Use /task my big project 1 to view it."
     )
     t = store.get_task(pid, 1)
     assert t["title"] == "fix the bug"
     assert t["state"] == "Backlog"
+    assert t["type"] == "Task"
+
+
+def test_add_task_with_type_suffix(store):
+    """The trailing ``as <type>`` segment names the type (case-insensitive
+    on both the keyword and the type name)."""
+    pid = store.create_project("yask")["id"]
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    message_update(740, "/add yask fix the login bug as Bug"),
+                    message_update(741, "/add yask fix the crash as bug"),
+                ]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 2
+    assert script.sent[0]["text"] == (
+        "Created #1 'fix the login bug' (Bug) in yask — Backlog. "
+        "Use /task yask 1 to view it."
+    )
+    assert script.sent[1]["text"] == (
+        "Created #2 'fix the crash' (Bug) in yask — Backlog. "
+        "Use /task yask 2 to view it."
+    )
+    tasks = store.list_tasks(pid)
+    assert [t["title"] for t in tasks] == ["fix the login bug", "fix the crash"]
+    assert [t["type"] for t in tasks] == ["Bug", "Bug"]
+    assert [t["state"] for t in tasks] == ["Backlog", "Backlog"]
+
+
+def test_add_task_with_multicustom_type(store):
+    """Multi-word custom type names work via the ``as <type>`` segment."""
+    pid = store.create_project("yask")["id"]
+    store.create_task_type("Code Review")
+    script = run_bot_until_stop(
+        Script([[message_update(742, "/add yask check the diff as Code Review")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Created #1 'check the diff' (Code Review) in yask — Backlog. "
+        "Use /task yask 1 to view it."
+    )
+    t = store.get_task(pid, 1)
+    assert t["title"] == "check the diff"
+    assert t["type"] == "Code Review"
+    assert t["state"] == "Backlog"
+
+
+def test_add_task_as_epic(store):
+    """``as Epic`` creates an Epic (a root task, Backlog, unestimated)."""
+    pid = store.create_project("yask")["id"]
+    script = run_bot_until_stop(
+        Script([[message_update(743, "/add yask rollup as Epic")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Created #1 'rollup' (Epic) in yask — Backlog. "
+        "Use /task yask 1 to view it."
+    )
+    t = store.get_task(pid, 1)
+    assert t["title"] == "rollup"
+    assert t["type"] == "Epic"
+    assert t["is_epic"] is True
+    assert t["estimate"] is None
+    assert t["state"] == "Backlog"
+
+
+def test_add_task_as_not_a_type_keeps_title(store):
+    """A trailing ``as <word>`` that is not a type name stays in the title
+    (the task is a plain Task)."""
+    pid = store.create_project("yask")["id"]
+    script = run_bot_until_stop(
+        Script([[message_update(744, "/add yask fix the bug as mentioned earlier")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Created #1 'fix the bug as mentioned earlier' (Task) in yask — Backlog. "
+        "Use /task yask 1 to view it."
+    )
+    t = store.get_task(pid, 1)
+    assert t["title"] == "fix the bug as mentioned earlier"
+    assert t["type"] == "Task"
+
+
+def test_add_task_multiple_as_last_wins(store):
+    """Only the last ``as`` is a split point: ``a as b as Bug`` → Bug
+    titled ``a as b``."""
+    pid = store.create_project("yask")["id"]
+    script = run_bot_until_stop(
+        Script([[message_update(745, "/add yask a as b as Bug")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Created #1 'a as b' (Bug) in yask — Backlog. "
+        "Use /task yask 1 to view it."
+    )
+    t = store.get_task(pid, 1)
+    assert t["title"] == "a as b"
+    assert t["type"] == "Bug"
+
+
+def test_add_task_type_only_no_title(store):
+    """``/add yask as Bug`` has a type but no title: usage text, nothing
+    is created."""
+    pid = store.create_project("yask")["id"]
+    script = run_bot_until_stop(
+        Script([[message_update(746, "/add yask as Bug")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == telegram_bot.add_usage_text(store)
+    assert store.list_tasks(pid) == []
+
+
+def test_match_type_suffix_edge_cases():
+    """Direct unit checks for :func:`telegram_bot._match_type_suffix`."""
+    types = ["Story", "Task", "Bug", "Epic"]
+    # No "as": the whole words are the title.
+    assert telegram_bot._match_type_suffix(
+        ["fix", "the", "bug"], types
+    ) == (["fix", "the", "bug"], None)
+    # Trailing "as" with nothing after it: legacy interpretation.
+    assert telegram_bot._match_type_suffix(
+        ["fix", "as"], types
+    ) == (["fix", "as"], None)
+    # A known type: split, the canonical name is returned.
+    assert telegram_bot._match_type_suffix(
+        ["fix", "the", "bug", "as", "Bug"], types
+    ) == (["fix", "the", "bug"], "Bug")
+    # Case-insensitive on both the keyword and the type name.
+    assert telegram_bot._match_type_suffix(
+        ["fix", "AS", "bUG"], types
+    ) == (["fix"], "Bug")
+    # A segment that is not a type: the whole words are the title.
+    assert telegram_bot._match_type_suffix(
+        ["fix", "as", "mentioned"], types
+    ) == (["fix", "as", "mentioned"], None)
+    # Only the last "as" counts.
+    assert telegram_bot._match_type_suffix(
+        ["a", "as", "b", "as", "Bug"], types
+    ) == (["a", "as", "b"], "Bug")
+    # A multi-word type name.
+    assert telegram_bot._match_type_suffix(
+        ["x", "as", "Code", "Review"], ["Code Review"]
+    ) == (["x"], "Code Review")
+    # A type with no title words ("as Bug" alone).
+    assert telegram_bot._match_type_suffix(["as", "Bug"], types) == ([], "Bug")
 
 
 def test_add_usage_and_not_found(store):
@@ -2150,9 +2317,10 @@ def test_add_usage_and_not_found(store):
         ),
         dispatch=telegram_bot.make_dispatch(store),
     )
+    usage = telegram_bot.add_usage_text(store)
     assert len(script.sent) == 4
-    assert script.sent[0]["text"] == telegram_bot.ADD_USAGE_TEXT
-    assert script.sent[1]["text"] == telegram_bot.ADD_USAGE_TEXT
+    assert script.sent[0]["text"] == usage
+    assert script.sent[1]["text"] == usage
     assert script.sent[2]["text"] == (
         "Project 'nope' not found. Use /projects to list projects."
     )
