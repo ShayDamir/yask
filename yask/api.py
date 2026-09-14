@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
+import re
 import threading
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -147,51 +150,90 @@ def create_app(db_path: str | Path) -> FastAPI:
         except YaskError as e:
             raise HTTPException(status_code=e.status, detail=str(e))
 
+    def _route(
+        method: str,
+        path: str,
+        store_method: str,
+        *,
+        status: int = 200,
+        name: str,
+        body: type[BaseModel] | None = None,
+        query: dict[str, tuple[type, Any]] | None = None,
+        str_params: tuple[str, ...] = (),
+    ) -> None:
+        """Register a one-route endpoint that passes through to a Store method.
+
+        The generated endpoint is a mechanical pass-through: the path params
+        (the ``{name}`` occurrences in ``path``, annotated ``int`` unless
+        listed in ``str_params``), an optional single Pydantic ``body`` model
+        and an optional ordered ``query`` mapping are resolved by FastAPI
+        exactly as in the old explicit per-route functions, then forwarded
+        by name to ``store().<store_method>`` inside ``handle``. The explicit
+        ``__signature__`` keeps FastAPI's dependency resolution and OpenAPI
+        generation identical to the pre-refactor functions, and ``name``
+        (the old function name) preserves the OpenAPI ``operationId``.
+        """
+        path_names = re.findall(r"\{(\w+)\}", path)
+
+        def endpoint(**resolved):
+            args = [resolved[n] for n in path_names]
+            if body is not None:
+                kwargs = resolved["body"].model_dump()
+            else:
+                kwargs = {n: resolved[n] for n in query or ()}
+            return handle(lambda: getattr(store(), store_method)(*args, **kwargs))
+
+        params = [
+            inspect.Parameter(
+                n,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                annotation=str if n in str_params else int,
+            )
+            for n in path_names
+        ]
+        if body is not None:
+            params.append(
+                inspect.Parameter(
+                    "body",
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    annotation=body,
+                )
+            )
+        params.extend(
+            inspect.Parameter(
+                n,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                annotation=typ,
+                default=default,
+            )
+            for n, (typ, default) in (query or {}).items()
+        )
+        endpoint.__signature__ = inspect.Signature(params)
+        endpoint.__name__ = name
+        app.add_api_route(path, endpoint, methods=[method], status_code=status,
+                          name=name)
+
     # -- projects
 
-    @app.get("/api/projects")
-    def api_list_projects():
-        return handle(lambda: store().list_projects())
-
-    @app.post("/api/projects", status_code=201)
-    def api_create_project(body: ProjectIn):
-        return handle(lambda: store().create_project(body.name))
-
-    @app.get("/api/projects/{project_id}")
-    def api_get_project(project_id: int):
-        return handle(lambda: store().get_project(project_id))
+    _route("GET", "/api/projects", "list_projects", name="api_list_projects")
+    _route("POST", "/api/projects", "create_project", status=201,
+           name="api_create_project", body=ProjectIn)
+    _route("GET", "/api/projects/{project_id}", "get_project",
+           name="api_get_project")
 
     # -- tasks
 
-    @app.get("/api/projects/{project_id}/tasks")
-    def api_list_tasks(
-        project_id: int,
-        state: str | None = None,
-        include_archived: bool = False,
-        label: str | None = None,
-    ):
-        return handle(
-            lambda: store().list_tasks(project_id, state, include_archived, label)
-        )
-
-    @app.post("/api/projects/{project_id}/tasks", status_code=201)
-    def api_create_task(project_id: int, body: TaskIn):
-        return handle(
-            lambda: store().create_task(
-                project_id,
-                body.title,
-                body.type,
-                body.estimate,
-                body.parent_number,
-                body.description,
-                body.before_number,
-                body.after_number,
-            )
-        )
-
-    @app.get("/api/projects/{project_id}/tasks/{number}")
-    def api_get_task(project_id: int, number: int):
-        return handle(lambda: store().get_task(project_id, number))
+    _route("GET", "/api/projects/{project_id}/tasks", "list_tasks",
+           name="api_list_tasks",
+           query={
+               "state": (str | None, None),
+               "include_archived": (bool, False),
+               "label": (str | None, None),
+           })
+    _route("POST", "/api/projects/{project_id}/tasks", "create_task", status=201,
+           name="api_create_task", body=TaskIn)
+    _route("GET", "/api/projects/{project_id}/tasks/{number}", "get_task",
+           name="api_get_task")
 
     @app.patch("/api/projects/{project_id}/tasks/{number}")
     def api_update_task(project_id: int, number: int, body: TaskUpdate):
@@ -205,38 +247,14 @@ def create_app(db_path: str | Path) -> FastAPI:
 
         return handle(run)
 
-    @app.post("/api/projects/{project_id}/tasks/{number}/move")
-    def api_move_task(project_id: int, number: int, body: MoveIn):
-        return handle(
-            lambda: store().move_task(
-                project_id,
-                number,
-                body.to_state,
-                body.confirm,
-                body.before_number,
-                body.after_number,
-            )
-        )
-
-    @app.post("/api/projects/{project_id}/tasks/{number}/archive")
-    def api_archive_task(project_id: int, number: int, body: ConfirmIn):
-        return handle(lambda: store().archive_task(project_id, number, body.confirm))
-
-    @app.post("/api/projects/{project_id}/tasks/{number}/restore")
-    def api_restore_task(project_id: int, number: int, body: RestoreIn):
-        return handle(
-            lambda: store().restore_task(
-                project_id, number, body.to_state, body.confirm
-            )
-        )
-
-    @app.post("/api/projects/{project_id}/tasks/{number}/reorder")
-    def api_reorder_task(project_id: int, number: int, body: PositionIn):
-        return handle(
-            lambda: store().reorder_task(
-                project_id, number, body.before_number, body.after_number
-            )
-        )
+    _route("POST", "/api/projects/{project_id}/tasks/{number}/move", "move_task",
+           name="api_move_task", body=MoveIn)
+    _route("POST", "/api/projects/{project_id}/tasks/{number}/archive",
+           "archive_task", name="api_archive_task", body=ConfirmIn)
+    _route("POST", "/api/projects/{project_id}/tasks/{number}/restore",
+           "restore_task", name="api_restore_task", body=RestoreIn)
+    _route("POST", "/api/projects/{project_id}/tasks/{number}/reorder",
+           "reorder_task", name="api_reorder_task", body=PositionIn)
 
     @app.delete("/api/projects/{project_id}/tasks/{number}")
     def api_delete_task(project_id: int, number: int, confirm: bool = False):
@@ -251,23 +269,15 @@ def create_app(db_path: str | Path) -> FastAPI:
         t = handle(lambda: store().get_task(project_id, number))
         return t["prerequisites"]
 
-    @app.put("/api/projects/{project_id}/tasks/{number}/prereqs")
-    def api_set_prereqs(project_id: int, number: int, body: PrereqsIn):
-        return handle(
-            lambda: store().set_prerequisites(
-                project_id, number, body.prereq_numbers
-            )
-        )
-
-    @app.get("/api/projects/{project_id}/tasks/{number}/history")
-    def api_history(project_id: int, number: int):
-        return handle(lambda: store().get_history(project_id, number))
+    _route("PUT", "/api/projects/{project_id}/tasks/{number}/prereqs",
+           "set_prerequisites", name="api_set_prereqs", body=PrereqsIn)
+    _route("GET", "/api/projects/{project_id}/tasks/{number}/history",
+           "get_history", name="api_history")
 
     # -- attachments
 
-    @app.get("/api/projects/{project_id}/tasks/{number}/attachments")
-    def api_list_attachments(project_id: int, number: int):
-        return handle(lambda: store().list_attachments(project_id, number))
+    _route("GET", "/api/projects/{project_id}/tasks/{number}/attachments",
+           "list_attachments", name="api_list_attachments")
 
     @app.post(
         "/api/projects/{project_id}/tasks/{number}/attachments", status_code=201
@@ -306,87 +316,52 @@ def create_app(db_path: str | Path) -> FastAPI:
 
         return handle(run)
 
-    @app.delete("/api/attachments/{attachment_id}")
-    def api_delete_attachment(attachment_id: int):
-        return handle(lambda: store().delete_attachment(attachment_id))
+    _route("DELETE", "/api/attachments/{attachment_id}", "delete_attachment",
+           name="api_delete_attachment")
 
     # -- labels
 
-    @app.get("/api/projects/{project_id}/labels")
-    def api_list_labels(project_id: int):
-        return handle(lambda: store().list_labels(project_id))
-
-    @app.post("/api/projects/{project_id}/labels", status_code=201)
-    def api_create_label(project_id: int, body: LabelIn):
-        return handle(lambda: store().create_label(project_id, body.name, body.color))
-
-    @app.put("/api/projects/{project_id}/labels/{label_id}")
-    def api_update_label(project_id: int, label_id: int, body: LabelUpdateIn):
-        return handle(lambda: store().update_label(project_id, label_id, body.color))
-
-    @app.put("/api/projects/{project_id}/tasks/{number}/labels")
-    def api_set_task_labels(project_id: int, number: int, body: TaskLabelsIn):
-        return handle(
-            lambda: store().set_task_labels(project_id, number, body.label_ids)
-        )
-
-    @app.delete("/api/projects/{project_id}/labels/{label_id}")
-    def api_delete_label(project_id: int, label_id: int):
-        return handle(lambda: store().delete_label(project_id, label_id))
+    _route("GET", "/api/projects/{project_id}/labels", "list_labels",
+           name="api_list_labels")
+    _route("POST", "/api/projects/{project_id}/labels", "create_label", status=201,
+           name="api_create_label", body=LabelIn)
+    _route("PUT", "/api/projects/{project_id}/labels/{label_id}", "update_label",
+           name="api_update_label", body=LabelUpdateIn)
+    _route("PUT", "/api/projects/{project_id}/tasks/{number}/labels",
+           "set_task_labels", name="api_set_task_labels", body=TaskLabelsIn)
+    _route("DELETE", "/api/projects/{project_id}/labels/{label_id}",
+           "delete_label", name="api_delete_label")
 
     # -- project roles (user-story role presets)
 
-    @app.get("/api/projects/{project_id}/roles")
-    def api_list_roles(project_id: int):
-        return handle(lambda: store().list_project_roles(project_id))
-
-    @app.put("/api/projects/{project_id}/roles")
-    def api_set_roles(project_id: int, body: ProjectRolesIn):
-        return handle(lambda: store().set_project_roles(project_id, body.names))
-
-    @app.delete("/api/projects/{project_id}/roles/{name}")
-    def api_delete_role(project_id: int, name: str):
-        return handle(lambda: store().remove_project_role(project_id, name))
+    _route("GET", "/api/projects/{project_id}/roles", "list_project_roles",
+           name="api_list_roles")
+    _route("PUT", "/api/projects/{project_id}/roles", "set_project_roles",
+           name="api_set_roles", body=ProjectRolesIn)
+    _route("DELETE", "/api/projects/{project_id}/roles/{name}",
+           "remove_project_role", name="api_delete_role", str_params=("name",))
 
     # -- telegram users (bot authentication allowlist)
 
-    @app.get("/api/telegram-users")
-    def api_list_telegram_users():
-        return handle(lambda: store().list_telegram_users())
-
-    @app.post("/api/telegram-users", status_code=201)
-    def api_add_telegram_user(body: TelegramUserIn):
-        return handle(
-            lambda: store().add_telegram_user(body.chat_id, body.password)
-        )
-
-    @app.put("/api/telegram-users/{chat_id}")
-    def api_set_telegram_user_password(chat_id: int, body: TelegramUserPasswordIn):
-        return handle(
-            lambda: store().set_telegram_user_password(chat_id, body.password)
-        )
-
-    @app.delete("/api/telegram-users/{chat_id}")
-    def api_remove_telegram_user(chat_id: int):
-        return handle(lambda: store().remove_telegram_user(chat_id))
+    _route("GET", "/api/telegram-users", "list_telegram_users",
+           name="api_list_telegram_users")
+    _route("POST", "/api/telegram-users", "add_telegram_user", status=201,
+           name="api_add_telegram_user", body=TelegramUserIn)
+    _route("PUT", "/api/telegram-users/{chat_id}",
+           "set_telegram_user_password", name="api_set_telegram_user_password",
+           body=TelegramUserPasswordIn)
+    _route("DELETE", "/api/telegram-users/{chat_id}", "remove_telegram_user",
+           name="api_remove_telegram_user")
 
     # -- task types
 
-    @app.get("/api/task-types")
-    def api_list_types():
-        return handle(lambda: store().list_task_types())
-
-    @app.post("/api/task-types", status_code=201)
-    def api_create_type(body: TaskTypeIn):
-        return handle(lambda: store().create_task_type(body.name))
-
-    @app.patch("/api/task-types/{type_id}")
-    def api_rename_type(type_id: int, body: TaskTypeIn):
-        return handle(lambda: store().rename_task_type(type_id, body.name))
-
-    @app.delete("/api/task-types/{type_id}")
-    def api_delete_type(type_id: int):
-        return handle(lambda: store().delete_task_type(type_id))
+    _route("GET", "/api/task-types", "list_task_types", name="api_list_types")
+    _route("POST", "/api/task-types", "create_task_type", status=201,
+           name="api_create_type", body=TaskTypeIn)
+    _route("PATCH", "/api/task-types/{type_id}", "rename_task_type",
+           name="api_rename_type", body=TaskTypeIn)
+    _route("DELETE", "/api/task-types/{type_id}", "delete_task_type",
+           name="api_delete_type")
 
     # -- web UI
 

@@ -292,6 +292,63 @@ def test_epic_estimate_over_api(client, pid):
     assert proj["tasks"][0]["children"][0]["title"] == "a"
 
 
+def test_openapi_route_table_stable(client):
+    """Refactor guard (#82): the REST surface is pinned. Every
+    (method, path, status code, operationId) entry of the OpenAPI route
+    table must stay byte-identical when the internals of api.py change.
+    FastAPI derives the operationId as ``{route name}_{path}_{method}``,
+    so pinning it also guards the route ``name`` passed to ``_route``."""
+    spec = client.get("/openapi.json").json()
+
+    def status_of(op):
+        # Declared responses are the success status plus 422 (request
+        # validation) when there is a body; the success one is the rest.
+        return next(k for k in op["responses"] if k != "422")
+
+    table = {
+        (method.upper(), path, status_of(op), op["operationId"])
+        for path, ops in spec["paths"].items()
+        for method, op in ops.items()
+    }
+    assert table == {
+        ("GET", "/api/projects", "200", "api_list_projects_api_projects_get"),
+        ("POST", "/api/projects", "201", "api_create_project_api_projects_post"),
+        ("GET", "/api/projects/{project_id}", "200", "api_get_project_api_projects__project_id__get"),
+        ("GET", "/api/projects/{project_id}/tasks", "200", "api_list_tasks_api_projects__project_id__tasks_get"),
+        ("POST", "/api/projects/{project_id}/tasks", "201", "api_create_task_api_projects__project_id__tasks_post"),
+        ("GET", "/api/projects/{project_id}/tasks/{number}", "200", "api_get_task_api_projects__project_id__tasks__number__get"),
+        ("PATCH", "/api/projects/{project_id}/tasks/{number}", "200", "api_update_task_api_projects__project_id__tasks__number__patch"),
+        ("DELETE", "/api/projects/{project_id}/tasks/{number}", "200", "api_delete_task_api_projects__project_id__tasks__number__delete"),
+        ("POST", "/api/projects/{project_id}/tasks/{number}/move", "200", "api_move_task_api_projects__project_id__tasks__number__move_post"),
+        ("POST", "/api/projects/{project_id}/tasks/{number}/archive", "200", "api_archive_task_api_projects__project_id__tasks__number__archive_post"),
+        ("POST", "/api/projects/{project_id}/tasks/{number}/restore", "200", "api_restore_task_api_projects__project_id__tasks__number__restore_post"),
+        ("POST", "/api/projects/{project_id}/tasks/{number}/reorder", "200", "api_reorder_task_api_projects__project_id__tasks__number__reorder_post"),
+        ("GET", "/api/projects/{project_id}/tasks/{number}/prereqs", "200", "api_get_prereqs_api_projects__project_id__tasks__number__prereqs_get"),
+        ("PUT", "/api/projects/{project_id}/tasks/{number}/prereqs", "200", "api_set_prereqs_api_projects__project_id__tasks__number__prereqs_put"),
+        ("GET", "/api/projects/{project_id}/tasks/{number}/history", "200", "api_history_api_projects__project_id__tasks__number__history_get"),
+        ("GET", "/api/projects/{project_id}/tasks/{number}/attachments", "200", "api_list_attachments_api_projects__project_id__tasks__number__attachments_get"),
+        ("POST", "/api/projects/{project_id}/tasks/{number}/attachments", "201", "api_add_attachment_api_projects__project_id__tasks__number__attachments_post"),
+        ("PUT", "/api/projects/{project_id}/tasks/{number}/labels", "200", "api_set_task_labels_api_projects__project_id__tasks__number__labels_put"),
+        ("GET", "/api/attachments/{attachment_id}", "200", "api_get_attachment_api_attachments__attachment_id__get"),
+        ("DELETE", "/api/attachments/{attachment_id}", "200", "api_delete_attachment_api_attachments__attachment_id__delete"),
+        ("GET", "/api/projects/{project_id}/labels", "200", "api_list_labels_api_projects__project_id__labels_get"),
+        ("POST", "/api/projects/{project_id}/labels", "201", "api_create_label_api_projects__project_id__labels_post"),
+        ("PUT", "/api/projects/{project_id}/labels/{label_id}", "200", "api_update_label_api_projects__project_id__labels__label_id__put"),
+        ("DELETE", "/api/projects/{project_id}/labels/{label_id}", "200", "api_delete_label_api_projects__project_id__labels__label_id__delete"),
+        ("GET", "/api/projects/{project_id}/roles", "200", "api_list_roles_api_projects__project_id__roles_get"),
+        ("PUT", "/api/projects/{project_id}/roles", "200", "api_set_roles_api_projects__project_id__roles_put"),
+        ("DELETE", "/api/projects/{project_id}/roles/{name}", "200", "api_delete_role_api_projects__project_id__roles__name__delete"),
+        ("GET", "/api/telegram-users", "200", "api_list_telegram_users_api_telegram_users_get"),
+        ("POST", "/api/telegram-users", "201", "api_add_telegram_user_api_telegram_users_post"),
+        ("PUT", "/api/telegram-users/{chat_id}", "200", "api_set_telegram_user_password_api_telegram_users__chat_id__put"),
+        ("DELETE", "/api/telegram-users/{chat_id}", "200", "api_remove_telegram_user_api_telegram_users__chat_id__delete"),
+        ("GET", "/api/task-types", "200", "api_list_types_api_task_types_get"),
+        ("POST", "/api/task-types", "201", "api_create_type_api_task_types_post"),
+        ("PATCH", "/api/task-types/{type_id}", "200", "api_rename_type_api_task_types__type_id__patch"),
+        ("DELETE", "/api/task-types/{type_id}", "200", "api_delete_type_api_task_types__type_id__delete"),
+    }
+
+
 def test_web_ui_served(client):
     r = client.get("/")
     assert r.status_code == 200
