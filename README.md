@@ -112,7 +112,9 @@ a message, images as a photo, larger content as a file) and `/move
 would pull prerequisites along asks for confirmation via inline buttons
 first) and `/add <project> <title> [as <type>]` (creates a new task in
 the project's backlog, of the given task type — any of the board's types,
-default `Task`). A chat can `/subscribe [project]` to receive
+default `Task`; the confirmation reply carries an inline button opening
+the new task's detail view, plus a Main-menu button). A chat can
+`/subscribe [project]` to receive
 notifications about
 every task state change in that project, and `/unsubscribe [project]` to
 stop them —
@@ -126,10 +128,10 @@ five `h:`-family buttons: **Projects** (the project list — the `/projects`
 view), **Tasks** (the active tasks of all projects — the `/tasks` view),
 **Subscriptions** (this chat's subscription list), **Add task** (the `/add`
 usage) and **Help** (the command reference — the `/help` text). The hub is
-one tap away from anywhere: every board view (`/projects`, `/tasks`, `/task`
-and the state-change notifications) and `/help` carry a "Main menu" button
-back to it. The menu's board buttons are auth-gated like every other inline
-button.
+one tap away from anywhere: every board view (`/projects`, `/tasks`,
+`/task`, the `/add` confirmation and the state-change notifications) and
+`/help` carry a "Main menu" button back to it. The menu's board buttons
+are auth-gated like every other inline button.
 
 At startup the bot also registers a native command menu (the Telegram app's
 menu button and `/` command suggestions) via `setMyCommands`, listing the

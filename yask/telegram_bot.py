@@ -28,9 +28,11 @@ larger content as a file, via ``sendDocument``/``sendPhoto``),
 ``/move <project> <task> <state>`` (moves a task to another workflow
 state — a move that would pull prerequisites along is confirmed with
 inline buttons first, nothing is applied before the confirmation) and
-``/add <project> <title> [as <type>]`` (creates a new task of the given
-task type — default ``Task`` — in the project's backlog; ``<type>`` is
-one of the board's task types, so custom types can be created too); all
+ ``/add <project> <title> [as <type>]`` (creates a new task of the given
+ task type — default ``Task`` — in the project's backlog; ``<type>`` is
+ one of the board's task types, so custom types can be created too; the
+ confirmation reply carries an inline button opening the new task's detail
+ view, plus a Main-menu row); all
 board reads and writes go through the store. A chat can ``/subscribe
 <project>`` to receive
 task state-change notifications for that project (``/unsubscribe
@@ -1220,7 +1222,7 @@ def move_view(store: Store, arg: Optional[str]) -> Reply:
     return f"Moved #{task['number']} to {target}."
 
 
-def add_view(store: Store, arg: Optional[str]) -> str:
+def add_view(store: Store, arg: Optional[str]) -> Reply:
     """Format the ``/add <project> <title> [as <type>]`` reply.
 
     The argument mixes a project reference and a title, either of which
@@ -1232,8 +1234,15 @@ def add_view(store: Store, arg: Optional[str]) -> str:
     usage text; an unresolvable project gets the not-found reply pointing
     at ``/projects``. On success the store creates a task of the given
     type (default ``Task``) in the project's Backlog (numbering, ordering
-    and history included) and the reply is a confirmation with the new
-    number and type.
+    and history included) and the reply is a :class:`KeyboardReply`
+    confirmation with the new number and type, carrying a two-row inline
+    keyboard: the new task's detail button (label ``#<number> <title>``,
+    truncated to :data:`NOTIFICATION_BUTTON_TEXT_MAX` chars, payload
+    ``t:<project-id>:<number>`` — answered by :func:`make_callback_dispatch`
+    (the ``t:`` handler), which opens the task's detail view) and, under
+    it, the Main-menu row (:func:`_main_menu_button`, payload ``h``) —
+    the same shape the state-change notifications carry. The failure
+    paths (usage, not-found) stay plain ``str``.
     """
     if arg is None or not arg.strip():
         return add_usage_text(store)
@@ -1250,10 +1259,17 @@ def add_view(store: Store, arg: Optional[str]) -> str:
     task = store.create_task(
         project["id"], " ".join(title_words), type=type_name or "Task"
     )
-    return (
+    text = (
         f"Created #{task['number']} '{task['title']}' ({task['type']}) "
         f"in {project['name']} — Backlog. "
         f"Use /task {project['name']} {task['number']} to view it."
+    )
+    button = {
+        "text": _truncate_button_label(f"#{task['number']} {task['title']}"),
+        "callback_data": f"t:{project['id']}:{task['number']}",
+    }
+    return KeyboardReply(
+        text, {"inline_keyboard": [[button], [_main_menu_button()]]}
     )
 
 

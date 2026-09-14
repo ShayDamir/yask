@@ -2112,7 +2112,12 @@ def test_add_task_creates_task_in_backlog(store):
         dispatch=telegram_bot.make_dispatch(store),
     )
     assert len(script.sent) == 1
-    assert "reply_markup" not in script.sent[0]
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 fix the bug", "callback_data": f"t:{pid}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
     assert script.sent[0]["text"] == (
         "Created #1 'fix the bug' (Task) in yask — Backlog. "
         "Use /task yask 1 to view it."
@@ -2123,6 +2128,52 @@ def test_add_task_creates_task_in_backlog(store):
     assert tasks[0]["title"] == "fix the bug"
     assert tasks[0]["state"] == "Backlog"
     assert tasks[0]["type"] == "Task"
+
+
+def test_add_reply_button_opens_task_view(store):
+    """Pressing the /add confirmation's button must open the new task's
+    detail view (the ``t:`` family, as with /tasks and the
+    notifications)."""
+    pid = store.create_project("yask")["id"]
+    first = run_bot_until_stop(
+        Script([[message_update(721, "/add yask fix the bug")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    rows = first.sent[0]["reply_markup"]["inline_keyboard"]
+    assert rows == [
+        [{"text": "#1 fix the bug", "callback_data": f"t:{pid}:1"}],
+        [{"text": "Main menu", "callback_data": "h"}],
+    ]
+    payload = rows[0][0]["callback_data"]
+    script = run_bot_until_stop(
+        Script([[callback_update(723, payload, chat_id=11)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the press is answered (no toast) and the detail view goes out as a
+    # new message to the pressing chat
+    assert script.answered == [{"callback_query_id": "cbq-723"}]
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 11
+    assert script.sent[0]["text"].startswith("#1 fix the bug — Task\n")
+    assert "State: Backlog" in script.sent[0]["text"]
+    assert script.edited == []
+
+
+def test_add_reply_button_label_truncated(store):
+    """A title beyond the cap truncates the button label; the message
+    text keeps the full title."""
+    pid = store.create_project("yask")["id"]
+    title = "a" * 100
+    script = run_bot_until_stop(
+        Script([[message_update(725, f"/add yask {title}")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    rows = script.sent[0]["reply_markup"]["inline_keyboard"]
+    label = rows[0][0]["text"]
+    assert label == telegram_bot._truncate_button_label(f"#1 {title}")
+    assert len(label) <= telegram_bot.NOTIFICATION_BUTTON_TEXT_MAX
+    assert title in script.sent[0]["text"]
 
 
 def test_add_task_by_project_id(store):
@@ -2211,6 +2262,12 @@ def test_add_task_as_epic(store):
         Script([[message_update(743, "/add yask rollup as Epic")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 rollup", "callback_data": f"t:{pid}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
     assert script.sent[0]["text"] == (
         "Created #1 'rollup' (Epic) in yask — Backlog. "
         "Use /task yask 1 to view it."
