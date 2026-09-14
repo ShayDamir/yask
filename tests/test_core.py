@@ -179,6 +179,46 @@ def test_move_task_self_position_reference_rejected(store, project):
         store.move_task(pid, a["number"], "Todo", before_number=a["number"])
 
 
+def test_cross_column_move_after_places_below_reference(store, project):
+    """Cross-column move with after_number lands below the reference (#83)."""
+    pid = project["id"]
+    h = store.create_task(pid, "H")
+    i = store.create_task(pid, "I")
+    j = store.create_task(pid, "J")
+    store.move_task(pid, i["number"], "Review")
+    store.move_task(pid, h["number"], "Review", after_number=i["number"])
+    assert [t["number"] for t in store.list_tasks(pid, state="Review")] == [
+        i["number"],
+        h["number"],
+    ]
+    # the old scope stays consistent: the remaining task is renumbered 1
+    back = store.list_tasks(pid, state="Backlog")
+    assert [t["number"] for t in back] == [j["number"]]
+    assert [t["sort_order"] for t in back] == [1.0]
+
+
+def test_cross_column_move_before_places_above_reference(store, project):
+    """Cross-column move with before_number lands above the reference (#83).
+
+    H is created last so that its stale Backlog sort_order sorts after I's
+    in the target scope — the setup in which the buggy insertion put H
+    below the reference despite ``before_number``.
+    """
+    pid = project["id"]
+    i = store.create_task(pid, "I")
+    j = store.create_task(pid, "J")
+    h = store.create_task(pid, "H")
+    store.move_task(pid, i["number"], "Review")
+    store.move_task(pid, h["number"], "Review", before_number=i["number"])
+    assert [t["number"] for t in store.list_tasks(pid, state="Review")] == [
+        h["number"],
+        i["number"],
+    ]
+    back = store.list_tasks(pid, state="Backlog")
+    assert [t["number"] for t in back] == [j["number"]]
+    assert [t["sort_order"] for t in back] == [1.0]
+
+
 def test_project_overviews_empty_store(store):
     assert store.list_project_overviews() == []
 

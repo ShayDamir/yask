@@ -118,6 +118,27 @@ def test_prereq_cannot_be_itself(store, project):
         store.set_prerequisites(pid, t["number"], [t["number"]])
 
 
+def test_cascade_move_after_places_moved_block_below_reference(store, project):
+    """A cascading move with after_number lands the moved block below the
+    reference, pulled prereq immediately after the main task (#83)."""
+    pid = project["id"]
+    a = _mk(store, pid, "A", "Todo")
+    b = _mk(store, pid, "B", "Todo")
+    c = store.create_task(pid, "C")
+    d = store.create_task(pid, "D")
+    store.set_prerequisites(pid, c["number"], [d["number"]])
+    res = store.move_task(
+        pid, c["number"], "Todo", after_number=b["number"], confirm=True
+    )
+    assert {x["number"] for x in res["affected"]} == {c["number"], d["number"]}
+    assert [t["number"] for t in store.list_tasks(pid, state="Todo")] == [
+        a["number"],
+        b["number"],
+        c["number"],
+        d["number"],
+    ]
+
+
 def test_prereq_cannot_create_cycle(store, project):
     pid = project["id"]
     a = store.create_task(pid, "a")

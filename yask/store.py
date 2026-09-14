@@ -1033,12 +1033,19 @@ class Store:
         with self.conn:
             for t in [main_row, *pulled]:
                 self._apply_state(t["id"], to_state, t["sort_order"], now)
-            # place the main task (and its pulled prerequisites right after it)
+            # place the main task (and its pulled prerequisites right after it);
+            # the scope was refetched after _apply_state, so drop the moved ids
+            # before inserting them exactly once (see #83)
+            moved_ids = {main_row["id"], *(t["id"] for t in pulled)}
             idx = self._position_index(
                 project_id, to_state, main_row["parent_id"], before_number, after_number,
-                exclude_ids={main_row["id"], *(t["id"] for t in pulled)},
+                exclude_ids=moved_ids,
             )
-            ids = self._scope_task_ids(project_id, to_state, main_row["parent_id"])
+            ids = [
+                i
+                for i in self._scope_task_ids(project_id, to_state, main_row["parent_id"])
+                if i not in moved_ids
+            ]
             ids.insert(idx, main_row["id"])
             for t in pulled:
                 ids.append(t["id"])
