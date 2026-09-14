@@ -683,6 +683,114 @@ def test_transport_error_is_survived():
     assert script.offsets[-1] == 62
 
 
+# --- token redaction (CWE-532) ---------------------------------------------
+#
+# The bot token rides in every request URL. Some httpx versions echo the
+# request URL in their transport-error text; whichever version is resolved,
+# the BotAPIError raised (and therefore printed) on a transport failure must
+# never contain the token. The handler below simulates the URL-echoing
+# behavior.
+
+
+def _url_echoing_handler(request):
+    """A MockTransport handler failing like an httpx version whose error
+    text echoes the request URL (which embeds the bot token)."""
+    raise httpx.ConnectError(f"connect failed (request_url: '{request.url}')")
+
+
+def _expect_redacted_transport_error(method_call):
+    """Run ``method_call(api)`` against the URL-echoing transport and assert
+    the raised BotAPIError message is token-free (the ``from exc`` cause
+    chain keeps the full diagnostics for programmatic use)."""
+    client = make_client(_url_echoing_handler)
+    api = telegram_bot.BotAPI(BOT_TOKEN, client=client)
+
+    async def go():
+        try:
+            with pytest.raises(telegram_bot.BotAPIError) as err:
+                await method_call(api)
+        finally:
+            await client.aclose()
+        assert BOT_TOKEN not in str(err.value)
+        assert "[REDACTED]" in str(err.value)
+        assert isinstance(err.value.__cause__, httpx.ConnectError)
+
+    asyncio.run(go())
+
+
+def test_redaction_call_transport_error():
+    _expect_redacted_transport_error(lambda api: api.get_me())
+
+
+def test_redaction_multipart_transport_error():
+    _expect_redacted_transport_error(
+        lambda api: api.send_document(7, "notes.md", b"hello", "text/markdown")
+    )
+
+
+def test_redaction_download_transport_error():
+    _expect_redacted_transport_error(
+        lambda api: api.download_file("cdn/path/FILE-1")
+    )
+
+
+def test_redaction_realistic_transport_error():
+    """The resolved httpx phrases transport errors without the request URL
+    (a bare reason string); the message must be token-free either way."""
+
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+
+    client = make_client(handler)
+    api = telegram_bot.BotAPI(BOT_TOKEN, client=client)
+
+    async def go():
+        try:
+            with pytest.raises(telegram_bot.BotAPIError) as err:
+                await api.get_me()
+        finally:
+            await client.aclose()
+        assert BOT_TOKEN not in str(err.value)
+
+    asyncio.run(go())
+
+
+def test_main_invalid_token_prints_redacted_message(tmp_path, capsys):
+    script = Script(
+        [],
+        fail_once_with=httpx.ConnectError(
+            f"connect failed (request_url: 'https://api.telegram.org/bot{BOT_TOKEN}/getMe')"
+        ),
+    )
+    client = make_client(script.handler)
+    code = telegram_bot.main(BOT_TOKEN, tmp_path, client=client)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "invalid Telegram bot token" in err
+    assert BOT_TOKEN not in err
+    assert "[REDACTED]" in err
+    # getMe failed before touching disk
+    assert not (tmp_path / "yask.db").exists()
+
+
+def test_poll_loop_prints_redacted_message(capsys):
+    script = run_bot_until_stop(
+        Script(
+            [[message_update(61, "/start")]],
+            fail_once_with=httpx.ConnectError(
+                f"connect failed (request_url: 'https://api.telegram.org/bot{BOT_TOKEN}/getUpdates')"
+            ),
+        )
+    )
+    err = capsys.readouterr().err
+    assert "telegram poll failed" in err
+    assert BOT_TOKEN not in err
+    assert "[REDACTED]" in err
+    # the run still recovers and answers /start
+    assert len(script.sent) == 1
+    assert script.sent[0]["text"] == telegram_bot.START_TEXT
+
+
 def test_reply_for_dispatch_table():
     start = telegram_bot.reply_for("/start")
     assert isinstance(start, telegram_bot.KeyboardReply)

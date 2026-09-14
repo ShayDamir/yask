@@ -435,6 +435,9 @@ class BotAPIError(Exception):
 
     Carries the API ``error_code`` (when present) and a human-readable
     ``description``.
+
+    Messages are guaranteed token-free: transport failures are redacted at
+    the ``httpx`` error wrap sites in :class:`BotAPI`.
     """
 
     def __init__(self, description: str, error_code: Optional[int] = None) -> None:
@@ -2663,12 +2666,23 @@ class BotAPI:
         self._client = client if client is not None else httpx.AsyncClient(timeout=HTTP_TIMEOUT)
         self._owns_client = client is None
 
+    def _redact(self, message: str) -> str:
+        """Strip the bot token from a message before it reaches logs.
+
+        The request URLs embed the token, and httpx error messages can
+        echo the request URL (behavior varies between versions), so any
+        message that will be printed must be scrubbed here.
+        """
+        if self._token:
+            message = message.replace(self._token, "[REDACTED]")
+        return message
+
     async def _call(self, method: str, **params: Any) -> Any:
         url = f"{self._base_url}/bot{self._token}/{method}"
         try:
             response = await self._post(url, json=params)
         except httpx.HTTPError as exc:
-            raise BotAPIError(f"telegram request failed: {exc}") from exc
+            raise BotAPIError(self._redact(f"telegram request failed: {exc}")) from exc
         return self._parse(response)
 
     async def _call_multipart(
@@ -2685,7 +2699,7 @@ class BotAPI:
         try:
             response = await self._post(url, fields=fields, files=files)
         except httpx.HTTPError as exc:
-            raise BotAPIError(f"telegram request failed: {exc}") from exc
+            raise BotAPIError(self._redact(f"telegram request failed: {exc}")) from exc
         return self._parse(response)
 
     @staticmethod
@@ -2917,7 +2931,7 @@ class BotAPI:
         try:
             response = await self._client.get(url)
         except httpx.HTTPError as exc:
-            raise BotAPIError(f"telegram request failed: {exc}") from exc
+            raise BotAPIError(self._redact(f"telegram request failed: {exc}")) from exc
         if response.status_code != 200:
             raise BotAPIError(
                 f"telegram file download failed (HTTP {response.status_code})"
