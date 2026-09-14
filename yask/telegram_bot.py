@@ -29,11 +29,27 @@ larger content as a file, via ``sendDocument``/``sendPhoto``),
 state — a move that would pull prerequisites along is confirmed with
 inline buttons first, nothing is applied before the confirmation) and
  ``/add <project> <title> [as <type>]`` (creates a new task of the given
- task type — default ``Task`` — in the project's backlog; ``<type>`` is
- one of the board's task types, so custom types can be created too; the
- confirmation reply carries an inline button opening the new task's detail
- view, plus a Main-menu row); all
-board reads and writes go through the store. A chat can ``/subscribe
+  task type — default ``Task`` — in the project's backlog; ``<type>`` is
+  one of the board's task types, so custom types can be created too; the
+  confirmation reply carries an inline button opening the new task's detail
+  view, plus a Main-menu row),
+ ``/describe <project> <number|title> <description>`` (sets — replaces —
+  the task's description; the number form resolves strictly by number, the
+  title form by longest unique title prefix, so the remaining words become
+  the description) and
+ ``/attach <project> <number|title>`` (attach a file to a task: send a
+  document or a photo to the bot whose caption is
+  ``/attach <project> <number|title>`` — the bot downloads the file from
+  the Bot API and stores it on the task; markdown/plain text and
+  png/jpeg/gif/webp/svg images up to 10 MB are accepted, other types and
+  larger files are refused before anything is downloaded; a missing
+  caption, a caption of another command, or a resolution failure answers a
+  text and uploads nothing; typing ``/attach`` as a plain text message
+  answers the usage text); all
+board reads and writes go through the store. The file handler is the only
+async part of the message dispatch: a file message's reply is a coroutine
+that ``run_bot`` awaits, every other handler stays synchronous. A chat can
+``/subscribe
 <project>`` to receive
 task state-change notifications for that project (``/unsubscribe
 <project>`` to stop; subscriptions are per chat, per project, and persist
@@ -83,12 +99,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import signal
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any, Awaitable, Callable, Optional, Union
 
 import httpx
 
@@ -183,8 +200,20 @@ COMMAND_REGISTRY: list[Command] = [
         auth_gated=True,
     ),
     Command(
+        "/describe",
+        "set a task's description "
+        "(/describe <project> <number|title> <description>)",
+        auth_gated=True,
+    ),
+    Command(
         "/attachment",
         "show a task's attachment (/attachment <project> <task> <id>)",
+        auth_gated=True,
+    ),
+    Command(
+        "/attach",
+        "attach a file to a task (send a document or photo captioned "
+        "/attach <project> <number|title>)",
         auth_gated=True,
     ),
     Command(
@@ -285,6 +314,12 @@ UNSUBSCRIBE_ERROR_TEXT = (
 )
 MOVE_ERROR_TEXT = "I could not write to the board right now. Please try again."
 ADD_ERROR_TEXT = "I could not write to the board right now. Please try again."
+DESCRIBE_ERROR_TEXT = (
+    "I could not write to the board right now. Please try again."
+)
+ATTACH_ERROR_TEXT = (
+    "I could not write to the board right now. Please try again."
+)
 
 TASK_USAGE_TEXT = (
     "Usage: /task <project> <number|title>\n"
@@ -305,6 +340,21 @@ MOVE_USAGE_TEXT = (
     "Moves a task to another state: Backlog, Todo, Planning, In progress,\n"
     "Review or Done.\n"
     "Example: /move yask 4 In progress"
+)
+
+DESCRIBE_USAGE_TEXT = (
+    "Usage: /describe <project> <number|title> <description>\n"
+    "Sets the task's description (replacing any existing one).\n"
+    "Example: /describe yask 4 Fix the login bug"
+)
+
+ATTACH_USAGE_TEXT = (
+    "Usage: /attach <project> <number|title>\n"
+    "Attach a file to a task: send a document or a photo to this chat\n"
+    "with a caption of /attach <project> <number|title>.\n"
+    "Allowed: markdown/plain text and png/jpeg/gif/webp/svg images,\n"
+    "10 MB max.\n"
+    "Example caption: /attach yask 4"
 )
 
 def add_usage_text(store: Store) -> str:
@@ -693,6 +743,62 @@ class MessageEdit:
 # Every shape a dispatch layer may return: plain text, text with a
 # keyboard, or a file (with an optional keyboard).
 Reply = Union[str, KeyboardReply, FileReply]
+
+
+@dataclass(frozen=True)
+class IncomingFile:
+    """A document or photo arriving in a message (the ``/attach`` channel).
+
+    ``run_bot`` builds one from each file message and passes it to
+    ``dispatch`` alongside (the empty) text; the dispatch layer's async
+    file handler downloads the file from the Bot API and stores it on the
+    resolved task. ``filename``/``content_type`` are the file's declared
+    metadata (None when Telegram omits them — the handler falls back to
+    ``"attachment"`` / ``"application/octet-stream"``, which the store's
+    type allowlist then rejects), ``size`` the declared size in bytes
+    (None when unknown — the store's size cap still binds on the bytes).
+    """
+
+    file_id: Optional[str]
+    is_photo: bool
+    filename: Optional[str]
+    content_type: Optional[str]
+    size: Optional[int]
+    caption: Optional[str]
+
+
+def _extract_incoming_file(message: dict) -> Optional[IncomingFile]:
+    """The document or photo carried by ``message``, or None.
+
+    A document keeps its ``file_name``/``mime_type``/``file_size``; a photo
+    is the largest :class:`PhotoSize` (the last element of ``message["photo"]``)
+    with a fixed ``photo.jpg`` / ``image/jpeg`` identity — a photo is always
+    a JPEG, and the largest size is the one worth attaching. ``caption`` is
+    the message's caption (the ``/attach`` command channel). Other media
+    (video, sticker, voice, ...) yield None: they are ignored, as before.
+    """
+    document = message.get("document")
+    if isinstance(document, dict):
+        return IncomingFile(
+            file_id=document.get("file_id"),
+            is_photo=False,
+            filename=document.get("file_name"),
+            content_type=document.get("mime_type"),
+            size=document.get("file_size"),
+            caption=message.get("caption"),
+        )
+    photos = message.get("photo")
+    if isinstance(photos, list) and photos:
+        largest = photos[-1]
+        return IncomingFile(
+            file_id=largest.get("file_id"),
+            is_photo=True,
+            filename="photo.jpg",
+            content_type="image/jpeg",
+            size=largest.get("file_size"),
+            caption=message.get("caption"),
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -1273,6 +1379,103 @@ def add_view(store: Store, arg: Optional[str]) -> Reply:
     )
 
 
+def describe_view(store: Store, arg: Optional[str]) -> Reply:
+    """Format the ``/describe <project> <number|title> <description>`` reply.
+
+    Sets — replaces — the task's description (``store.update_task``, the
+    same write as the web UI / MCP ``update_task``; no state-history entry).
+    The argument mixes a project reference and a task reference, either of
+    which may contain spaces: :func:`_split_project` resolves the longest
+    project prefix. The task reference splits from the description words
+    by form:
+
+    - **Number form** — the first word after the project is all digits: it
+      is the task number, resolved strictly with ``store.get_task`` (no
+      title fallback — a write command must not resolve a number to a
+      differently-titled task), and everything after it is the
+      description.
+    - **Title form** — otherwise the words are split by longest-prefix
+      unique match (mirroring :func:`_split_project`'s longest-prefix
+      convention): the longest prefix of the remaining words that matches
+      exactly one visible task (case-insensitive title) is the reference,
+      the remaining words the description. A prefix that matches several
+      tasks gets the disambiguation list (nothing is written); no prefix
+      matching at all gets the not-found reply quoting the first word.
+
+    No argument, a project with no task reference left, or a reference
+    with no description words left, gets the usage text; an unresolvable
+    project gets the not-found reply pointing at ``/projects``. Archived
+    tasks: the number form reaches them (``get_task`` sees archived), the
+    title form does not (``find_tasks_by_title`` excludes archived) — the
+    same asymmetry as ``/task``. On success the reply is a
+    :class:`KeyboardReply` confirmation carrying the task's detail button
+    (label ``#<number> <title>`` truncated to
+    :data:`NOTIFICATION_BUTTON_TEXT_MAX` chars, payload
+    ``t:<project-id>:<number>`` — answered by :func:`make_callback_dispatch`
+    (the ``t:`` handler)) and, under it, the Main-menu row
+    (:func:`_main_menu_button`, payload ``h``) — the same shape the
+    ``/add`` confirmation carries. The failure paths (usage, not-found,
+    disambiguation) stay plain ``str``.
+    """
+    if arg is None or not arg.strip():
+        return DESCRIBE_USAGE_TEXT
+    words = arg.split()
+    project, rest = _split_project(store, words)
+    if project is None:
+        return (
+            f"Project '{words[0]}' not found. Use /projects to list projects."
+        )
+    if not rest:
+        return DESCRIBE_USAGE_TEXT
+    if rest[0].isdigit():
+        # Number form: strict number lookup, the rest is the description.
+        try:
+            task = store.get_task(project["id"], int(rest[0]))
+        except NotFound:
+            return f"Task #{rest[0]} not found in {project['name']}."
+        description = " ".join(rest[1:])
+        if not description:
+            return DESCRIBE_USAGE_TEXT
+    else:
+        # Title form: the longest prefix of the remaining words that
+        # matches exactly one task is the reference; the words after it
+        # are the description.
+        found = None
+        for i in range(len(rest), 0, -1):
+            ref = " ".join(rest[:i])
+            matches = store.find_tasks_by_title(project["id"], ref)
+            if not matches:
+                continue
+            desc_words = rest[i:]
+            if not desc_words:
+                if len(matches) == 1:
+                    return DESCRIBE_USAGE_TEXT  # resolved, nothing to write
+                return _resolve_task(store, project, ref)  # disambiguation
+            if len(matches) == 1:
+                task = store.get_task(project["id"], matches[0]["number"])
+                found = (task, " ".join(desc_words))
+                break
+            return _resolve_task(store, project, ref)  # ambiguous
+        if found is None:
+            return f"Task '{rest[0]}' not found in {project['name']}."
+        task, description = found
+    task = store.update_task(
+        project["id"], task["number"], description=description
+    )
+    text = (
+        f"Set the description of #{task['number']} '{task['title']}' "
+        f"({len(description)} chars). "
+        f"Use /task {project['name']} {task['number']} to view it."
+    )
+    button = {
+        "text": _truncate_button_label(f"#{task['number']} {task['title']}"),
+        "callback_data": f"t:{project['id']}:{task['number']}",
+    }
+    return KeyboardReply(
+        text, {"inline_keyboard": [[button], [_main_menu_button()]]}
+    )
+
+
 def subscribe_view(store: Store, chat_id: int, arg: Optional[str] = None) -> str:
     """Format the ``/subscribe [project]`` reply.
 
@@ -1418,6 +1621,26 @@ def _handle_add(
     return add_view(store, _tasks_arg(text))
 
 
+def _handle_describe(
+    store: Store, text: Optional[str], chat_id: Optional[int]
+) -> Reply:
+    """``/describe``: set a task's description (replace semantics)."""
+    return describe_view(store, _tasks_arg(text))
+
+
+def _handle_attach(
+    store: Store, text: Optional[str], chat_id: Optional[int]
+) -> Reply:
+    """``/attach`` typed as a plain text message (no file): the usage text.
+
+    The real ``/attach`` path is the async file handler of
+    :func:`make_dispatch` (a document or photo whose caption carries the
+    command); this row exists so the command is gated and listed like
+    every other board command (``_verify_dispatch_table``).
+    """
+    return ATTACH_USAGE_TEXT
+
+
 def _handle_subscribe(
     store: Store, text: Optional[str], chat_id: Optional[int]
 ) -> Reply:
@@ -1442,8 +1665,10 @@ COMMAND_TABLE: dict[str, tuple[CommandHandler, str]] = {
     "/tasks": (_handle_tasks, TASKS_ERROR_TEXT),
     "/task": (_handle_task, TASK_ERROR_TEXT),
     "/attachment": (_handle_attachment, ATTACHMENT_ERROR_TEXT),
+    "/attach": (_handle_attach, ATTACH_ERROR_TEXT),
     "/move": (_handle_move, MOVE_ERROR_TEXT),
     "/add": (_handle_add, ADD_ERROR_TEXT),
+    "/describe": (_handle_describe, DESCRIBE_ERROR_TEXT),
     "/subscribe": (_handle_subscribe, SUBSCRIBE_ERROR_TEXT),
     "/unsubscribe": (_handle_unsubscribe, UNSUBSCRIBE_ERROR_TEXT),
 }
@@ -1469,14 +1694,20 @@ def _verify_dispatch_table() -> None:
 _verify_dispatch_table()
 
 
-def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Optional[Reply]]:
+def make_dispatch(
+    store: Store,
+    auth: Optional[Auth] = None,
+    api: Optional[BotAPI] = None,
+) -> Callable[..., Optional[Union[Reply, Awaitable[Reply]]]]:
     """Build the message→reply dispatcher for a bot bound to ``store``.
 
     Store-backed commands — the rows of :data:`COMMAND_TABLE`
-    (``/projects``, ``/tasks``, ``/task``, ``/attachment``, ``/move``,
-    ``/add``, ``/subscribe``, ``/unsubscribe``) — read the board through
-    ``store`` via their table handler; the subscription commands
-    additionally need the sender's chat id, hence
+    (``/projects``, ``/tasks``, ``/task``, ``/attachment``, ``/attach``,
+    ``/move``, ``/add``, ``/describe``, ``/subscribe``,
+    ``/unsubscribe``) — read the board through ``store`` via their table
+    handler (``/attach`` typed as a plain text message answers its usage
+    text; its real path is the file handler below); the subscription
+    commands additionally need the sender's chat id, hence
     ``dispatch(text, chat_id)``. ``/login`` and ``/whoami`` are explicit
     special cases before the table lookup (they need the auth state and
     the sender's own chat id). Everything else falls back to the static
@@ -1487,25 +1718,134 @@ def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Op
     attachment bytes for a file send); a :class:`KeyboardReply` is the
     same text-plus-keyboard shape for inline-keyboard views — ``/move``
     answers with one when the move would pull prerequisites along (the
-    confirm/cancel keyboard, nothing applied until the ``c:`` button).
+    confirm/cancel keyboard, nothing applied until the ``c:`` button),
+    and ``/add`` and ``/describe`` answer with the confirmation keyboard
+    (the task's detail button plus the Main-menu row).
+
+    File messages (a document or a photo, :class:`IncomingFile`) are
+    answered by an **async** file handler — the ``/attach`` caption
+    flow: it downloads the file from the Bot API via ``api`` and stores
+    it on the resolved task through ``store.add_attachment``.
+    ``dispatch(text, chat_id, file)`` returns that handler's coroutine
+    for a file message (the caller — ``run_bot`` — awaits it when the
+    reply is a coroutine, ``inspect.iscoroutine``); every text message
+    keeps the synchronous path. ``api`` is the :class:`BotAPI` the
+    handler downloads through (the production bot always passes one);
+    without it a file message answers the attach error text.
 
     Board access is gated by ``auth`` (an :class:`Auth`; the production
     bot always passes one): every :data:`COMMAND_TABLE` command answers
     unauthenticated chats with :data:`AUTH_REQUIRED_TEXT` and no board
     data — the gate covers exactly the registry's auth_gated commands
-    (:func:`_verify_dispatch_table` fails the import on any divergence).
-    ``/login`` (success/failure indistinguishable for unknown chats) and
-    ``/whoami`` (the sender's own chat id) are ungated. Without an
-    ``auth`` the commands are open (the legacy, unauthenticated
-    behavior).
+    (:func:`_verify_dispatch_table` fails the import on any divergence)
+    — and the file handler is gated the same way, before any resolution
+    or download. ``/login`` (success/failure indistinguishable for
+    unknown chats) and ``/whoami`` (the sender's own chat id) are
+    ungated. Without an ``auth`` the commands are open (the legacy,
+    unauthenticated behavior).
     """
 
     def _authed(chat_id: Optional[int]) -> bool:
         return auth is None or auth.is_authenticated(chat_id)
 
+    async def _dispatch_file(file: IncomingFile, chat_id: Optional[int]) -> Reply:
+        """The async handler for file messages: the ``/attach`` flow.
+
+        The auth gate comes first (no resolution, no download, no board
+        data for an unauthenticated chat); then the caption must
+        tokenize to ``/attach`` (a missing caption gets the usage text,
+        a caption of another command the unknown hint); project/task
+        resolution runs through the command path's own helpers
+        (``_split_project`` + ``_resolve_task`` — the disambiguation
+        list and the not-found texts pass through unchanged, and no
+        failure path downloads anything); the filename/content type come
+        from the file's declared metadata (document: ``file_name``/
+        ``mime_type`` with an ``"attachment"`` /
+        ``"application/octet-stream"`` fallback, photo:
+        ``photo.jpg`` / ``image/jpeg``); the pre-checks run before any
+        download (the declared type must be in
+        ``Store.ALLOWED_ATTACHMENT_TYPES``, a known declared size must be
+        within ``Store.MAX_ATTACHMENT_SIZE``); then the file is
+        downloaded (``api.get_file_bytes``) and stored
+        (``store.add_attachment`` — which sanitizes the filename and
+        re-enforces the type allowlist and the size cap as the backstop
+        when Telegram's metadata was missing). The success reply is a
+        :class:`KeyboardReply` confirmation with the task's detail
+        button and the Main-menu row (the ``/add`` confirmation's
+        shape); every failure path is a plain ``str``.
+        """
+        if auth is not None and not auth.is_authenticated(chat_id):
+            return AUTH_REQUIRED_TEXT
+        if api is None or file.file_id is None:
+            return ATTACH_ERROR_TEXT
+        cmd = _command_token(file.caption)
+        if cmd != "/attach":
+            return (
+                ATTACH_USAGE_TEXT if cmd is None else UNKNOWN_HINT
+            )
+        words = file.caption.split()[1:]
+        if not words:
+            return ATTACH_USAGE_TEXT
+        project, rest = _split_project(store, words)
+        if project is None:
+            return (
+                f"Project '{words[0]}' not found. "
+                "Use /projects to list projects."
+            )
+        if not rest:
+            return ATTACH_USAGE_TEXT
+        task = _resolve_task(store, project, " ".join(rest))
+        if not isinstance(task, dict):
+            return task
+        if file.is_photo:
+            filename = file.filename or "photo.jpg"
+            content_type = file.content_type or "image/jpeg"
+        else:
+            filename = file.filename or "attachment"
+            content_type = file.content_type or "application/octet-stream"
+        if content_type not in Store.ALLOWED_ATTACHMENT_TYPES:
+            return (
+                f"File type '{content_type}' is not allowed: "
+                "markdown/plain text and png, jpeg, gif, webp or svg "
+                "images only."
+            )
+        if file.size is not None and file.size > Store.MAX_ATTACHMENT_SIZE:
+            return (
+                f"File is too large ({_human_size(file.size)}); "
+                "the limit is 10 MB."
+            )
+        try:
+            data = await api.get_file_bytes(file.file_id)
+        except BotAPIError:
+            return ATTACH_ERROR_TEXT
+        try:
+            meta = store.add_attachment(
+                project["id"], task["number"], filename, content_type, data
+            )
+        except Exception:
+            return ATTACH_ERROR_TEXT
+        text = (
+            f"Attached '{meta['filename']}' to #{task['number']} "
+            f"'{task['title']}' ({_human_size(meta['size'])})."
+        )
+        button = {
+            "text": _truncate_button_label(f"#{task['number']} {task['title']}"),
+            "callback_data": f"t:{project['id']}:{task['number']}",
+        }
+        return KeyboardReply(
+            text, {"inline_keyboard": [[button], [_main_menu_button()]]}
+        )
+
     def dispatch(
-        text: Optional[str], chat_id: Optional[int] = None
-    ) -> Optional[Reply]:
+        text: Optional[str],
+        chat_id: Optional[int] = None,
+        file: Optional[IncomingFile] = None,
+    ) -> Optional[Union[Reply, Awaitable[Reply]]]:
+        # A file message is answered by the async file handler (the
+        # /attach flow): dispatch returns its coroutine, which run_bot
+        # awaits (inspect.iscoroutine). Text messages keep the sync path.
+        if file is not None:
+            return _dispatch_file(file, chat_id)
         cmd = _command_token(text)
         if cmd == "/login":
             if chat_id is None:
@@ -2066,7 +2406,8 @@ def make_callback_dispatch(
 
 class BotAPI:
     """Minimal Telegram Bot API client: getMe, getUpdates, sendMessage,
-    sendDocument, sendPhoto, answerCallbackQuery, editMessageText.
+    sendDocument, sendPhoto, answerCallbackQuery, editMessageText,
+    getFile.
 
     Accepts an ``httpx.AsyncClient`` for tests (e.g. with
     ``httpx.MockTransport``); production uses a default client that
@@ -2319,6 +2660,41 @@ class BotAPI:
         result = await self._call("deleteMyCommands", **params)
         return bool(result)
 
+    async def get_file(self, file_id: str) -> dict:
+        """The metadata of a Bot API file (``getFile``): ``file_id``,
+        ``file_unique_id``, ``file_size``, ``file_path`` (the URL suffix
+        used by :meth:`download_file`)."""
+        result = await self._call("getFile", file_id=file_id)
+        return result if isinstance(result, dict) else {}
+
+    async def download_file(self, file_path: str) -> bytes:
+        """Download a Bot API file's bytes (a plain GET — no JSON body —
+        to ``<base>/file/bot<token>/<file_path>``).
+
+        A transport failure or a non-200 answer raises
+        :class:`BotAPIError` (the caller turns it into the family's
+        error text; the poll loop never crashes on a download).
+        """
+        url = f"{self._base_url}/file/bot{self._token}/{file_path}"
+        try:
+            response = await self._client.get(url)
+        except httpx.HTTPError as exc:
+            raise BotAPIError(f"telegram request failed: {exc}") from exc
+        if response.status_code != 200:
+            raise BotAPIError(
+                f"telegram file download failed (HTTP {response.status_code})"
+            )
+        return response.content
+
+    async def get_file_bytes(self, file_id: str) -> bytes:
+        """A Bot API file's bytes: :meth:`get_file` for the ``file_path``,
+        then :meth:`download_file` for the content."""
+        file = await self.get_file(file_id)
+        file_path = file.get("file_path")
+        if not file_path:
+            raise BotAPIError("telegram returned no file_path for the file")
+        return await self.download_file(file_path)
+
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
@@ -2425,7 +2801,7 @@ async def _send_reply(api: BotAPI, chat_id: int, reply: Reply) -> None:
 
 async def run_bot(
     api: BotAPI,
-    dispatch: Callable[..., Optional[Reply]],
+    dispatch: Callable[..., Optional[Union[Reply, Awaitable[Reply]]]],
     stop_event: Optional[asyncio.Event] = None,
     poll_timeout: int = POLL_TIMEOUT,
     error_delay: float = 1.0,
@@ -2440,6 +2816,13 @@ async def run_bot(
     sent with ``sendPhoto`` (image content types) or ``sendDocument``, so
     failed file sends are caught by the same error handling as failed
     messages.
+
+    A message carrying a document or a photo (and no text) is extracted
+    to an :class:`IncomingFile` and passed to ``dispatch`` as its
+    ``file`` argument (the ``/attach`` flow); when the dispatch layer
+    answers with a coroutine (its async file handler), ``run_bot`` awaits
+    it — every other dispatch layer stays synchronous, so awaiting a
+    coroutine is the only async convention the dispatch contract adds.
 
     ``callback_query`` updates are routed to ``callback_dispatch`` (when
     provided): the raw update dict is passed through, and the callback is
@@ -2500,7 +2883,16 @@ async def run_bot(
             try:
                 if message is not None:
                     chat = message.get("chat") or {}
-                    reply = dispatch(message.get("text"), chat.get("id"))
+                    text = message.get("text")
+                    # A document/photo message (no text) rides the
+                    # dispatch layer's file parameter (the /attach flow);
+                    # text messages and other media pass file=None.
+                    incoming = (
+                        _extract_incoming_file(message) if text is None else None
+                    )
+                    reply = dispatch(text, chat.get("id"), file=incoming)
+                    if inspect.iscoroutine(reply):
+                        reply = await reply
                     if reply is not None and "id" in chat:
                         await _send_reply(api, chat["id"], reply)
                 elif callback is not None:
@@ -2596,7 +2988,9 @@ async def _amain(
     try:
         await run_bot(
             api,
-            make_dispatch(store, auth),
+            # The api is passed so the dispatch layer's async file handler
+            # (the /attach flow) can download incoming files.
+            make_dispatch(store, auth, api=api),
             stop_event=stop_event,
             poll_timeout=POLL_TIMEOUT,
             on_cycle=notifier.check,

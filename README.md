@@ -110,10 +110,14 @@ found by number or by title), `/attachment <project> <task> <id>`
 a message, images as a photo, larger content as a file) and `/move
 <project> <task> <state>` (moves a task to another state; a move that
 would pull prerequisites along asks for confirmation via inline buttons
-first) and `/add <project> <title> [as <type>]` (creates a new task in
-the project's backlog, of the given task type — any of the board's types,
-default `Task`; the confirmation reply carries an inline button opening
-the new task's detail view, plus a Main-menu button). A chat can
+ first), `/describe <project> <number|title> <description>` (sets —
+replaces — a task's description; a numeric first word resolves the task
+by number, otherwise the longest title prefix match does, and the
+remaining words become the description) and `/attach <project>
+<number|title>` (attach a file to a task: send a document or a photo to
+the bot captioned `/attach <project> <number|title>` — the bot downloads
+the file and attaches it; allowed types are markdown/plain text and
+png/jpeg/gif/webp/svg images, 10 MB max). A chat can
 `/subscribe [project]` to receive
 notifications about
 every task state change in that project, and `/unsubscribe [project]` to

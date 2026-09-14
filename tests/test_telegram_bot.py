@@ -32,6 +32,61 @@ def message_update(update_id, text, chat_id=7):
     return {"update_id": update_id, "message": message}
 
 
+def file_message_update(
+    update_id, document=None, photo=None, caption=None, chat_id=7
+):
+    """A getUpdates payload entry carrying a file message (the ``/attach``
+    channel): a ``document`` (file_id/file_name/mime_type/file_size) or a
+    ``photo`` (a list of PhotoSizes), with the command channel riding in
+    the ``caption`` (Telegram file messages have no ``text``)."""
+    message = {"message_id": 1, "chat": {"id": chat_id}}
+    if document is not None:
+        message["document"] = document
+    if photo is not None:
+        message["photo"] = photo
+    if caption is not None:
+        message["caption"] = caption
+    return {"update_id": update_id, "message": message}
+
+
+def document_update(
+    update_id,
+    caption=None,
+    chat_id=7,
+    file_name="notes.md",
+    mime_type="text/markdown",
+    file_size=10,
+    file_id="DOC-1",
+):
+    """A document message with sensible defaults (a small markdown file)."""
+    return file_message_update(
+        update_id,
+        document={
+            "file_id": file_id,
+            "file_name": file_name,
+            "mime_type": mime_type,
+            "file_size": file_size,
+        },
+        caption=caption,
+        chat_id=chat_id,
+    )
+
+
+def photo_update(update_id, caption=None, chat_id=7):
+    """A photo message with three PhotoSizes (the bot must take the
+    largest — the last element's ``file_id``)."""
+    return file_message_update(
+        update_id,
+        photo=[
+            {"file_id": "PHOTO-S", "file_size": 100},
+            {"file_id": "PHOTO-M", "file_size": 1000},
+            {"file_id": "PHOTO-L", "file_size": 10000},
+        ],
+        caption=caption,
+        chat_id=chat_id,
+    )
+
+
 def callback_update(update_id, data, chat_id=7, message_id=1):
     """A getUpdates payload entry carrying an inline-keyboard callback.
 
@@ -115,16 +170,22 @@ class Script:
     bodies; ``edited`` records editMessageText bodies; ``command_requests``
     records (method, body) tuples for setMyCommands / getMyCommands /
     deleteMyCommands; ``allowed_updates`` records the allowed_updates of every
-    getUpdates call; ``offsets`` the getUpdates offsets.
+    getUpdates call; ``offsets`` the getUpdates offsets. ``file_gets``
+    records the file ids passed to getFile; ``file_downloads`` the URL paths
+    requested from the file CDN (``/file/bot<token>/<path>``), served with
+    the ``file_bytes`` argument (a 404 when it is None).
     """
 
-    def __init__(self, get_updates, get_me_ok=True, fail_once_with=None, fail_set_my_commands=False):
+    def __init__(self, get_updates, get_me_ok=True, fail_once_with=None, fail_set_my_commands=False, file_bytes=None):
         self.get_updates = list(get_updates)
         self.get_me_ok = get_me_ok
         self.fail_once_with = fail_once_with
         self.failed_once = False
         self.fail_set_my_commands = fail_set_my_commands
         self.failed_set_my_commands = False
+        self.file_bytes = file_bytes
+        self.file_gets = []
+        self.file_downloads = []
         self.sent = []
         self.sent_files = []
         self.answered = []
@@ -138,7 +199,30 @@ class Script:
         if self.fail_once_with is not None and not self.failed_once:
             self.failed_once = True
             raise self.fail_once_with
+        # The file CDN: a plain GET of /file/bot<token>/<path> (no JSON
+        # body), served with file_bytes (a 404 when none was configured).
+        if request.url.path.startswith("/file/"):
+            self.file_downloads.append(request.url.path)
+            if self.file_bytes is None:
+                return httpx.Response(404, text="no file configured")
+            return httpx.Response(200, content=self.file_bytes)
         method = request.url.path.rsplit("/", 1)[-1]
+        if method == "getFile":
+            body = json.loads(request.content)
+            self.file_gets.append(body.get("file_id"))
+            file_size = len(self.file_bytes) if self.file_bytes is not None else 10
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "result": {
+                        "file_id": body.get("file_id"),
+                        "file_unique_id": "UNIQ-1",
+                        "file_size": file_size,
+                        "file_path": "cdn/path/FILE-1",
+                    },
+                },
+            )
         if method in ("sendDocument", "sendPhoto"):
             fields, files = parse_multipart(request)
             field = "document" if method == "sendDocument" else "photo"
@@ -215,7 +299,8 @@ class Script:
 
 
 def run_bot_until_stop(
-    script, dispatch=None, on_cycle=None, error_delay=0.01, callback_dispatch=None
+    script, dispatch=None, on_cycle=None, error_delay=0.01, callback_dispatch=None,
+    build_dispatch=None,
 ):
     """Run run_bot against the script until the script drains (sets stop).
 
@@ -224,19 +309,26 @@ def run_bot_until_stop(
     dispatcher for store-backed commands. ``on_cycle`` is passed through to
     ``run_bot`` (the state-change notifier hook); ``callback_dispatch`` the
     callback_query dispatcher (None → the out-of-date toast safety net).
+    ``build_dispatch`` — when given — is a callback receiving the internal
+    :class:`telegram_bot.BotAPI` instance (bound to the same mock
+    transport) and returning the dispatch callable; it is how a test wires
+    ``make_dispatch(store, auth, api=api)`` so the dispatch layer's async
+    file handler downloads through the mock (the production wiring is
+    ``_amain``'s ``make_dispatch(store, auth, api=api)``).
     """
     script.stop = asyncio.Event()
-    if dispatch is None:
-        def dispatch(text, chat_id=None):
+    if dispatch is None and build_dispatch is None:
+        def dispatch(text, chat_id=None, file=None):
             return telegram_bot.reply_for(text)
 
     async def go():
         client = make_client(script.handler)
         api = telegram_bot.BotAPI(BOT_TOKEN, client=client)
         try:
+            d = build_dispatch(api) if build_dispatch is not None else dispatch
             await telegram_bot.run_bot(
                 api,
-                dispatch,
+                d,
                 stop_event=script.stop,
                 poll_timeout=1,
                 error_delay=error_delay,
@@ -502,7 +594,7 @@ def test_run_bot_preset_stop_returns_without_polling():
     stop = asyncio.Event()
     stop.set()
 
-    def dispatch(text, chat_id=None):
+    def dispatch(text, chat_id=None, file=None):
         return telegram_bot.reply_for(text)
 
     asyncio.run(telegram_bot.run_bot(api, dispatch, stop_event=stop))
@@ -535,7 +627,7 @@ def test_stop_event_interrupts_in_flight_poll():
     api = telegram_bot.BotAPI(BOT_TOKEN, client=client)
     stop = asyncio.Event()
 
-    def dispatch(text, chat_id=None):
+    def dispatch(text, chat_id=None, file=None):
         return telegram_bot.reply_for(text)
 
     async def go():
@@ -2415,6 +2507,604 @@ def test_help_mentions_add():
     assert "/add" in telegram_bot.HELP_TEXT
 
 
+# --- /describe (store-backed dispatch, write) ---------------------------------
+
+
+def test_describe_number_form_sets_and_overwrites(store):
+    """The number form sets the description; a second call replaces it
+    (replace, not append) and the new text shows up in the /task view."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    script = run_bot_until_stop(
+        Script(
+            [
+                [message_update(750, "/describe yask 1 first description")],
+                [message_update(751, "/describe yask 1 second description")],
+                [message_update(752, "/task yask 1")],
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 3
+    # the confirmation carries the exact two-row keyboard (the #92 shape)
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 the bug", "callback_data": f"t:{pid}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
+    assert script.sent[0]["text"] == (
+        f"Set the description of #1 'the bug' "
+        f"({len('first description')} chars). "
+        "Use /task yask 1 to view it."
+    )
+    assert script.sent[1]["text"] == (
+        f"Set the description of #1 'the bug' "
+        f"({len('second description')} chars). "
+        "Use /task yask 1 to view it."
+    )
+    # replace semantics: the second call overwrote the first
+    assert store.get_task(pid, 1)["description"] == "second description"
+    # and the /task detail view shows the new text, not the old one
+    assert "Description:" in script.sent[2]["text"]
+    assert "second description" in script.sent[2]["text"]
+    assert "first description" not in script.sent[2]["text"]
+
+
+def test_describe_title_form_unique_resolves(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    script = run_bot_until_stop(
+        Script([[message_update(753, "/describe yask the bug some notes")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    assert script.sent[0]["text"] == (
+        "Set the description of #1 'the bug' (10 chars). "
+        "Use /task yask 1 to view it."
+    )
+    assert store.get_task(pid, 1)["description"] == "some notes"
+
+
+def test_describe_title_form_longest_prefix_wins(store):
+    """Titles 'fix bug' and 'fix bug today': '/describe ... fix bug later
+    today' splits at the longest prefix with a unique match ('fix bug'),
+    leaving 'later today' as the description."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "fix bug")
+    store.create_task(pid, "fix bug today")
+    script = run_bot_until_stop(
+        Script(
+            [[message_update(754, "/describe yask fix bug later today")]],
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    assert script.sent[0]["text"] == (
+        "Set the description of #1 'fix bug' (11 chars). "
+        "Use /task yask 1 to view it."
+    )
+    assert store.get_task(pid, 1)["description"] == "later today"
+    assert store.get_task(pid, 2)["description"] == ""
+
+
+def test_describe_ambiguous_title_disambiguates(store):
+    """Two equal titles: the disambiguation list, nothing is written."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "dup")
+    store.create_task(pid, "dup")
+    script = run_bot_until_stop(
+        Script([[message_update(755, "/describe yask dup hello world")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    assert script.sent[0]["text"] == (
+        "Several tasks in yask match 'dup':\n"
+        "  #1 dup — Backlog\n"
+        "  #2 dup — Backlog\n"
+        "Use /task yask <number>."
+    )
+    assert "reply_markup" not in script.sent[0]
+    assert store.get_task(pid, 1)["description"] == ""
+    assert store.get_task(pid, 2)["description"] == ""
+
+
+def test_describe_usage_and_not_found(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    script = run_bot_until_stop(
+        Script(
+            [
+                [message_update(756, "/describe")],
+                [message_update(757, "/describe yask")],
+                [message_update(758, "/describe yask the bug")],
+                [message_update(759, "/describe nope thing")],
+                [message_update(760, "/describe yask 999 hello")],
+                [message_update(761, "/describe yask no such task hello")],
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 6
+    assert script.sent[0]["text"] == telegram_bot.DESCRIBE_USAGE_TEXT
+    assert script.sent[1]["text"] == telegram_bot.DESCRIBE_USAGE_TEXT
+    # a resolved reference with no description words left is also a usage
+    assert script.sent[2]["text"] == telegram_bot.DESCRIBE_USAGE_TEXT
+    assert script.sent[3]["text"] == (
+        "Project 'nope' not found. Use /projects to list projects."
+    )
+    assert script.sent[4]["text"] == "Task #999 not found in yask."
+    # the title form quotes the first word (the project-not-found convention)
+    assert script.sent[5]["text"] == "Task 'no' not found in yask."
+    # nothing was written
+    assert store.get_task(pid, 1)["description"] == ""
+
+
+def test_describe_requires_auth(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    store.add_telegram_user(7, "pw")
+    auth = telegram_bot.Auth(store)
+    script = run_bot_until_stop(
+        Script([[message_update(762, "/describe yask 1 secret")]]),
+        dispatch=telegram_bot.make_dispatch(store, auth),
+    )
+    assert script.sent[0]["text"] == telegram_bot.AUTH_REQUIRED_TEXT
+    assert store.get_task(pid, 1)["description"] == ""
+
+
+def test_describe_store_failure_replies_and_recovers(store, monkeypatch):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+
+    def boom(project_id, number, **kwargs):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "update_task", boom)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    message_update(763, "/describe yask 1 hello"),
+                    message_update(764, "/start"),
+                ]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 2
+    assert script.sent[0]["text"] == telegram_bot.DESCRIBE_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+    assert store.get_task(pid, 1)["description"] == ""
+
+
+def test_help_mentions_describe():
+    assert "/describe" in telegram_bot.HELP_TEXT
+
+
+# --- /attach (caption flow, async file handler) --------------------------------
+
+
+def _attach_build(store, auth=None):
+    """The build_dispatch seam wiring: the production _amain wiring
+    (make_dispatch(store, auth, api=api)) against the mock transport."""
+    return lambda api: telegram_bot.make_dispatch(store, auth, api=api)
+
+
+def test_attach_document_upload(store):
+    """A captioned document: getFile + the CDN download are both made, the
+    store row has the uploaded bytes / file_name / declared mime_type, and
+    the confirmation carries the task button plus the Main-menu row."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    body = b"# plan\n\nthe content"
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    document_update(
+                        801,
+                        caption="/attach yask 1",
+                        file_name="plan.md",
+                        mime_type="text/markdown",
+                        file_size=len(body),
+                    )
+                ]
+            ],
+            file_bytes=body,
+        ),
+        build_dispatch=_attach_build(store),
+    )
+    assert script.file_gets == ["DOC-1"]
+    assert script.file_downloads == [f"/file/bot{BOT_TOKEN}/cdn/path/FILE-1"]
+    attachments = store.list_attachments(pid, 1)
+    assert len(attachments) == 1
+    assert attachments[0]["filename"] == "plan.md"
+    assert attachments[0]["content_type"] == "text/markdown"
+    assert attachments[0]["size"] == len(body)
+    meta, data = store.get_task_attachment(pid, 1, attachments[0]["id"])
+    assert data == body
+    assert meta["filename"] == "plan.md"
+    assert len(script.sent) == 1
+    assert script.sent[0]["text"] == (
+        f"Attached 'plan.md' to #1 'the bug' "
+        f"({telegram_bot._human_size(len(body))})."
+    )
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 the bug", "callback_data": f"t:{pid}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
+
+
+def test_attach_photo_upload_takes_largest_size(store):
+    """A captioned photo: the largest PhotoSize's file_id is fetched; the
+    store row is photo.jpg / image/jpeg."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    body = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
+    script = run_bot_until_stop(
+        Script([[photo_update(802, caption="/attach yask 1")]], file_bytes=body),
+        build_dispatch=_attach_build(store),
+    )
+    # the largest PhotoSize (the last element) is the one fetched
+    assert script.file_gets == ["PHOTO-L"]
+    assert script.file_downloads == [f"/file/bot{BOT_TOKEN}/cdn/path/FILE-1"]
+    attachments = store.list_attachments(pid, 1)
+    assert len(attachments) == 1
+    assert attachments[0]["filename"] == "photo.jpg"
+    assert attachments[0]["content_type"] == "image/jpeg"
+    assert attachments[0]["size"] == len(body)
+    assert script.sent[0]["text"] == (
+        f"Attached 'photo.jpg' to #1 'the bug' "
+        f"({telegram_bot._human_size(len(body))})."
+    )
+
+
+def test_attach_disallowed_type_no_download(store):
+    """A type outside the store's allowlist is refused with a clear reply —
+    before any getFile or download, and nothing is stored."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    document_update(
+                        803,
+                        caption="/attach yask 1",
+                        file_name="doc.pdf",
+                        mime_type="application/pdf",
+                        file_size=500,
+                    ),
+                    document_update(
+                        804,
+                        caption="/attach yask 1",
+                        file_name="movie.mp4",
+                        mime_type="video/mp4",
+                        file_size=500,
+                    ),
+                ]
+            ],
+        ),
+        build_dispatch=_attach_build(store),
+    )
+    assert len(script.sent) == 2
+    assert "application/pdf" in script.sent[0]["text"]
+    assert "not allowed" in script.sent[0]["text"]
+    assert "video/mp4" in script.sent[1]["text"]
+    assert "not allowed" in script.sent[1]["text"]
+    assert script.file_gets == []
+    assert script.file_downloads == []
+    assert store.list_attachments(pid, 1) == []
+
+
+def test_attach_oversized_no_download(store):
+    """A declared size above the 10 MB cap is refused with a clear reply —
+    no getFile, no download, nothing stored."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    document_update(
+                        805,
+                        caption="/attach yask 1",
+                        file_name="big.md",
+                        mime_type="text/markdown",
+                        file_size=11 * 1024 * 1024,
+                    )
+                ]
+            ],
+        ),
+        build_dispatch=_attach_build(store),
+    )
+    assert len(script.sent) == 1
+    assert "too large" in script.sent[0]["text"]
+    assert "10 MB" in script.sent[0]["text"]
+    assert script.file_gets == []
+    assert script.file_downloads == []
+    assert store.list_attachments(pid, 1) == []
+
+
+def test_attach_caption_variants(store):
+    """No caption → usage; a caption of another command → the unknown
+    hint; /attach with no args → usage. None of them downloads."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    script = run_bot_until_stop(
+        Script(
+            [
+                [document_update(806, caption=None)],
+                [document_update(807, caption="/tasks")],
+                [document_update(808, caption="/attach")],
+            ]
+        ),
+        build_dispatch=_attach_build(store),
+    )
+    assert len(script.sent) == 3
+    assert script.sent[0]["text"] == telegram_bot.ATTACH_USAGE_TEXT
+    assert script.sent[1]["text"] == telegram_bot.UNKNOWN_HINT
+    assert script.sent[2]["text"] == telegram_bot.ATTACH_USAGE_TEXT
+    assert script.file_gets == []
+    assert script.file_downloads == []
+    assert store.list_attachments(pid, 1) == []
+
+
+def test_attach_resolution_failures_no_download(store):
+    """Unknown project / unknown task / ambiguous title: the command path's
+    not-found and disambiguation texts pass through, and nothing is
+    downloaded or stored."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    store.create_task(pid, "dup")
+    store.create_task(pid, "dup")
+    script = run_bot_until_stop(
+        Script(
+            [
+                [document_update(809, caption="/attach nope 1")],
+                [document_update(810, caption="/attach yask 999")],
+                [document_update(811, caption="/attach yask dup")],
+            ]
+        ),
+        build_dispatch=_attach_build(store),
+    )
+    assert len(script.sent) == 3
+    assert script.sent[0]["text"] == (
+        "Project 'nope' not found. Use /projects to list projects."
+    )
+    assert script.sent[1]["text"] == "Task #999 not found in yask."
+    assert script.sent[2]["text"] == (
+        "Several tasks in yask match 'dup':\n"
+        "  #2 dup — Backlog\n"
+        "  #3 dup — Backlog\n"
+        "Use /task yask <number>."
+    )
+    assert script.file_gets == []
+    assert script.file_downloads == []
+    assert store.list_attachments(pid, 1) == []
+
+
+def test_attach_requires_auth(store):
+    """An unauthenticated chat gets the auth notice — no resolution, no
+    download, no store row."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    store.add_telegram_user(7, "pw")
+    auth = telegram_bot.Auth(store)
+    script = run_bot_until_stop(
+        Script(
+            [[document_update(812, caption="/attach yask 1")]],
+            file_bytes=b"secret",
+        ),
+        build_dispatch=_attach_build(store, auth),
+    )
+    assert script.sent[0]["text"] == telegram_bot.AUTH_REQUIRED_TEXT
+    assert script.file_gets == []
+    assert script.file_downloads == []
+    assert store.list_attachments(pid, 1) == []
+
+
+def test_attach_typed_as_text_gets_usage(store):
+    """Typing /attach as a plain text message (no file) answers the usage
+    text through the command table row."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    script = run_bot_until_stop(
+        Script(
+            [
+                [message_update(813, "/attach")],
+                [message_update(814, "/attach yask 1")],
+            ]
+        ),
+        build_dispatch=_attach_build(store),
+    )
+    assert len(script.sent) == 2
+    assert script.sent[0]["text"] == telegram_bot.ATTACH_USAGE_TEXT
+    assert script.sent[1]["text"] == telegram_bot.ATTACH_USAGE_TEXT
+    assert store.list_attachments(pid, 1) == []
+
+
+def test_attach_without_api_answers_error_text(store):
+    """A dispatch built without a BotAPI cannot download: the attach error
+    text, no getFile."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    script = run_bot_until_stop(
+        Script([[document_update(815, caption="/attach yask 1")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == telegram_bot.ATTACH_ERROR_TEXT
+    assert script.file_gets == []
+    assert script.file_downloads == []
+    assert store.list_attachments(pid, 1) == []
+
+
+def test_attach_download_failure_replies_error(store):
+    """A failed CDN download (404 → BotAPIError) answers the attach error
+    text; nothing is stored."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    # file_bytes unset → the mock CDN answers 404
+    script = run_bot_until_stop(
+        Script([[document_update(816, caption="/attach yask 1")]]),
+        build_dispatch=_attach_build(store),
+    )
+    assert script.sent[0]["text"] == telegram_bot.ATTACH_ERROR_TEXT
+    assert script.file_gets == ["DOC-1"]
+    assert len(script.file_downloads) == 1
+    assert store.list_attachments(pid, 1) == []
+
+
+def test_attach_missing_metadata_falls_back_and_is_rejected(store):
+    """A document with no file_name / mime_type / size: the octet-stream
+    fallback is then refused by the allowlist — a clear reply, no download."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    file_message_update(
+                        817,
+                        document={"file_id": "DOC-2"},
+                        caption="/attach yask 1",
+                    )
+                ]
+            ],
+        ),
+        build_dispatch=_attach_build(store),
+    )
+    assert len(script.sent) == 1
+    assert "application/octet-stream" in script.sent[0]["text"]
+    assert "not allowed" in script.sent[0]["text"]
+    assert script.file_gets == []
+    assert script.file_downloads == []
+    assert store.list_attachments(pid, 1) == []
+
+
+def test_attach_missing_size_backstopped_by_store_cap(store):
+    """When Telegram omits file_size the pre-check is skipped; the store's
+    10 MB cap still rejects the downloaded bytes (the attach error text)."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    body = b"x" * (Store.MAX_ATTACHMENT_SIZE + 1)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    document_update(
+                        818,
+                        caption="/attach yask 1",
+                        file_size=None,
+                    )
+                ]
+            ],
+            file_bytes=body,
+        ),
+        build_dispatch=_attach_build(store),
+    )
+    assert script.sent[0]["text"] == telegram_bot.ATTACH_ERROR_TEXT
+    assert script.file_gets == ["DOC-1"]
+    assert store.list_attachments(pid, 1) == []
+
+
+def test_main_wires_file_handler_end_to_end(tmp_path):
+    """The production wiring: main() passes the BotAPI into make_dispatch,
+    so a captioned document uploaded to the bot's own store gets attached
+    (without the api=api hand-off this answers the attach error text)."""
+    conn = db.connect(tmp_path / "yask.db")
+    seed = Store(conn)
+    pid = seed.create_project("yask")["id"]
+    seed.create_task(pid, "the bug")
+    seed.add_telegram_user(7, "pw")
+    conn.close()
+
+    body = b"hello attachment"
+    script = Script(
+        [
+            # the file handler is auth-gated: log in first
+            [message_update(919, "/login pw")],
+            [
+                document_update(
+                    920,
+                    caption="/attach yask 1",
+                    file_name="note.md",
+                    mime_type="text/markdown",
+                    file_size=len(body),
+                )
+            ],
+        ],
+        file_bytes=body,
+    )
+    script.stop = asyncio.Event()
+    client = make_client(script.handler)
+    code = telegram_bot.main(
+        BOT_TOKEN, tmp_path, client=client, stop_event=script.stop
+    )
+    assert code == 0
+    assert script.file_gets == ["DOC-1"]
+    assert len(script.file_downloads) == 1
+    assert len(script.sent) == 2
+    assert script.sent[0]["text"] == telegram_bot.LOGIN_OK_TEXT
+    assert script.sent[1]["text"] == (
+        f"Attached 'note.md' to #1 'the bug' "
+        f"({telegram_bot._human_size(len(body))})."
+    )
+    conn = db.connect(tmp_path / "yask.db")
+    try:
+        store = Store(conn)
+        attachments = store.list_attachments(pid, 1)
+        assert [a["filename"] for a in attachments] == ["note.md"]
+        assert attachments[0]["content_type"] == "text/markdown"
+        meta, data = store.get_task_attachment(pid, 1, attachments[0]["id"])
+        assert data == body
+    finally:
+        conn.close()
+
+
+def test_sticker_message_still_ignored():
+    """Non-media, non-text updates get no reply (as before the /attach
+    file handler)."""
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    {
+                        "update_id": 819,
+                        "message": {
+                            "message_id": 1,
+                            "chat": {"id": 7},
+                            "sticker": {"file_id": "STK-1"},
+                        },
+                    }
+                ]
+            ]
+        )
+    )
+    assert script.sent == []
+    assert script.sent_files == []
+    assert script.file_downloads == []
+
+
+def test_help_and_command_menu_include_describe_and_attach():
+    """Registry-driven: both new commands are in /help and in the
+    setMyCommands payload (and in the dispatch table's gated set)."""
+    assert "/describe" in telegram_bot.HELP_TEXT
+    assert "/attach" in telegram_bot.HELP_TEXT
+    names = [
+        e["command"]
+        for e in telegram_bot.build_my_commands(telegram_bot.COMMAND_REGISTRY)
+    ]
+    assert "/describe" in names
+    assert "/attach" in names
+    assert set(telegram_bot.COMMAND_TABLE) == {
+        c.name for c in telegram_bot.COMMAND_REGISTRY if c.auth_gated
+    }
+
+
 # --- /subscribe, /unsubscribe (store-backed dispatch) ------------------------
 
 
@@ -2567,7 +3257,8 @@ def test_help_mentions_subscribe():
 
 _REGISTRY_NAMES = (
     "/start", "/help", "/login", "/whoami", "/projects", "/tasks", "/task",
-    "/attachment", "/move", "/add", "/subscribe", "/unsubscribe",
+    "/attachment", "/move", "/add", "/describe", "/attach", "/subscribe",
+    "/unsubscribe",
 )
 
 
@@ -2626,8 +3317,10 @@ def test_dispatch_table_error_texts_match_family_constants():
         "/tasks": telegram_bot.TASKS_ERROR_TEXT,
         "/task": telegram_bot.TASK_ERROR_TEXT,
         "/attachment": telegram_bot.ATTACHMENT_ERROR_TEXT,
+        "/attach": telegram_bot.ATTACH_ERROR_TEXT,
         "/move": telegram_bot.MOVE_ERROR_TEXT,
         "/add": telegram_bot.ADD_ERROR_TEXT,
+        "/describe": telegram_bot.DESCRIBE_ERROR_TEXT,
         "/subscribe": telegram_bot.SUBSCRIBE_ERROR_TEXT,
         "/unsubscribe": telegram_bot.UNSUBSCRIBE_ERROR_TEXT,
     }
@@ -2712,11 +3405,11 @@ def test_startup_posts_registry_commands_via_setmycommands(tmp_path):
     assert body["commands"] == telegram_bot.build_my_commands(
         telegram_bot.COMMAND_REGISTRY
     )
-    # strong exactness: registry names in order, all 12, well-formed entries
+    # strong exactness: registry names in order, all 14, well-formed entries
     assert [e["command"] for e in body["commands"]] == [
         c.name for c in telegram_bot.COMMAND_REGISTRY
     ]
-    assert len(body["commands"]) == 12
+    assert len(body["commands"]) == 14
     for entry in body["commands"]:
         assert set(entry) == {"command", "description"}
 
@@ -3391,7 +4084,7 @@ def test_callback_api_error_survived():
         try:
             await telegram_bot.run_bot(
                 api,
-                lambda text, chat_id=None: telegram_bot.reply_for(text),
+                lambda text, chat_id=None, file=None: telegram_bot.reply_for(text),
                 stop_event=script.stop,
                 poll_timeout=1,
                 error_delay=0.01,
