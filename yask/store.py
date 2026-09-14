@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 import re
 import secrets
 import sqlite3
@@ -507,8 +508,11 @@ class Store:
         ttype = self._type_by_name(type)
         if ttype is None:
             raise ValidationError(f"unknown task type '{type}'")
-        if estimate is not None and estimate < 0:
-            raise ValidationError("estimate must not be negative")
+        if estimate is not None:
+            if not math.isfinite(estimate):
+                raise ValidationError("estimate must be a finite number")
+            if estimate < 0:
+                raise ValidationError("estimate must not be negative")
         if ttype["is_epic"] and estimate is not None:
             raise ValidationError(
                 "epics are not estimated; their estimate is the sum of contained tasks"
@@ -848,8 +852,11 @@ class Store:
             if new_type is None:
                 raise ValidationError(f"unknown task type '{type}'")
             ttype = new_type
-        if estimate is not None and estimate < 0:
-            raise ValidationError("estimate must not be negative")
+        if estimate is not None:
+            if not math.isfinite(estimate):
+                raise ValidationError("estimate must be a finite number")
+            if estimate < 0:
+                raise ValidationError("estimate must not be negative")
         if ttype["is_epic"] and estimate is not None:
             raise ValidationError("epics are not estimated")
 

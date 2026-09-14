@@ -755,3 +755,36 @@ def test_single_task_path_matches_batched_project_path(store, project):
         single = store.get_task(pid, number)
         batched = {k: v for k, v in by_number[number].items() if k != "children"}
         assert single == batched
+
+
+# -- estimate validation (#88: NaN / ±inf must never be stored) -------------------
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), -1.0])
+def test_create_task_rejects_non_finite_and_negative_estimates(store, project, bad):
+    with pytest.raises(ValidationError):
+        store.create_task(project["id"], "t", estimate=bad)
+
+
+@pytest.mark.parametrize("good", [0, 0.5, 3])
+def test_create_task_accepts_finite_non_negative_estimates(store, project, good):
+    t = store.create_task(project["id"], "t", estimate=good)
+    assert t["estimate"] == good
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), -1.0])
+def test_update_task_rejects_non_finite_and_negative_estimates(store, project, bad):
+    t = store.create_task(project["id"], "t", estimate=2.0)
+    with pytest.raises(ValidationError):
+        store.update_task(project["id"], t["number"], estimate=bad)
+    # the rejected value is not stored
+    assert store.get_task(project["id"], t["number"])["estimate"] == 2.0
+
+
+def test_nan_estimate_does_not_poison_epic_total(store, project):
+    pid = project["id"]
+    epic = store.create_task(pid, "epic", type="Epic")
+    store.create_task(pid, "child", estimate=3.0, parent_number=epic["number"])
+    with pytest.raises(ValidationError):
+        store.create_task(pid, "bad", estimate=float("nan"), parent_number=epic["number"])
+    assert store.get_task(pid, epic["number"])["estimate_total"] == 3.0

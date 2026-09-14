@@ -73,6 +73,50 @@ def test_create_task_ignores_state_field(client, pid):
     assert r.json()["state"] == "Backlog"
 
 
+# -- estimate validation (#88: NaN / ±inf must never be stored) -------------------
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf"])
+def test_create_task_rejects_non_finite_estimate_strings(client, pid, bad):
+    # pydantic v2 lax mode coerces these JSON strings to float — the store
+    # must reject them, not store them
+    r = client.post(f"/api/projects/{pid}/tasks", json={"title": "t", "estimate": bad})
+    assert r.status_code == 400
+
+
+def test_create_task_rejects_bare_nan_literal(client, pid):
+    # starlette's json.loads also accepts bare NaN/Infinity literals
+    r = client.post(
+        f"/api/projects/{pid}/tasks",
+        content='{"title": "t", "estimate": NaN}',
+        headers={"Content-Type": "application/json"},
+    )
+    assert r.status_code == 400
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf"])
+def test_update_task_rejects_non_finite_estimates(client, pid, bad):
+    t = client.post(f"/api/projects/{pid}/tasks", json={"title": "t", "estimate": 2})
+    n = t.json()["number"]
+    r = client.patch(f"/api/projects/{pid}/tasks/{n}", json={"estimate": bad})
+    assert r.status_code == 400
+    assert client.get(f"/api/projects/{pid}/tasks/{n}").json()["estimate"] == 2
+
+
+def test_rejected_nan_does_not_poison_epic_total(client, pid):
+    epic = client.post(
+        f"/api/projects/{pid}/tasks", json={"title": "epic", "type": "Epic"}
+    ).json()
+    child = client.post(
+        f"/api/projects/{pid}/tasks",
+        json={"title": "child", "type": "Story", "estimate": 3,
+              "parent_number": epic["number"]},
+    ).json()
+    r = client.patch(f"/api/projects/{pid}/tasks/{child['number']}", json={"estimate": "nan"})
+    assert r.status_code == 400
+    assert client.get(f"/api/projects/{pid}/tasks/{epic['number']}").json()["estimate_total"] == 3
+
+
 def test_move_confirmation_flow(client, pid):
     client.post(f"/api/projects/{pid}/tasks", json={"title": "main"})
     client.post(f"/api/projects/{pid}/tasks", json={"title": "prereq"})

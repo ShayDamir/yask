@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 
+import pytest
 from mcp.types import ImageContent, TextContent
 
 from yask.mcp_server import build_server
@@ -397,6 +398,24 @@ def test_update_task_type_via_mcp(store, project):
     data = json.loads(texts(res)[0].text)
     assert data["type"] == "Bug"
     assert store.get_task(project["id"], t["number"])["type"] == "Bug"
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_create_task_rejects_non_finite_estimate_via_mcp(store, project, bad):
+    res = call(store, "create_task", project=project["name"], title="t", estimate=bad)
+    data = json.loads(texts(res)[0].text)
+    assert data["ok"] is False
+    assert data["error"]
+
+
+def test_update_task_rejects_non_finite_estimate_via_mcp(store, project):
+    t = store.create_task(project["id"], "t", estimate=2.0)
+    res = call(store, "update_task", project=project["name"],
+               number=t["number"], estimate=float("nan"))
+    data = json.loads(texts(res)[0].text)
+    assert data["ok"] is False
+    # the rejected value is not stored
+    assert store.get_task(project["id"], t["number"])["estimate"] == 2.0
 
 
 def test_update_task_omitting_parent_preserves_parent(store, project):
