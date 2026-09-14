@@ -2383,6 +2383,33 @@ def test_help_and_registry_have_same_command_set():
     assert rendered == [c.name for c in telegram_bot.COMMAND_REGISTRY]
 
 
+def test_dispatch_table_covers_exactly_gated_registry_commands():
+    # The dispatch table is verified against the registry at import
+    # (telegram_bot._verify_dispatch_table); this test pins the same
+    # invariant from the test side: COMMAND_TABLE holds exactly the
+    # registry's auth_gated commands — no more, no fewer.
+    gated = {c.name for c in telegram_bot.COMMAND_REGISTRY if c.auth_gated}
+    assert set(telegram_bot.COMMAND_TABLE) == gated
+
+
+def test_dispatch_table_error_texts_match_family_constants():
+    # Each table row's error text is the per-command family constant, so
+    # a store failure on a command keeps replying with its own error
+    # text (the old if-chain's per-command except clauses).
+    expected = {
+        "/projects": telegram_bot.PROJECTS_ERROR_TEXT,
+        "/tasks": telegram_bot.TASKS_ERROR_TEXT,
+        "/task": telegram_bot.TASK_ERROR_TEXT,
+        "/attachment": telegram_bot.ATTACHMENT_ERROR_TEXT,
+        "/move": telegram_bot.MOVE_ERROR_TEXT,
+        "/add": telegram_bot.ADD_ERROR_TEXT,
+        "/subscribe": telegram_bot.SUBSCRIBE_ERROR_TEXT,
+        "/unsubscribe": telegram_bot.UNSUBSCRIBE_ERROR_TEXT,
+    }
+    actual = {cmd: row[1] for cmd, row in telegram_bot.COMMAND_TABLE.items()}
+    assert actual == expected
+
+
 # --- command menu (setMyCommands, #66) ----------------------------------------
 
 

@@ -112,11 +112,12 @@ START_TEXT = (
 
 # The single command registry: the source of truth for what this bot offers.
 # A command's name, one-line description and auth-gate flag live in exactly
-# one place. HELP_TEXT (:func:`render_help`) is derived from it, and the menu
-# payload (setMyCommands, #65) will be derived from it too, so help and the
-# command menu can never diverge. The dispatch table (COMMANDS /
-# make_dispatch) lists the same commands today but is refactored to read from
-# this registry in a separate follow-up task; until then the two coexist.
+# one place. HELP_TEXT (:func:`render_help`), the command menu payload
+# (setMyCommands, #65) and the dispatch table (:data:`COMMAND_TABLE`,
+# consumed by make_dispatch) all derive from it: the dispatch table is
+# verified against the registry's auth-gated set at import
+# (:func:`_verify_dispatch_table`), so help, menu and dispatch can never
+# diverge.
 
 @dataclass(frozen=True)
 class Command:
@@ -748,14 +749,14 @@ def help_view() -> KeyboardReply:
 
 # Static command table: the ungated entry points, now
 # KeyboardReply-capable (#62) — /start the intro plus the hub's keyboard,
-# /help the command reference plus a Main-menu button. Store-backed
-# commands (today: /login, /whoami, /projects, /tasks, /task,
-# /attachment, /move, /add, /subscribe, /unsubscribe) live in
-# make_dispatch — the first two because they need the store and the auth
-# state, the rest because they read (or, for /move and /add, write) the
-# board; state-change notifications are pushed by the Notifier on every
-# poll cycle. Later features extend the dispatch layer without changing
-# the poll loop.
+# /help the command reference plus a Main-menu button. /login and /whoami
+# are explicit special cases in make_dispatch (they need the auth state
+# and the sender's own chat id); the other store-backed commands
+# (/projects, /tasks, /task, /attachment, /move, /add, /subscribe,
+# /unsubscribe) live in COMMAND_TABLE — they read (or, for /move and
+# /add, write) the board; state-change notifications are pushed by the
+# Notifier on every poll cycle. Later features extend the dispatch layer
+# without changing the poll loop.
 COMMANDS: dict[str, Reply] = {
     "/start": start_view(),
     "/help": help_view(),
@@ -1280,30 +1281,142 @@ def format_notification(change: dict) -> KeyboardReply:
     )
 
 
+# The dispatch table: one row per store-backed command — its handler
+# (uniform signature (store, text, chat_id): the board or subscription
+# view for the command) and the error text the dispatcher replies with
+# when the handler raises (the per-command family constant).
+# make_dispatch is table-driven over this: it tokenizes, special-cases
+# /login and /whoami (they need the auth state / the sender chat id),
+# gates the table's commands on auth, runs the handler in try/except and
+# falls back to reply_for. The import-time check below pins the table to
+# the registry's auth_gated set, so a command added to the registry
+# without a handler (or vice versa) fails the import instead of silently
+# never working.
+CommandHandler = Callable[[Store, Optional[str], Optional[int]], Reply]
+
+
+def _handle_projects(
+    store: Store, text: Optional[str], chat_id: Optional[int]
+) -> Reply:
+    """``/projects``: the project list view (arguments ignored)."""
+    return project_view(store)
+
+
+def _handle_tasks(
+    store: Store, text: Optional[str], chat_id: Optional[int]
+) -> Reply:
+    """``/tasks``: the tasks view for the (optional) project argument."""
+    return tasks_view(store, _tasks_arg(text))
+
+
+def _handle_task(
+    store: Store, text: Optional[str], chat_id: Optional[int]
+) -> Reply:
+    """``/task``: one task's detail view (keyboard form for a sender)."""
+    return task_view(store, _tasks_arg(text), chat_id)
+
+
+def _handle_attachment(
+    store: Store, text: Optional[str], chat_id: Optional[int]
+) -> Reply:
+    """``/attachment``: one of a task's attachments (text, photo or file)."""
+    return attachment_view(store, _tasks_arg(text))
+
+
+def _handle_move(
+    store: Store, text: Optional[str], chat_id: Optional[int]
+) -> Reply:
+    """``/move``: move a task to a state (confirm keyboard on cascades)."""
+    return move_view(store, _tasks_arg(text))
+
+
+def _handle_add(
+    store: Store, text: Optional[str], chat_id: Optional[int]
+) -> Reply:
+    """``/add``: create a task in the project's backlog."""
+    return add_view(store, _tasks_arg(text))
+
+
+def _handle_subscribe(
+    store: Store, text: Optional[str], chat_id: Optional[int]
+) -> Reply:
+    """``/subscribe``: subscribe the sender's chat (needs the chat id)."""
+    if chat_id is None:
+        return SUBSCRIBE_ERROR_TEXT
+    return subscribe_view(store, chat_id, _tasks_arg(text))
+
+
+def _handle_unsubscribe(
+    store: Store, text: Optional[str], chat_id: Optional[int]
+) -> Reply:
+    """``/unsubscribe``: stop the sender's chat's notifications
+    (needs the chat id)."""
+    if chat_id is None:
+        return UNSUBSCRIBE_ERROR_TEXT
+    return unsubscribe_view(store, chat_id, _tasks_arg(text))
+
+
+COMMAND_TABLE: dict[str, tuple[CommandHandler, str]] = {
+    "/projects": (_handle_projects, PROJECTS_ERROR_TEXT),
+    "/tasks": (_handle_tasks, TASKS_ERROR_TEXT),
+    "/task": (_handle_task, TASK_ERROR_TEXT),
+    "/attachment": (_handle_attachment, ATTACHMENT_ERROR_TEXT),
+    "/move": (_handle_move, MOVE_ERROR_TEXT),
+    "/add": (_handle_add, ADD_ERROR_TEXT),
+    "/subscribe": (_handle_subscribe, SUBSCRIBE_ERROR_TEXT),
+    "/unsubscribe": (_handle_unsubscribe, UNSUBSCRIBE_ERROR_TEXT),
+}
+
+
+def _verify_dispatch_table() -> None:
+    """Fail the import if COMMAND_TABLE and COMMAND_REGISTRY diverge.
+
+    The table must cover exactly the registry's auth_gated commands: a
+    gated command without a handler would silently never work (the old
+    dual-source-of-truth bug), and a handler for a command the registry
+    does not gate would run unauthenticated.
+    """
+    gated = {c.name for c in COMMAND_REGISTRY if c.auth_gated}
+    if set(COMMAND_TABLE) != gated:
+        raise ValueError(
+            "COMMAND_TABLE diverges from COMMAND_REGISTRY: "
+            f"unhandled gated commands: {sorted(gated - set(COMMAND_TABLE))}, "
+            f"handlers for unknown commands: {sorted(set(COMMAND_TABLE) - gated)}"
+        )
+
+
+_verify_dispatch_table()
+
+
 def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Optional[Reply]]:
     """Build the message→reply dispatcher for a bot bound to ``store``.
 
-    Store-backed commands (today: ``/login``, ``/whoami``, ``/projects``,
-    ``/tasks``, ``/task``, ``/attachment``, ``/move``, ``/add``,
-    ``/subscribe``, ``/unsubscribe``) read the board through ``store``;
-    the subscription
-    commands additionally need the sender's chat id, hence
-    ``dispatch(text, chat_id)``. Everything else falls back to the static
-    :func:`reply_for`. A failure reading (or writing) the store yields a
-    short error reply instead of crashing the long-poll loop. ``/task``
-    resolves to a text reply and ``/attachment`` to an inline text reply
-    (small text attachments) or a :class:`FileReply` (the attachment
-    bytes for a file send); a :class:`KeyboardReply` is the same
-    text-plus-keyboard shape for inline-keyboard views — ``/move``
+    Store-backed commands — the rows of :data:`COMMAND_TABLE`
+    (``/projects``, ``/tasks``, ``/task``, ``/attachment``, ``/move``,
+    ``/add``, ``/subscribe``, ``/unsubscribe``) — read the board through
+    ``store`` via their table handler; the subscription commands
+    additionally need the sender's chat id, hence
+    ``dispatch(text, chat_id)``. ``/login`` and ``/whoami`` are explicit
+    special cases before the table lookup (they need the auth state and
+    the sender's own chat id). Everything else falls back to the static
+    :func:`reply_for`. A failure reading (or writing) the store yields
+    the command's row error text instead of crashing the long-poll loop.
+    ``/task`` resolves to a text reply and ``/attachment`` to an inline
+    text reply (small text attachments) or a :class:`FileReply` (the
+    attachment bytes for a file send); a :class:`KeyboardReply` is the
+    same text-plus-keyboard shape for inline-keyboard views — ``/move``
     answers with one when the move would pull prerequisites along (the
     confirm/cancel keyboard, nothing applied until the ``c:`` button).
 
     Board access is gated by ``auth`` (an :class:`Auth`; the production
-    bot always passes one): the board commands answer unauthenticated
-    chats with :data:`AUTH_REQUIRED_TEXT` and no board data. ``/login``
-    (success/failure indistinguishable for unknown chats) and ``/whoami``
-    (the sender's own chat id) are ungated. Without an ``auth`` the
-    commands are open (the legacy, unauthenticated behavior).
+    bot always passes one): every :data:`COMMAND_TABLE` command answers
+    unauthenticated chats with :data:`AUTH_REQUIRED_TEXT` and no board
+    data — the gate covers exactly the registry's auth_gated commands
+    (:func:`_verify_dispatch_table` fails the import on any divergence).
+    ``/login`` (success/failure indistinguishable for unknown chats) and
+    ``/whoami`` (the sender's own chat id) are ungated. Without an
+    ``auth`` the commands are open (the legacy, unauthenticated
+    behavior).
     """
 
     def _authed(chat_id: Optional[int]) -> bool:
@@ -1336,61 +1449,15 @@ def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Op
             if chat_id is None:
                 return None  # no sender whose id could be shown
             return WHOAMI_TEXT.format(chat_id=chat_id)
-        if cmd in (
-            "/projects",
-            "/tasks",
-            "/task",
-            "/attachment",
-            "/move",
-            "/add",
-            "/subscribe",
-            "/unsubscribe",
-        ) and not _authed(chat_id):
+        if cmd in COMMAND_TABLE and not _authed(chat_id):
             return AUTH_REQUIRED_TEXT
-        if cmd == "/projects":
+        entry = COMMAND_TABLE.get(cmd)
+        if entry is not None:
+            handler, error_text = entry
             try:
-                return project_view(store)
+                return handler(store, text, chat_id)
             except Exception:
-                return PROJECTS_ERROR_TEXT
-        if cmd == "/tasks":
-            try:
-                return tasks_view(store, _tasks_arg(text))
-            except Exception:
-                return TASKS_ERROR_TEXT
-        if cmd == "/task":
-            try:
-                return task_view(store, _tasks_arg(text), chat_id)
-            except Exception:
-                return TASK_ERROR_TEXT
-        if cmd == "/attachment":
-            try:
-                return attachment_view(store, _tasks_arg(text))
-            except Exception:
-                return ATTACHMENT_ERROR_TEXT
-        if cmd == "/move":
-            try:
-                return move_view(store, _tasks_arg(text))
-            except Exception:
-                return MOVE_ERROR_TEXT
-        if cmd == "/add":
-            try:
-                return add_view(store, _tasks_arg(text))
-            except Exception:
-                return ADD_ERROR_TEXT
-        if cmd == "/subscribe":
-            if chat_id is None:
-                return SUBSCRIBE_ERROR_TEXT
-            try:
-                return subscribe_view(store, chat_id, _tasks_arg(text))
-            except Exception:
-                return SUBSCRIBE_ERROR_TEXT
-        if cmd == "/unsubscribe":
-            if chat_id is None:
-                return UNSUBSCRIBE_ERROR_TEXT
-            try:
-                return unsubscribe_view(store, chat_id, _tasks_arg(text))
-            except Exception:
-                return UNSUBSCRIBE_ERROR_TEXT
+                return error_text
         return reply_for(text)
 
     return dispatch
