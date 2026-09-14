@@ -113,7 +113,11 @@ would pull prerequisites along asks for confirmation via inline buttons
  first), `/describe <project> <number|title> <description>` (sets —
 replaces — a task's description; a numeric first word resolves the task
 by number, otherwise the longest title prefix match does, and the
-remaining words become the description) and `/attach <project>
+remaining words become the description), `/type <project>
+<number|title> <type>` (changes a task's type — one of the board's task
+types, matched case-insensitively; a numeric first word resolves the
+task by number, otherwise the longest title prefix match does, and the
+remaining words name the type) and `/attach <project>
 <number|title>` (attach a file to a task: send a document or a photo to
 the bot captioned `/attach <project> <number|title>` — the bot downloads
 the file and attaches it; allowed types are markdown/plain text and

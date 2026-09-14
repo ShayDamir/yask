@@ -36,7 +36,12 @@ inline buttons first, nothing is applied before the confirmation) and
  ``/describe <project> <number|title> <description>`` (sets — replaces —
   the task's description; the number form resolves strictly by number, the
   title form by longest unique title prefix, so the remaining words become
-  the description) and
+  the description),
+ ``/type <project> <number|title> <type>`` (changes the task's type —
+  one of the board's task types, matched case-insensitively — using the
+  same store write the web UI and MCP use; the number form resolves
+  strictly by number, the title form by longest unique title prefix, so
+  the remaining words name the type) and
  ``/attach <project> <number|title>`` (attach a file to a task: send a
   document or a photo to the bot whose caption is
   ``/attach <project> <number|title>`` — the bot downloads the file from
@@ -110,7 +115,7 @@ from typing import Any, Awaitable, Callable, Optional, Union
 import httpx
 
 from . import db
-from .store import NotFound, Store
+from .store import NotFound, Store, ValidationError
 
 # Bot API base URL. Overridable for tests/future (no env override needed now).
 DEFAULT_BASE_URL = "https://api.telegram.org"
@@ -203,6 +208,12 @@ COMMAND_REGISTRY: list[Command] = [
         "/describe",
         "set a task's description "
         "(/describe <project> <number|title> <description>)",
+        auth_gated=True,
+    ),
+    Command(
+        "/type",
+        "change a task's type "
+        "(/type <project> <number|title> <type>)",
         auth_gated=True,
     ),
     Command(
@@ -317,6 +328,9 @@ ADD_ERROR_TEXT = "I could not write to the board right now. Please try again."
 DESCRIBE_ERROR_TEXT = (
     "I could not write to the board right now. Please try again."
 )
+TYPE_ERROR_TEXT = (
+    "I could not write to the board right now. Please try again."
+)
 ATTACH_ERROR_TEXT = (
     "I could not write to the board right now. Please try again."
 )
@@ -370,6 +384,23 @@ def add_usage_text(store: Store) -> str:
         + ", ".join(names)
         + " (default: Task).\n"
         "Example: /add yask fix the login bug as Bug"
+    )
+
+
+def type_usage_text(store: Store) -> str:
+    """The ``/type`` usage, listing the board's current task types.
+
+    The type list is read from the board (``store.list_task_types``), not a
+    hardcode, so custom types (e.g. ``Investigation``) are discoverable —
+    the same convention as :func:`add_usage_text`.
+    """
+    names = [t["name"] for t in store.list_task_types()]
+    return (
+        "Usage: /type <project> <number|title> <type>\n"
+        "Changes the task's type; type is one of: "
+        + ", ".join(names)
+        + ".\n"
+        "Example: /type yask 4 Bug"
     )
 
 # Telegram caps a message at 4096 chars; the task view stays well under it
@@ -1476,6 +1507,131 @@ def describe_view(store: Store, arg: Optional[str]) -> Reply:
     )
 
 
+def type_view(store: Store, arg: Optional[str]) -> Reply:
+    """Format the ``/type <project> <number|title> <type>`` reply.
+
+    Changes the task's type (``store.update_task``, the same write as the
+    web UI / MCP ``update_task``). The argument mixes a project reference
+    and a task reference, either of which may contain spaces:
+    :func:`_split_project` resolves the longest project prefix. The task
+    reference splits from the type-name words by form:
+
+    - **Number form** — the first word after the project is all digits: it
+      is the task number, resolved strictly with ``store.get_task`` (no
+      title fallback — a write command must not resolve a number to a
+      differently-titled task), and the words after it are the type name.
+    - **Title form** — otherwise the words are split by longest-prefix
+      unique match (mirroring :func:`_split_project`'s and
+      :func:`describe_view`'s conventions): the longest prefix of the
+      remaining words that matches exactly one visible task
+      (case-insensitive title) is the reference, the remaining words the
+      type name. A prefix that matches several tasks gets the
+      disambiguation list (nothing is written); no prefix matching at all
+      gets the not-found reply quoting the first word. (A task whose title
+      ends in words that also read like a type keeps the longer reference
+      — the longest-prefix-first rule, as in ``/describe``.)
+
+    The type name is matched case-insensitively against the board's task
+    types (``store.list_task_types`` — the store's own lookup is
+    case-insensitive too): the matched type's canonical name is written, an
+    unmatched name gets the ``Unknown type '<X>'. Use one of: <types>.``
+    reply (the type list is board-driven, so custom types are discoverable),
+    and naming the task's current type answers the "already of type" notice
+    (the ``/move`` "already in <state>" mirror). The store enforces the
+    domain rules itself (a task with children cannot be demoted from an
+    epic; switching to an epic nulls the estimate) — its
+    ``ValidationError`` is a domain message, not a store failure, so it is
+    returned to the user verbatim, and any other exception propagates to
+    the dispatcher's try/except (the row's error text). No argument, a
+    project with no task reference left, or a reference with no type words
+    left, gets the usage text; an unresolvable project gets the not-found
+    reply pointing at ``/projects``. Archived tasks: the number form
+    reaches them (``get_task`` sees archived), the title form does not
+    (``find_tasks_by_title`` excludes archived) — the same asymmetry as
+    ``/task``. On success the reply is a :class:`KeyboardReply`
+    confirmation carrying the task's detail button (label
+    ``#<number> <title>`` truncated to
+    :data:`NOTIFICATION_BUTTON_TEXT_MAX` chars, payload
+    ``t:<project-id>:<number>`` — answered by :func:`make_callback_dispatch`
+    (the ``t:`` handler)) and, under it, the Main-menu row
+    (:func:`_main_menu_button`, payload ``h``) — the same shape the
+    ``/add`` and ``/describe`` confirmations carry. The failure paths
+    (usage, not-found, disambiguation) stay plain ``str``.
+    """
+    if arg is None or not arg.strip():
+        return type_usage_text(store)
+    words = arg.split()
+    project, rest = _split_project(store, words)
+    if project is None:
+        return (
+            f"Project '{words[0]}' not found. Use /projects to list projects."
+        )
+    if not rest:
+        return type_usage_text(store)
+    if rest[0].isdigit():
+        # Number form: strict number lookup, the rest is the type name.
+        try:
+            task = store.get_task(project["id"], int(rest[0]))
+        except NotFound:
+            return f"Task #{rest[0]} not found in {project['name']}."
+        type_words = rest[1:]
+    else:
+        # Title form: the longest prefix of the remaining words that
+        # matches exactly one task is the reference; the words after it
+        # are the type name.
+        found = None
+        for i in range(len(rest), 0, -1):
+            ref = " ".join(rest[:i])
+            matches = store.find_tasks_by_title(project["id"], ref)
+            if not matches:
+                continue
+            type_words = rest[i:]
+            if not type_words:
+                if len(matches) == 1:
+                    return type_usage_text(store)  # resolved, nothing to write
+                return _resolve_task(store, project, ref)  # disambiguation
+            if len(matches) == 1:
+                task = store.get_task(project["id"], matches[0]["number"])
+                found = (task, type_words)
+                break
+            return _resolve_task(store, project, ref)  # ambiguous
+        if found is None:
+            return f"Task '{rest[0]}' not found in {project['name']}."
+        task, type_words = found
+    if not type_words:
+        return type_usage_text(store)
+    type_ref = " ".join(type_words)
+    types = store.list_task_types()
+    canonical = next(
+        (t["name"] for t in types if t["name"].lower() == type_ref.lower()),
+        None,
+    )
+    if canonical is None:
+        return (
+            f"Unknown type '{type_ref}'. Use one of: "
+            + ", ".join(t["name"] for t in types)
+            + "."
+        )
+    if task["type"].lower() == canonical.lower():
+        return f"Task #{task['number']} is already of type {task['type']}."
+    try:
+        task = store.update_task(project["id"], task["number"], type=canonical)
+    except ValidationError as e:
+        return str(e)
+    text = (
+        f"Changed the type of #{task['number']} '{task['title']}' "
+        f"to {task['type']}. "
+        f"Use /task {project['name']} {task['number']} to view it."
+    )
+    button = {
+        "text": _truncate_button_label(f"#{task['number']} {task['title']}"),
+        "callback_data": f"t:{project['id']}:{task['number']}",
+    }
+    return KeyboardReply(
+        text, {"inline_keyboard": [[button], [_main_menu_button()]]}
+    )
+
+
 def subscribe_view(store: Store, chat_id: int, arg: Optional[str] = None) -> str:
     """Format the ``/subscribe [project]`` reply.
 
@@ -1628,6 +1784,13 @@ def _handle_describe(
     return describe_view(store, _tasks_arg(text))
 
 
+def _handle_type(
+    store: Store, text: Optional[str], chat_id: Optional[int]
+) -> Reply:
+    """``/type``: change a task's type (store-enforced domain rules)."""
+    return type_view(store, _tasks_arg(text))
+
+
 def _handle_attach(
     store: Store, text: Optional[str], chat_id: Optional[int]
 ) -> Reply:
@@ -1669,6 +1832,7 @@ COMMAND_TABLE: dict[str, tuple[CommandHandler, str]] = {
     "/move": (_handle_move, MOVE_ERROR_TEXT),
     "/add": (_handle_add, ADD_ERROR_TEXT),
     "/describe": (_handle_describe, DESCRIBE_ERROR_TEXT),
+    "/type": (_handle_type, TYPE_ERROR_TEXT),
     "/subscribe": (_handle_subscribe, SUBSCRIBE_ERROR_TEXT),
     "/unsubscribe": (_handle_unsubscribe, UNSUBSCRIBE_ERROR_TEXT),
 }
@@ -1703,7 +1867,7 @@ def make_dispatch(
 
     Store-backed commands — the rows of :data:`COMMAND_TABLE`
     (``/projects``, ``/tasks``, ``/task``, ``/attachment``, ``/attach``,
-    ``/move``, ``/add``, ``/describe``, ``/subscribe``,
+    ``/move``, ``/add``, ``/describe``, ``/type``, ``/subscribe``,
     ``/unsubscribe``) — read the board through ``store`` via their table
     handler (``/attach`` typed as a plain text message answers its usage
     text; its real path is the file handler below); the subscription
@@ -1719,8 +1883,8 @@ def make_dispatch(
     same text-plus-keyboard shape for inline-keyboard views — ``/move``
     answers with one when the move would pull prerequisites along (the
     confirm/cancel keyboard, nothing applied until the ``c:`` button),
-    and ``/add`` and ``/describe`` answer with the confirmation keyboard
-    (the task's detail button plus the Main-menu row).
+    and ``/add``, ``/describe`` and ``/type`` answer with the
+    confirmation keyboard (the task's detail button plus the Main-menu row).
 
     File messages (a document or a photo, :class:`IncomingFile`) are
     answered by an **async** file handler — the ``/attach`` caption

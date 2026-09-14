@@ -2682,6 +2682,256 @@ def test_help_mentions_describe():
     assert "/describe" in telegram_bot.HELP_TEXT
 
 
+# --- /type (store-backed dispatch, write) ------------------------------------
+
+
+def test_type_number_form_changes_type(store):
+    """The number form changes the type (store state verified via get_task);
+    the confirmation carries the detail button plus the Main-menu row."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    script = run_bot_until_stop(
+        Script([[message_update(770, "/type yask 1 Bug")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 the bug", "callback_data": f"t:{pid}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
+    assert script.sent[0]["text"] == (
+        "Changed the type of #1 'the bug' to Bug. Use /task yask 1 to view it."
+    )
+    assert store.get_task(pid, 1)["type"] == "Bug"
+
+
+def test_type_number_form_unknown_number(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    script = run_bot_until_stop(
+        Script([[message_update(771, "/type yask 999 Bug")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == "Task #999 not found in yask."
+    assert "reply_markup" not in script.sent[0]
+    assert store.get_task(pid, 1)["type"] == "Task"
+
+
+def test_type_title_form_unique_resolves(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    script = run_bot_until_stop(
+        Script([[message_update(772, "/type yask the bug Story")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Changed the type of #1 'the bug' to Story. Use /task yask 1 to view it."
+    )
+    assert store.get_task(pid, 1)["type"] == "Story"
+
+
+def test_type_title_form_longest_prefix_wins(store):
+    """Titles 'fix bug' and 'fix bug story': '/type ... fix bug story
+    Story' splits at the longest prefix with a unique match ('fix bug
+    story' — a task whose tail words spell a type name), leaving 'Story'
+    as the type (the /describe convention)."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "fix bug")
+    store.create_task(pid, "fix bug story")
+    script = run_bot_until_stop(
+        Script([[message_update(773, "/type yask fix bug story Story")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Changed the type of #2 'fix bug story' to Story. "
+        "Use /task yask 2 to view it."
+    )
+    assert store.get_task(pid, 1)["type"] == "Task"
+    assert store.get_task(pid, 2)["type"] == "Story"
+
+
+def test_type_ambiguous_title_disambiguates(store):
+    """Two equal titles: the disambiguation list, nothing is written."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "dup")
+    store.create_task(pid, "dup")
+    script = run_bot_until_stop(
+        Script([[message_update(774, "/type yask dup Bug")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Several tasks in yask match 'dup':\n"
+        "  #1 dup — Backlog\n"
+        "  #2 dup — Backlog\n"
+        "Use /task yask <number>."
+    )
+    assert "reply_markup" not in script.sent[0]
+    assert store.get_task(pid, 1)["type"] == "Task"
+    assert store.get_task(pid, 2)["type"] == "Task"
+
+
+def test_type_unknown_type_lists_board_types(store):
+    """The error lists the board's current types — including a custom type
+    created via store.create_task_type (the list is board-driven)."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    store.create_task_type("Investigation")
+    script = run_bot_until_stop(
+        Script([[message_update(775, "/type yask 1 Nope")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Unknown type 'Nope'. "
+        "Use one of: Epic, Bug, Investigation, Story, Task."
+    )
+    assert "reply_markup" not in script.sent[0]
+    assert store.get_task(pid, 1)["type"] == "Task"
+
+
+def test_type_case_insensitive_type_match(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    script = run_bot_until_stop(
+        Script([[message_update(776, "/type yask 1 bUg")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Changed the type of #1 'the bug' to Bug. Use /task yask 1 to view it."
+    )
+    assert store.get_task(pid, 1)["type"] == "Bug"
+
+
+def test_type_same_type_replies_already(store):
+    """Naming the task's current type (case-insensitively): a reply,
+    nothing written."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug", type="Bug")
+    script = run_bot_until_stop(
+        Script([[message_update(777, "/type yask 1 bug")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == "Task #1 is already of type Bug."
+    assert "reply_markup" not in script.sent[0]
+    assert store.get_task(pid, 1)["type"] == "Bug"
+
+
+def test_type_usage_and_not_found(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    script = run_bot_until_stop(
+        Script(
+            [
+                [message_update(778, "/type")],
+                [message_update(779, "/type yask")],
+                [message_update(780, "/type yask the bug")],
+                [message_update(781, "/type yask 1")],
+                [message_update(782, "/type nope thing")],
+                [message_update(783, "/type yask 999 Bug")],
+                [message_update(784, "/type yask no such task Bug")],
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    types = ", ".join(t["name"] for t in store.list_task_types())
+    usage = (
+        "Usage: /type <project> <number|title> <type>\n"
+        f"Changes the task's type; type is one of: {types}.\n"
+        "Example: /type yask 4 Bug"
+    )
+    assert len(script.sent) == 7
+    assert script.sent[0]["text"] == usage
+    assert script.sent[1]["text"] == usage
+    # a resolved reference with no type words left is also a usage
+    assert script.sent[2]["text"] == usage
+    assert script.sent[3]["text"] == usage
+    assert script.sent[4]["text"] == (
+        "Project 'nope' not found. Use /projects to list projects."
+    )
+    assert script.sent[5]["text"] == "Task #999 not found in yask."
+    # the title form quotes the first word (the /describe convention)
+    assert script.sent[6]["text"] == "Task 'no' not found in yask."
+    # nothing was written
+    assert store.get_task(pid, 1)["type"] == "Task"
+
+
+def test_type_epic_with_children_cannot_be_demoted(store):
+    """Demoting an epic that has children: the store's ValidationError
+    message is surfaced verbatim, the type is unchanged."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the epic", type="Epic")
+    store.create_task(pid, "child", parent_number=1)
+    script = run_bot_until_stop(
+        Script([[message_update(785, "/type yask 1 Task")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "task has children and cannot be changed away from an epic"
+    )
+    assert "reply_markup" not in script.sent[0]
+    assert store.get_task(pid, 1)["type"] == "Epic"
+
+
+def test_type_to_epic_nulls_estimate(store):
+    """Switching a regular task with an estimate to Epic: the estimate is
+    nulled (store behavior, pinned through the bot path)."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "big thing", estimate=3)
+    script = run_bot_until_stop(
+        Script([[message_update(786, "/type yask 1 Epic")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Changed the type of #1 'big thing' to Epic. Use /task yask 1 to view it."
+    )
+    task = store.get_task(pid, 1)
+    assert task["type"] == "Epic"
+    assert task["estimate"] is None
+
+
+def test_type_requires_auth(store):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    store.add_telegram_user(7, "pw")
+    auth = telegram_bot.Auth(store)
+    script = run_bot_until_stop(
+        Script([[message_update(787, "/type yask 1 Bug")]]),
+        dispatch=telegram_bot.make_dispatch(store, auth),
+    )
+    assert script.sent[0]["text"] == telegram_bot.AUTH_REQUIRED_TEXT
+    assert store.get_task(pid, 1)["type"] == "Task"
+
+
+def test_type_store_failure_replies_and_recovers(store, monkeypatch):
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+
+    def boom(project_id, number, **kwargs):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "update_task", boom)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    message_update(788, "/type yask 1 Bug"),
+                    message_update(789, "/start"),
+                ]
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 2
+    assert script.sent[0]["text"] == telegram_bot.TYPE_ERROR_TEXT
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+    assert store.get_task(pid, 1)["type"] == "Task"
+
+
+def test_help_mentions_type():
+    assert "/type" in telegram_bot.HELP_TEXT
+
+
 # --- /attach (caption flow, async file handler) --------------------------------
 
 
@@ -3257,8 +3507,8 @@ def test_help_mentions_subscribe():
 
 _REGISTRY_NAMES = (
     "/start", "/help", "/login", "/whoami", "/projects", "/tasks", "/task",
-    "/attachment", "/move", "/add", "/describe", "/attach", "/subscribe",
-    "/unsubscribe",
+    "/attachment", "/move", "/add", "/describe", "/type", "/attach",
+    "/subscribe", "/unsubscribe",
 )
 
 
@@ -3321,6 +3571,7 @@ def test_dispatch_table_error_texts_match_family_constants():
         "/move": telegram_bot.MOVE_ERROR_TEXT,
         "/add": telegram_bot.ADD_ERROR_TEXT,
         "/describe": telegram_bot.DESCRIBE_ERROR_TEXT,
+        "/type": telegram_bot.TYPE_ERROR_TEXT,
         "/subscribe": telegram_bot.SUBSCRIBE_ERROR_TEXT,
         "/unsubscribe": telegram_bot.UNSUBSCRIBE_ERROR_TEXT,
     }
@@ -3405,11 +3656,11 @@ def test_startup_posts_registry_commands_via_setmycommands(tmp_path):
     assert body["commands"] == telegram_bot.build_my_commands(
         telegram_bot.COMMAND_REGISTRY
     )
-    # strong exactness: registry names in order, all 14, well-formed entries
+    # strong exactness: registry names in order, all 15, well-formed entries
     assert [e["command"] for e in body["commands"]] == [
         c.name for c in telegram_bot.COMMAND_REGISTRY
     ]
-    assert len(body["commands"]) == 14
+    assert len(body["commands"]) == 15
     for entry in body["commands"]:
         assert set(entry) == {"command", "description"}
 
