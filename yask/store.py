@@ -570,7 +570,7 @@ class Store:
         rows = self.conn.execute(
             sql + " ORDER BY state, parent_id, sort_order", args
         ).fetchall()
-        return [self._serialize_task(r) for r in rows]
+        return self._serialize_tasks(rows)
 
     def _all_descendants(self, task_id: int) -> list[sqlite3.Row]:
         """All transitive children of an epic (BFS over parent links)."""
@@ -602,49 +602,95 @@ class Store:
                 any_estimate = True
         return total if any_estimate else None
 
-    def _serialize_task(self, row: sqlite3.Row) -> dict:
-        ttype = self._get_type(row["type_id"])
-        is_epic = bool(ttype["is_epic"])
-        prereqs = [
-            {
-                "number": p["number"],
-                "title": p["title"],
-                "state": p["state"],
-            }
+    def _batch_task_maps(self, rows: list[sqlite3.Row]) -> dict:
+        """Bulk-load everything task serialization needs, in five queries.
+
+        Returns a dict of maps for a batch of task rows: ``types`` (type id
+        -> task_types row), ``parents`` (parent task id -> number),
+        ``prereqs`` (task id -> dicts ordered by number), ``attachments``
+        (task id -> dicts ordered by id) and ``labels`` (task id -> dicts
+        ordered by name COLLATE NOCASE). ``_in_clause`` degrades an empty id
+        list to ``IN (NULL)``, so an empty batch yields empty maps with no
+        special-casing.
+        """
+        ids = [r["id"] for r in rows]
+        ph, params = _in_clause(ids)
+        type_ph, type_params = _in_clause({r["type_id"] for r in rows})
+        type_map = {
+            t["id"]: t
+            for t in self.conn.execute(
+                f"SELECT * FROM task_types WHERE id IN ({type_ph})", type_params
+            ).fetchall()
+        }
+        parent_ids = {r["parent_id"] for r in rows if r["parent_id"] is not None}
+        parent_ph, parent_params = _in_clause(parent_ids)
+        parent_map = {
+            p["id"]: p["number"]
             for p in self.conn.execute(
-                "SELECT p2.number, p2.title, p2.state "
-                "FROM task_prereqs pr JOIN tasks p2 ON p2.id = pr.prereq_id "
-                "WHERE pr.task_id = ? ORDER BY p2.number",
-                (row["id"],),
+                f"SELECT id, number FROM tasks WHERE id IN ({parent_ph})",
+                parent_params,
             ).fetchall()
-        ]
-        attachments = [
-            {
-                "id": a["id"],
-                "filename": a["filename"],
-                "content_type": a["content_type"],
-                "size": len(a["data"]),
-                "created_at": a["created_at"],
-            }
-            for a in self.conn.execute(
-                "SELECT * FROM attachments WHERE task_id = ? ORDER BY id",
-                (row["id"],),
-            ).fetchall()
-        ]
-        labels = [
-            {"id": l["id"], "name": l["name"], "color": l["color"] or ""}
-            for l in self.conn.execute(
-                "SELECT l.id, l.name, l.color FROM labels l "
-                "JOIN task_labels tl ON tl.label_id = l.id "
-                "WHERE tl.task_id = ? ORDER BY l.name COLLATE NOCASE",
-                (row["id"],),
-            ).fetchall()
-        ]
+        }
+        prereq_map: dict[int, list[dict]] = {}
+        for p in self.conn.execute(
+            "SELECT pr.task_id, p2.number, p2.title, p2.state "
+            "FROM task_prereqs pr JOIN tasks p2 ON p2.id = pr.prereq_id "
+            f"WHERE pr.task_id IN ({ph}) ORDER BY pr.task_id, p2.number",
+            params,
+        ).fetchall():
+            prereq_map.setdefault(p["task_id"], []).append(
+                {"number": p["number"], "title": p["title"], "state": p["state"]}
+            )
+        attachment_map: dict[int, list[dict]] = {}
+        for a in self.conn.execute(
+            f"SELECT * FROM attachments WHERE task_id IN ({ph}) "
+            "ORDER BY task_id, id",
+            params,
+        ).fetchall():
+            attachment_map.setdefault(a["task_id"], []).append(
+                {
+                    "id": a["id"],
+                    "filename": a["filename"],
+                    "content_type": a["content_type"],
+                    "size": len(a["data"]),
+                    "created_at": a["created_at"],
+                }
+            )
+        label_map: dict[int, list[dict]] = {}
+        for l in self.conn.execute(
+            "SELECT tl.task_id, l.id, l.name, l.color FROM labels l "
+            "JOIN task_labels tl ON tl.label_id = l.id "
+            f"WHERE tl.task_id IN ({ph}) "
+            "ORDER BY tl.task_id, l.name COLLATE NOCASE",
+            params,
+        ).fetchall():
+            label_map.setdefault(l["task_id"], []).append(
+                {"id": l["id"], "name": l["name"], "color": l["color"] or ""}
+            )
+        return {
+            "types": type_map,
+            "parents": parent_map,
+            "prereqs": prereq_map,
+            "attachments": attachment_map,
+            "labels": label_map,
+        }
+
+    def _compose_task(self, row: sqlite3.Row, maps: dict) -> dict:
+        """Build the serialized task dict for `row` from pre-fetched `maps`.
+
+        Produces exactly the dict the old per-query `_serialize_task` did:
+        same fields, value types and orderings. ``estimate_total`` for epics
+        still runs the per-epic BFS against the DB — that fan-out is
+        deliberate and left as a follow-up (see #77 plan).
+        """
+        ttype = maps["types"].get(row["type_id"])
+        if ttype is None:
+            raise ValidationError(f"unknown task type id {row['type_id']}")
+        is_epic = bool(ttype["is_epic"])
+        prereqs = maps["prereqs"].get(row["id"], [])
         parent_number = None
         if row["parent_id"] is not None:
-            parent_number = self.conn.execute(
-                "SELECT number FROM tasks WHERE id = ?", (row["parent_id"],)
-            ).fetchone()["number"]
+            parent_number = maps["parents"].get(row["parent_id"])
         return {
             "id": row["id"],
             "number": row["number"],
@@ -661,20 +707,28 @@ class Store:
             "sort_order": row["sort_order"],
             "prerequisites": prereqs,
             "has_unmet_prerequisites": any(p["state"] != "Done" for p in prereqs),
-            "attachments": attachments,
-            "labels": labels,
+            "attachments": maps["attachments"].get(row["id"], []),
+            "labels": maps["labels"].get(row["id"], []),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "created_by": row["created_by"],
         }
 
+    def _serialize_tasks(self, rows: list[sqlite3.Row]) -> list[dict]:
+        """Serialize a batch of task rows with a single shared bulk load."""
+        maps = self._batch_task_maps(rows)
+        return [self._compose_task(r, maps) for r in rows]
+
+    def _serialize_task(self, row: sqlite3.Row) -> dict:
+        return self._serialize_tasks([row])[0]
+
     def get_project(self, project_id: int) -> dict:
         proj = self._get_project(project_id)
-        tasks = [self._serialize_task(r) for r in self.conn.execute(
+        tasks = self._serialize_tasks(self.conn.execute(
             "SELECT * FROM tasks WHERE project_id = ? "
             "ORDER BY state, parent_id, sort_order, number",
             (project_id,),
-        ).fetchall()]
+        ).fetchall())
         by_number = {t["number"]: t for t in tasks}
         children_map: dict[int | None, list[dict]] = {}
         for t in tasks:

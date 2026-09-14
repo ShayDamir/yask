@@ -549,3 +549,105 @@ def test_in_clause_materializes_iterables():
     assert isinstance(params, list)
     placeholders, params = _in_clause(("x",))
     assert (placeholders, params) == ("?", ["x"])
+
+
+# -- serialization batching (#77: N+1 regression guard) ---------------------------
+
+
+def _rich_project(store, n_tasks):
+    """Project of `n_tasks` regular tasks, each with one prerequisite, one
+    attachment and one label, plus one epic containing two children (which
+    carry the same enrichments). Identical structure for any `n_tasks`, so
+    only the regular-task count varies between stores."""
+    pid = store.create_project(f"rich-{n_tasks}")["id"]
+    epic = store.create_task(pid, "epic", type="Epic")
+    label = store.create_label(pid, "lbl", "#FF0000")
+    for i in range(1, n_tasks + 1):
+        t = store.create_task(pid, f"t{i}", estimate=1.0)
+        store.set_prerequisites(pid, t["number"], [epic["number"]])
+        store.add_attachment(pid, t["number"], f"doc{i}.md", "text/markdown", b"hello")
+        store.set_task_labels(pid, t["number"], [label["id"]])
+    for i in (1, 2):
+        c = store.create_task(pid, f"child{i}", estimate=2.0,
+                              parent_number=epic["number"])
+        store.set_prerequisites(pid, c["number"], [epic["number"]])
+        store.add_attachment(pid, c["number"], f"child{i}.md", "text/markdown", b"child")
+        store.set_task_labels(pid, c["number"], [label["id"]])
+    return pid
+
+
+def _count_statements(store, func, *args, **kwargs):
+    """Run `func` while tracing the store's connection; return (statements, result)."""
+    counts = []
+    store.conn.set_trace_callback(lambda stmt: counts.append(stmt))
+    try:
+        result = func(*args, **kwargs)
+    finally:
+        store.conn.set_trace_callback(None)
+    return len(counts), result
+
+
+def _flatten_project_tasks(roots):
+    out = []
+    for t in roots:
+        out.append(t)
+        out.extend(_flatten_project_tasks(t["children"]))
+    return out
+
+
+def _stores_for_rich_projects(tmp_path, n_small, n_big):
+    from yask import db
+    from yask.store import Store
+
+    small = Store(db.connect(tmp_path / f"small-{n_small}.db"))
+    big = Store(db.connect(tmp_path / f"big-{n_big}.db"))
+    small_pid = _rich_project(small, n_small)
+    big_pid = _rich_project(big, n_big)
+    return small, small_pid, big, big_pid
+
+
+def test_get_project_statement_count_is_constant_in_task_count(tmp_path):
+    small, small_pid, big, big_pid = _stores_for_rich_projects(tmp_path, 3, 8)
+    try:
+        n_small, proj_small = _count_statements(small, small.get_project, small_pid)
+        n_big, proj_big = _count_statements(big, big.get_project, big_pid)
+        # a per-task fan-out would scale with N (3 tasks vs 8 tasks); the
+        # batched serializer keeps the count equal
+        assert n_small == n_big
+        assert len(_flatten_project_tasks(proj_small["tasks"])) == 6
+        assert len(_flatten_project_tasks(proj_big["tasks"])) == 11
+    finally:
+        small.conn.close()
+        big.conn.close()
+
+
+def test_list_tasks_statement_count_is_constant_in_task_count(tmp_path):
+    small, small_pid, big, big_pid = _stores_for_rich_projects(tmp_path, 3, 8)
+    try:
+        n_small, tasks_small = _count_statements(small, small.list_tasks, small_pid)
+        n_big, tasks_big = _count_statements(big, big.list_tasks, big_pid)
+        assert n_small == n_big
+        assert len(tasks_small) == 6
+        assert len(tasks_big) == 11
+    finally:
+        small.conn.close()
+        big.conn.close()
+
+
+def test_single_task_path_matches_batched_project_path(store, project):
+    pid = project["id"]
+    epic = store.create_task(pid, "epic", type="Epic")
+    a = store.create_task(pid, "a", estimate=1.0)
+    b = store.create_task(pid, "b", estimate=2.0, parent_number=epic["number"])
+    label = store.create_label(pid, "lbl", "#00FF00")
+    store.set_task_labels(pid, a["number"], [label["id"]])
+    store.add_attachment(pid, a["number"], "note.md", "text/markdown", b"hi")
+    store.set_prerequisites(pid, b["number"], [a["number"]])
+    proj = store.get_project(pid)
+    by_number = {
+        t["number"]: t for t in _flatten_project_tasks(proj["tasks"])
+    }
+    for number in by_number:
+        single = store.get_task(pid, number)
+        batched = {k: v for k, v in by_number[number].items() if k != "children"}
+        assert single == batched
