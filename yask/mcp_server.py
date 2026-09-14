@@ -17,7 +17,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.types import TextContent
 
-from .store import _UNSET, NotFound, ValidationError, Store, YaskError
+from .store import NotFound, ValidationError, Store, YaskError
 
 
 def _wrap(fn):
@@ -129,47 +129,239 @@ def _read_attachment_file(file_path: str) -> tuple[str, bytes, str]:
     return path.name, path.read_bytes(), content_type
 
 
+# Data-driven registration for the mechanical pass-through tools: one line
+# per Store method instead of a hand-written wrapper.
+#
+# Each entry is (tool_name, store_attr, docstring, project_scoped,
+# return_annotation, omit):
+#   store_attr        Store method the tool forwards to, as a string so this
+#                     table needs no Store instance.
+#   project_scoped    first parameter is a project given by name or id.
+#   return_annotation ``dict`` marks tools whose old def carried a
+#                     ``-> dict`` annotation (how the SDK then exposes it
+#                     depends on project_scoped — see _make_tool); None
+#                     exposes no return annotation at all.
+#   omit              Store-only parameters hidden from the tool schema;
+#                     they keep their Store defaults at call time.
+# Docstrings are the exact description text the old tools exposed
+# (multi-line ones as single strings with \n escapes), so the tool
+# surface stays byte-identical.
+_TOOLS = (
+    ("list_projects", "list_projects", "List all projects with their task counts.", False, None, ()),
+    (
+        "create_project",
+        "create_project",
+        "Create a project. Projects have completely separate state.",
+        False,
+        dict,
+        (),
+    ),
+    (
+        "get_project",
+        "get_project",
+        "Get a project with its full task tree (epics nest their children).",
+        True,
+        dict,
+        (),
+    ),
+    (
+        "list_tasks",
+        "list_tasks",
+        "List a project's tasks. Optional state/label filters; archived hidden by default.",
+        True,
+        None,
+        (),
+    ),
+    (
+        "get_task",
+        "get_task",
+        "Get a single task by project and number. Returns the same data as a single item from list_tasks.",
+        True,
+        dict,
+        (),
+    ),
+    (
+        "create_task",
+        "create_task",
+        "Create a task (Story/Task/Bug or Epic). Epics take no estimate.\nNew tasks always start in the Backlog; move them forward separately.",
+        True,
+        dict,
+        ("before_number", "after_number"),
+    ),
+    (
+        "update_task",
+        "update_task",
+        "Update a task's fields. parent_number null detaches it from its epic.\n\nOmitting parent_number leaves the current parent unchanged; only an\nexplicit null detaches the task from its epic.\n",
+        True,
+        dict,
+        (),
+    ),
+    (
+        "set_prerequisites",
+        "set_prerequisites",
+        "Replace a task's prerequisite list. Cycles are rejected.",
+        True,
+        dict,
+        (),
+    ),
+    (
+        "move_task",
+        "move_task",
+        "Move a task to a workflow state (Backlog, Todo, Planning, In progress, Review, Done) or the holding state Blocked.\n\nMoving forward pulls prerequisites not yet past the target stage along\nwith it. Moving to Blocked is a single-task action that pulls no\nprerequisites along; the workflow docs require an unblock.md attachment\nexplaining what unblocks the task. If several tasks are affected and\nconfirm is false, the result contains the affected list and nothing is\nchanged.\n",
+        True,
+        dict,
+        (),
+    ),
+    ("archive_task", "archive_task", "Archive a task (an epic archives its whole subtree).", True, dict, ()),
+    (
+        "restore_task",
+        "restore_task",
+        "Restore an archived task to a workflow state (default Backlog).",
+        True,
+        dict,
+        (),
+    ),
+    (
+        "delete_task",
+        "delete_task",
+        "Permanently delete an archived task (an epic's subtree is removed with it).",
+        True,
+        dict,
+        (),
+    ),
+    (
+        "reorder_task",
+        "reorder_task",
+        "Reorder a task within its column (default: move to the end).",
+        True,
+        dict,
+        (),
+    ),
+    (
+        "get_task_history",
+        "get_history",
+        "Every state change of a task, with timestamps.",
+        True,
+        None,
+        (),
+    ),
+    (
+        "list_task_types",
+        "list_task_types",
+        "List task types (Story, Task, Bug, Epic, plus any custom ones).",
+        False,
+        None,
+        (),
+    ),
+    ("add_task_type", "create_task_type", "Add a new regular (non-epic) task type.", False, dict, ()),
+    ("list_attachments", "list_attachments", "List a task's attachments (metadata only).", True, None, ()),
+    (
+        "create_label",
+        "create_label",
+        "Create a project label, unique within the project.",
+        True,
+        dict,
+        (),
+    ),
+    (
+        "update_label",
+        "update_label",
+        "Update a project label's color. Color-only; renaming is out of scope.",
+        True,
+        dict,
+        (),
+    ),
+    ("list_labels", "list_labels", "List a project's labels.", True, None, ()),
+    (
+        "set_task_labels",
+        "set_task_labels",
+        "Replace a task's label set. The labels must belong to the project.",
+        True,
+        dict,
+        (),
+    ),
+    (
+        "delete_label",
+        "delete_label",
+        "Delete a project label, detaching it from all tasks it is applied to.",
+        True,
+        dict,
+        (),
+    ),
+    (
+        "list_project_roles",
+        "list_project_roles",
+        "List a project's preset user-story roles (ordered).",
+        True,
+        None,
+        (),
+    ),
+    (
+        "set_project_roles",
+        "set_project_roles",
+        "Replace a project's preset user-story roles. Order is preserved and\nnames are case-insensitively de-duplicated. Names must not be empty\nand must not contain '/'.",
+        True,
+        None,
+        (),
+    ),
+    (
+        "remove_project_role",
+        "remove_project_role",
+        "Remove one preset role from a project.",
+        True,
+        dict,
+        (),
+    ),
+)
+
+
+def _make_tool(store: Store, name: str, store_attr: str, doc: str, scoped: bool, ret, omit: tuple[str, ...]):
+    """Build one pass-through tool for a (tool name, Store method) pair.
+
+    Copies the Store method's signature so the exposed schema matches the
+    hand-written wrapper it replaces: omitted parameters keep their Store
+    defaults at call time, and a ``ret`` of None exposes no return
+    annotation at all.
+
+    The return annotation is exposed as the *string* ``"dict"`` for
+    project-scoped tools and as the real ``dict`` class otherwise. This
+    mirrors the old wrappers: FastMCP evaluates annotations read from plain
+    function defs but takes ``__signature__`` verbatim, and ``_project_arg``
+    put the def's (string) return annotation into that signature. The SDK
+    treats the two differently — the string form gets a ``{"result": ...}``
+    output schema, the real class gets none — so both must be preserved.
+    """
+    target = getattr(store, store_attr)
+    sig = inspect.signature(target)
+    params = [p for p in sig.parameters.values() if p.name not in omit]
+    if ret is None:
+        return_annotation = inspect.Signature.empty
+    elif scoped:
+        return_annotation = "dict"
+    else:
+        return_annotation = dict
+    sig = sig.replace(parameters=params, return_annotation=return_annotation)
+
+    def tool(*args, **kwargs):
+        return target(*args, **kwargs)
+
+    tool.__name__ = name  # survives the functools.wraps chain below
+    tool.__doc__ = doc
+    tool.__signature__ = sig  # honored by the SDK's inspect.signature
+    if scoped:
+        tool = _project_arg(store)(tool)  # renames project_id -> project (str|int)
+    return _wrap(tool)
+
+
 def build_server(store: Store) -> FastMCP:
     mcp = FastMCP("yask")
     store.source = "mcp"
 
-    @mcp.tool()
-    @_wrap
-    def list_projects():
-        """List all projects with their task counts."""
-        return store.list_projects()
+    for name, store_attr, doc, scoped, ret, omit in _TOOLS:
+        mcp.tool()(_make_tool(store, name, store_attr, doc, scoped, ret, omit))
 
-    @mcp.tool()
-    @_wrap
-    def create_project(name: str) -> dict:
-        """Create a project. Projects have completely separate state."""
-        return store.create_project(name)
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def get_project(project_id: int) -> dict:
-        """Get a project with its full task tree (epics nest their children)."""
-        return store.get_project(project_id)
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def list_tasks(
-        project_id: int,
-        state: str | None = None,
-        include_archived: bool = False,
-        label: str | None = None,
-    ):
-        """List a project's tasks. Optional state/label filters; archived hidden by default."""
-        return store.list_tasks(project_id, state, include_archived, label)
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def get_task(project_id: int, number: int) -> dict:
-        """Get a single task by project and number. Returns the same data as a single item from list_tasks."""
-        return store.get_task(project_id, number)
+    # Special tools: they do not mirror a single Store method one-to-one,
+    # so they stay explicit.
 
     @mcp.tool()
     @_wrap
@@ -186,135 +378,6 @@ def build_server(store: Store) -> FastMCP:
         if result is None:
             return None
         return {"number": result["number"], "title": result["title"], "state": result["state"]}
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def create_task(
-        project_id: int,
-        title: str,
-        type: str = "Task",
-        estimate: float | None = None,
-        parent_number: int | None = None,
-        description: str = "",
-    ) -> dict:
-        """Create a task (Story/Task/Bug or Epic). Epics take no estimate.
-        New tasks always start in the Backlog; move them forward separately."""
-        return store.create_task(
-            project_id, title, type, estimate, parent_number, description
-        )
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def update_task(
-        project_id: int,
-        number: int,
-        title: str | None = None,
-        description: str | None = None,
-        type: str | None = None,
-        estimate: float | None = None,
-        parent_number: int | None = _UNSET,
-    ) -> dict:
-        """Update a task's fields. parent_number null detaches it from its epic.
-
-        Omitting parent_number leaves the current parent unchanged; only an
-        explicit null detaches the task from its epic.
-        """
-        return store.update_task(
-            project_id,
-            number,
-            title=title,
-            description=description,
-            type=type,
-            estimate=estimate,
-            parent_number=parent_number,
-        )
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def set_prerequisites(project_id: int, number: int, prereq_numbers: list[int]) -> dict:
-        """Replace a task's prerequisite list. Cycles are rejected."""
-        return store.set_prerequisites(project_id, number, prereq_numbers)
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def move_task(
-        project_id: int,
-        number: int,
-        to_state: str,
-        confirm: bool = False,
-        before_number: int | None = None,
-        after_number: int | None = None,
-    ) -> dict:
-        """Move a task to a workflow state (Backlog, Todo, Planning, In progress, Review, Done) or the holding state Blocked.
-
-        Moving forward pulls prerequisites not yet past the target stage along
-        with it. Moving to Blocked is a single-task action that pulls no
-        prerequisites along; the workflow docs require an unblock.md attachment
-        explaining what unblocks the task. If several tasks are affected and
-        confirm is false, the result contains the affected list and nothing is
-        changed.
-        """
-        return store.move_task(
-            project_id, number, to_state, confirm, before_number, after_number
-        )
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def archive_task(project_id: int, number: int, confirm: bool = False) -> dict:
-        """Archive a task (an epic archives its whole subtree)."""
-        return store.archive_task(project_id, number, confirm)
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def restore_task(
-        project_id: int, number: int, to_state: str = "Backlog", confirm: bool = False
-    ) -> dict:
-        """Restore an archived task to a workflow state (default Backlog)."""
-        return store.restore_task(project_id, number, to_state, confirm)
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def delete_task(project_id: int, number: int, confirm: bool = False) -> dict:
-        """Permanently delete an archived task (an epic's subtree is removed with it)."""
-        return store.delete_task(project_id, number, confirm)
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def reorder_task(
-        project_id: int,
-        number: int,
-        before_number: int | None = None,
-        after_number: int | None = None,
-    ) -> dict:
-        """Reorder a task within its column (default: move to the end)."""
-        return store.reorder_task(project_id, number, before_number, after_number)
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def get_task_history(project_id: int, number: int):
-        """Every state change of a task, with timestamps."""
-        return store.get_history(project_id, number)
-
-    @mcp.tool()
-    @_wrap
-    def list_task_types():
-        """List task types (Story, Task, Bug, Epic, plus any custom ones)."""
-        return store.list_task_types()
-
-    @mcp.tool()
-    @_wrap
-    def add_task_type(name: str) -> dict:
-        """Add a new regular (non-epic) task type."""
-        return store.create_task_type(name)
 
     @mcp.tool()
     @_wrap
@@ -361,13 +424,6 @@ def build_server(store: Store) -> FastMCP:
 
     @mcp.tool()
     @_wrap
-    @_project_arg(store)
-    def list_attachments(project_id: int, number: int):
-        """List a task's attachments (metadata only)."""
-        return store.list_attachments(project_id, number)
-
-    @mcp.tool()
-    @_wrap
     def get_attachment(attachment_id: int):
         """Read an attachment's content.
 
@@ -404,64 +460,6 @@ def build_server(store: Store) -> FastMCP:
         """Delete an attachment permanently."""
         store.delete_attachment(attachment_id)
         return {"deleted": attachment_id}
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def create_label(project_id: int, name: str, color: str = "") -> dict:
-        """Create a project label, unique within the project."""
-        return store.create_label(project_id, name, color)
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def update_label(project_id: int, label_id: int, color: str = "") -> dict:
-        """Update a project label's color. Color-only; renaming is out of scope."""
-        return store.update_label(project_id, label_id, color)
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def list_labels(project_id: int):
-        """List a project's labels."""
-        return store.list_labels(project_id)
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def set_task_labels(project_id: int, number: int, label_ids: list[int]) -> dict:
-        """Replace a task's label set. The labels must belong to the project."""
-        return store.set_task_labels(project_id, number, label_ids)
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def delete_label(project_id: int, label_id: int) -> dict:
-        """Delete a project label, detaching it from all tasks it is applied to."""
-        return store.delete_label(project_id, label_id)
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def list_project_roles(project_id: int):
-        """List a project's preset user-story roles (ordered)."""
-        return store.list_project_roles(project_id)
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def set_project_roles(project_id: int, names: list[str]):
-        """Replace a project's preset user-story roles. Order is preserved and
-        names are case-insensitively de-duplicated. Names must not be empty
-        and must not contain '/'."""
-        return store.set_project_roles(project_id, names)
-
-    @mcp.tool()
-    @_wrap
-    @_project_arg(store)
-    def remove_project_role(project_id: int, name: str) -> dict:
-        """Remove one preset role from a project."""
-        return store.remove_project_role(project_id, name)
 
     return mcp
 
