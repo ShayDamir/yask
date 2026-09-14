@@ -92,7 +92,9 @@ function labelChipStyle(color) {
   return `background:${bg};border-color:${border};color:${fg}`;
 }
 
-function cardBadges(task) {
+// The four standard badges shared by board cards and epic child rows:
+// type badge, estimate, prereq flag, attachment flag.
+function taskBadges(task) {
   return [
     h("span", { class: `badge ${typeClass(task.type)}` }, task.type),
     estimateBadge(task),
@@ -146,10 +148,7 @@ function renderChildRow(task, actions, filterLabel) {
       h("span", { class: "num" }, `#${task.number}`),
       h("span", { class: "title", title: task.title, onclick: () => actions.onEdit(task) }, task.title),
       labelChips(task),
-      h("span", { class: `badge ${typeClass(task.type)}` }, task.type),
-      estimateBadge(task),
-      prereqFlag(task),
-      attachFlag(task),
+      ...taskBadges(task),
       h(
         "select",
         {
@@ -238,7 +237,7 @@ export function renderCard(task, actions, { expanded, filterLabel, isArchived } 
         task.state === "Done" ? h("span", { class: "done-mark", title: "Done" }, "✓") : null
       ),
       labelChips(task),
-      h("div", { class: "card-meta" }, cardBadges(task)),
+      h("div", { class: "card-meta" }, ...taskBadges(task)),
     ].filter(Boolean)
   );
   if (task.description) {
