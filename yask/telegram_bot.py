@@ -1396,6 +1396,71 @@ def make_dispatch(store: Store, auth: Optional[Auth] = None) -> Callable[..., Op
     return dispatch
 
 
+def _project_not_found(project_id: int) -> str:
+    """The not-found reply for an unknown project id (all families)."""
+    return (
+        f"Project '{project_id}' not found. "
+        "Use /projects to list projects."
+    )
+
+
+def _task_not_found(project_name: str, number: int) -> str:
+    """The not-found reply for an unknown task number in ``project_name``."""
+    return f"Task #{number} not found in {project_name}."
+
+
+def _attachment_not_found(
+    project_name: str, number: int, attachment_id: int
+) -> str:
+    """The not-found reply for an unknown attachment on a task."""
+    return (
+        f"Attachment {attachment_id} not found on task "
+        f"#{number} ({project_name}). Use /task "
+        f"{project_name} {number} to list the task's "
+        "attachments."
+    )
+
+
+def _resolve_project_id(
+    store: Store, project_id: int, error_text: str
+) -> Union[dict, CallbackAction]:
+    """Resolve a project by id, or a ready-to-return
+    :class:`CallbackAction`.
+
+    ``NotFound`` answers with the project's not-found text; any other
+    store failure answers with ``error_text`` (the family's error text).
+    The id-based twin of :func:`_resolve_project` (which resolves text
+    references for the command path).
+    """
+    try:
+        return store.get_project(project_id)
+    except NotFound:
+        return CallbackAction(reply=_project_not_found(project_id))
+    except Exception:
+        return CallbackAction(reply=error_text)
+
+
+def _resolve_task_number(
+    store: Store, project: dict, project_id: int, number: int, error_text: str
+) -> Union[dict, CallbackAction]:
+    """Resolve a task by number in ``project``, or a ready-to-return
+    :class:`CallbackAction`.
+
+    ``NotFound`` answers with the task's not-found text (named after
+    ``project``); any other store failure answers with ``error_text``.
+    The id-based twin of :func:`_resolve_task` (which resolves text
+    references for the command path).
+    """
+    try:
+        return store.get_task(project_id, number)
+    except NotFound:
+        return CallbackAction(
+            reply=_task_not_found(project["name"], number)
+        )
+    except Exception:
+        return CallbackAction(reply=error_text)
+
+
 def _resolve_move_context(
     store: Store, project_id: int, number: int
 ) -> Union[CallbackAction, tuple[dict, dict]]:
@@ -1406,25 +1471,14 @@ def _resolve_move_context(
     Returns ``(project, task)`` or a ready-to-return
     :class:`CallbackAction`.
     """
-    try:
-        project = store.get_project(project_id)
-    except NotFound:
-        return CallbackAction(
-            reply=(
-                f"Project '{project_id}' not found. "
-                "Use /projects to list projects."
-            )
-        )
-    except Exception:
-        return CallbackAction(reply=MOVE_ERROR_TEXT)
-    try:
-        task = store.get_task(project_id, number)
-    except NotFound:
-        return CallbackAction(
-            reply=f"Task #{number} not found in {project['name']}."
-        )
-    except Exception:
-        return CallbackAction(reply=MOVE_ERROR_TEXT)
+    project = _resolve_project_id(store, project_id, MOVE_ERROR_TEXT)
+    if not isinstance(project, dict):
+        return project
+    task = _resolve_task_number(
+        store, project, project_id, number, MOVE_ERROR_TEXT
+    )
+    if not isinstance(task, dict):
+        return task
     return project, task
 
 
@@ -1475,6 +1529,15 @@ def make_callback_dispatch(
     ``chat_instance``) and the factory returns a
     :class:`CallbackAction` (or None for "nothing to do" — answered with
     the out-of-date toast by ``run_bot``).
+
+    Structurally the dispatch is a table keyed by the payload's
+    ``(prefix, arity)`` shape — one entry per family below (the ``h``
+    prefix owns two arities, the bare hub payload and the ``h:<route>``
+    menu routes) — and each entry is one small handler that encapsulates
+    its family's field validation, resolution order and not-found/error
+    texts. The repeated resolve-else-not-found skeleton lives in
+    :func:`_resolve_project_id`/:func:`_resolve_task_number`; adding a
+    family is one handler plus one table entry.
 
     There are eight payload families. ``p:<project-id>`` (the per-project
     buttons of the ``/projects`` view) opens that project's task list view
@@ -1541,6 +1604,289 @@ def make_callback_dispatch(
     are open (the legacy, unauthenticated behavior).
     """
 
+    def _callback_chat_id(callback_query: dict) -> Optional[int]:
+        """The chat the button was pressed in (the original message's
+        ``chat.id``), or None for an inaccessible message (no chat)."""
+        return ((callback_query.get("message") or {}).get("chat") or {}).get(
+            "id"
+        )
+
+    def _handle_p(
+        parts: list[str], callback_query: dict
+    ) -> Optional[CallbackAction]:
+        # The /projects view's per-project buttons: that project's task
+        # list view.
+        if not parts[1].isdigit():
+            return None  # malformed → run_bot's out-of-date toast
+        project_id = int(parts[1])
+        resolved = _resolve_project_id(store, project_id, TASKS_ERROR_TEXT)
+        if not isinstance(resolved, dict):
+            return resolved
+        # The same view typing "/tasks <id>" would send (including its
+        # own t: keyboard when the project has active tasks).
+        try:
+            view = tasks_view(store, str(project_id))
+        except Exception:
+            return CallbackAction(reply=TASKS_ERROR_TEXT)
+        return CallbackAction(reply=view)
+
+    def _handle_t(
+        parts: list[str], callback_query: dict
+    ) -> Optional[CallbackAction]:
+        # The /tasks view's per-task buttons: the task's detail view.
+        # (The fields parse with int(), not isdigit(): a minus sign is
+        # malformed for the other families but resolves here to the
+        # project's not-found reply.)
+        try:
+            project_id = int(parts[1])
+            number = int(parts[2])
+        except ValueError:
+            return None
+        project = _resolve_project_id(store, project_id, TASK_ERROR_TEXT)
+        if not isinstance(project, dict):
+            return project
+        task = _resolve_task_number(
+            store, project, project_id, number, TASK_ERROR_TEXT
+        )
+        if not isinstance(task, dict):
+            return task
+        try:
+            history = store.get_history(project_id, number)
+        except Exception:
+            return CallbackAction(reply=TASK_ERROR_TEXT)
+        # The detail reply carries its own keyboard only when the
+        # button's chat is known (an inaccessible message arrives with
+        # no chat → the plain text, as before): the toggle button
+        # reflects that chat's subscription state.
+        chat_id = _callback_chat_id(callback_query)
+        subscribed = False
+        if chat_id is not None:
+            try:
+                subscribed = any(
+                    s["project_id"] == project_id
+                    for s in store.list_subscriptions(chat_id)
+                )
+            except Exception:
+                return CallbackAction(reply=TASK_ERROR_TEXT)
+        return CallbackAction(
+            reply=format_task_view(task, project, history, chat_id, subscribed)
+        )
+
+    def _handle_a(
+        parts: list[str], callback_query: dict
+    ) -> Optional[CallbackAction]:
+        # The /task view's per-attachment buttons: the attachment itself.
+        if not (
+            parts[1].isdigit() and parts[2].isdigit() and parts[3].isdigit()
+        ):
+            return None  # malformed → run_bot's out-of-date toast
+        project_id = int(parts[1])
+        number = int(parts[2])
+        attachment_id = int(parts[3])
+        project = _resolve_project_id(
+            store, project_id, ATTACHMENT_ERROR_TEXT
+        )
+        if not isinstance(project, dict):
+            return project
+        task = _resolve_task_number(
+            store, project, project_id, number, ATTACHMENT_ERROR_TEXT
+        )
+        if not isinstance(task, dict):
+            return task
+        try:
+            meta, data = store.get_task_attachment(
+                project_id, number, attachment_id
+            )
+        except NotFound:
+            return CallbackAction(
+                reply=_attachment_not_found(
+                    project["name"], number, attachment_id
+                )
+            )
+        except Exception:
+            return CallbackAction(reply=ATTACHMENT_ERROR_TEXT)
+        return CallbackAction(reply=attachment_reply(meta, data, task))
+
+    def _handle_toggle(
+        parts: list[str], callback_query: dict
+    ) -> Optional[CallbackAction]:
+        # The /task view's subscribe/unsubscribe toggle (s:/u:): flips
+        # the button's chat's subscription, re-renders the message in
+        # place.
+        if not parts[1].isdigit():
+            return None  # malformed → run_bot's out-of-date toast
+        project_id = int(parts[1])
+        # The family's error text, per prefix (a failed press of the
+        # subscribe toggle reports a subscribe failure, etc.).
+        error_text = (
+            SUBSCRIBE_ERROR_TEXT if parts[0] == "s" else UNSUBSCRIBE_ERROR_TEXT
+        )
+        project = _resolve_project_id(store, project_id, error_text)
+        if not isinstance(project, dict):
+            return project
+        # A subscription is per chat: an inaccessible message (no chat)
+        # cannot be toggled → the out-of-date toast.
+        chat_id = _callback_chat_id(callback_query)
+        if chat_id is None:
+            return None
+        if parts[0] == "s":
+            try:
+                store.subscribe_project(chat_id, project_id)
+            except Exception:
+                return CallbackAction(reply=error_text)
+            subscribed = True
+            answer = f"Subscribed to {project['name']}"
+        else:
+            try:
+                store.unsubscribe_project(chat_id, project_id)
+            except Exception:
+                return CallbackAction(reply=error_text)
+            subscribed = False
+            answer = f"Unsubscribed from {project['name']}"
+        # In-place re-render: a toggle leaves the message text unchanged
+        # and only flips the pressed toggle button; an inaccessible
+        # message (no text) gets the toast only.
+        message = callback_query.get("message") or {}
+        text = message.get("text")
+        if text is None:
+            return CallbackAction(answer_text=answer)
+        rows = (message.get("reply_markup") or {}).get("inline_keyboard") or []
+        return CallbackAction(
+            answer_text=answer,
+            edit=MessageEdit(
+                text,
+                {
+                    "inline_keyboard": _flip_toggle(
+                        rows, project_id, callback_query["data"], subscribed
+                    )
+                },
+            ),
+        )
+
+    def _handle_move(
+        parts: list[str], callback_query: dict
+    ) -> Optional[CallbackAction]:
+        # The /task view's per-state buttons (m:) and the confirm button
+        # (c:).
+        if not all(parts[i].isdigit() for i in (1, 2, 3)):
+            return None  # malformed → run_bot's out-of-date toast
+        # The state index is the payload's last field; out of range →
+        # malformed → the out-of-date toast.
+        if int(parts[3]) >= len(db.WORKFLOW_STATES):
+            return None
+        project_id, number = int(parts[1]), int(parts[2])
+        target = db.WORKFLOW_STATES[int(parts[3])]
+        resolved = _resolve_move_context(store, project_id, number)
+        if not isinstance(resolved, tuple):
+            return resolved
+        project, task = resolved
+        # Archived details never carry state buttons (or confirms).
+        if task["state"] == db.ARCHIVED_STATE:
+            return None
+        if task["state"] == target:
+            # m: a stale button; c: someone moved it in the meantime.
+            # A toast only — no store call, no edit.
+            return CallbackAction(answer_text=f"Already in {target}.")
+        try:
+            affected = store.plan_move(project_id, number, target)
+        except Exception:
+            return CallbackAction(reply=MOVE_ERROR_TEXT)
+        if parts[0] == "m" and len(affected) > 1:
+            # The move would pull prerequisites along: edit the message
+            # to the confirm keyboard, nothing is written.
+            confirm = _confirm_move_markup(project_id, task, target, affected)
+            return CallbackAction(
+                edit=MessageEdit(confirm.text, confirm.reply_markup)
+            )
+        try:
+            store.move_task(
+                project_id, number, target,
+                confirm=(parts[0] == "c"),
+            )
+        except Exception:
+            return CallbackAction(reply=MOVE_ERROR_TEXT)
+        detail = _detail_edit(store, project, number, callback_query)
+        if not isinstance(detail, MessageEdit):
+            return detail
+        if len(affected) == 1:
+            answer = f"Moved #{number} to {target}."
+        else:
+            answer = f"Moved {len(affected)} tasks to {target}."
+        return CallbackAction(answer_text=answer, edit=detail)
+
+    def _handle_cancel(
+        parts: list[str], callback_query: dict
+    ) -> Optional[CallbackAction]:
+        # The confirm keyboard's Cancel: re-render the plain detail,
+        # no store change.
+        if not all(parts[i].isdigit() for i in (1, 2)):
+            return None  # malformed → run_bot's out-of-date toast
+        project_id, number = int(parts[1]), int(parts[2])
+        resolved = _resolve_move_context(store, project_id, number)
+        if not isinstance(resolved, tuple):
+            return resolved
+        project, task = resolved
+        detail = _detail_edit(store, project, number, callback_query)
+        if not isinstance(detail, MessageEdit):
+            return detail
+        return CallbackAction(answer_text="Cancelled.", edit=detail)
+
+    def _handle_home(
+        parts: list[str], callback_query: dict
+    ) -> Optional[CallbackAction]:
+        # The main-menu hub's own button (what the other views'
+        # Main-menu rows will send): opens the menu view, static.
+        return CallbackAction(reply=menu_view())
+
+    def _handle_route(
+        parts: list[str], callback_query: dict
+    ) -> Optional[CallbackAction]:
+        # The menu's route buttons (#61 sends the same payloads). The
+        # store-backed routes report a non-NotFound store failure with
+        # the board family's error text; the static routes cannot fail.
+        route = parts[1]
+        if route not in ("p", "t", "s", "a", "h"):
+            return None  # unknown route → run_bot's out-of-date toast
+        if route == "p":
+            try:
+                return CallbackAction(reply=project_view(store))
+            except Exception:
+                return CallbackAction(reply=PROJECTS_ERROR_TEXT)
+        if route == "t":
+            try:
+                return CallbackAction(reply=tasks_view(store))
+            except Exception:
+                return CallbackAction(reply=TASKS_ERROR_TEXT)
+        if route == "s":
+            # The subscription list is per chat: an inaccessible
+            # message (no chat) → the out-of-date toast.
+            chat_id = _callback_chat_id(callback_query)
+            if chat_id is None:
+                return None
+            try:
+                return CallbackAction(reply=subscribe_view(store, chat_id))
+            except Exception:
+                return CallbackAction(reply=SUBSCRIBE_ERROR_TEXT)
+        if route == "a":
+            return CallbackAction(reply=ADD_USAGE_TEXT)
+        return CallbackAction(reply=HELP_TEXT)
+
+    # The dispatch table: (payload prefix, arity) → the family's handler.
+    # The h prefix owns two arities — the bare hub payload and the
+    # h:<route> menu routes.
+    handlers = {
+        ("p", 2): _handle_p,
+        ("t", 3): _handle_t,
+        ("a", 4): _handle_a,
+        ("s", 2): _handle_toggle,
+        ("u", 2): _handle_toggle,
+        ("m", 4): _handle_move,
+        ("c", 4): _handle_move,
+        ("x", 3): _handle_cancel,
+        ("h", 1): _handle_home,
+        ("h", 2): _handle_route,
+    }
+
     def callback_dispatch(callback_query: dict) -> Optional[CallbackAction]:
         data = callback_query.get("data")
         if not isinstance(data, str):
@@ -1549,277 +1895,17 @@ def make_callback_dispatch(
         # message's chat.id) must hold a login session — persisted in the
         # store, so a bot restart does not log it out.
         if auth is not None:
-            message = callback_query.get("message") or {}
-            chat_id = (message.get("chat") or {}).get("id")
-            if not auth.is_authenticated(chat_id):
+            if not auth.is_authenticated(_callback_chat_id(callback_query)):
                 return CallbackAction(
                     answer_text=AUTH_REQUIRED_TEXT,
                     reply=AUTH_REQUIRED_TEXT,
                 )
         parts = data.split(":")
-        if len(parts) == 2 and parts[0] == "p":
-            if not parts[1].isdigit():
-                return None  # malformed → run_bot's out-of-date toast
-            project_id = int(parts[1])
-            try:
-                store.get_project(project_id)
-            except NotFound:
-                return CallbackAction(
-                    reply=(
-                        f"Project '{project_id}' not found. "
-                        "Use /projects to list projects."
-                    )
-                )
-            except Exception:
-                return CallbackAction(reply=TASKS_ERROR_TEXT)
-            # The same view typing "/tasks <id>" would send (including its
-            # own t: keyboard when the project has active tasks).
-            try:
-                view = tasks_view(store, str(project_id))
-            except Exception:
-                return CallbackAction(reply=TASKS_ERROR_TEXT)
-            return CallbackAction(reply=view)
-        if len(parts) == 3 and parts[0] == "t":
-            try:
-                project_id = int(parts[1])
-                number = int(parts[2])
-            except ValueError:
-                return None
-            try:
-                project = store.get_project(project_id)
-            except NotFound:
-                return CallbackAction(
-                    reply=(
-                        f"Project '{project_id}' not found. "
-                        "Use /projects to list projects."
-                    )
-                )
-            except Exception:
-                return CallbackAction(reply=TASK_ERROR_TEXT)
-            try:
-                task = store.get_task(project_id, number)
-            except NotFound:
-                return CallbackAction(
-                    reply=f"Task #{number} not found in {project['name']}."
-                )
-            except Exception:
-                return CallbackAction(reply=TASK_ERROR_TEXT)
-            try:
-                history = store.get_history(project_id, number)
-            except Exception:
-                return CallbackAction(reply=TASK_ERROR_TEXT)
-            # The detail reply carries its own keyboard only when the
-            # button's chat is known (an inaccessible message arrives with
-            # no chat → the plain text, as before): the toggle button
-            # reflects that chat's subscription state.
-            message = callback_query.get("message") or {}
-            chat_id = (message.get("chat") or {}).get("id")
-            subscribed = False
-            if chat_id is not None:
-                try:
-                    subscribed = any(
-                        s["project_id"] == project_id
-                        for s in store.list_subscriptions(chat_id)
-                    )
-                except Exception:
-                    return CallbackAction(reply=TASK_ERROR_TEXT)
-            return CallbackAction(
-                reply=format_task_view(task, project, history, chat_id, subscribed)
-            )
-        if len(parts) == 4 and parts[0] == "a":
-            if not (
-                parts[1].isdigit() and parts[2].isdigit() and parts[3].isdigit()
-            ):
-                return None  # malformed → run_bot's out-of-date toast
-            project_id = int(parts[1])
-            number = int(parts[2])
-            attachment_id = int(parts[3])
-            try:
-                project = store.get_project(project_id)
-            except NotFound:
-                return CallbackAction(
-                    reply=(
-                        f"Project '{project_id}' not found. "
-                        "Use /projects to list projects."
-                    )
-                )
-            except Exception:
-                return CallbackAction(reply=ATTACHMENT_ERROR_TEXT)
-            try:
-                task = store.get_task(project_id, number)
-            except NotFound:
-                return CallbackAction(
-                    reply=f"Task #{number} not found in {project['name']}."
-                )
-            except Exception:
-                return CallbackAction(reply=ATTACHMENT_ERROR_TEXT)
-            try:
-                meta, data = store.get_task_attachment(
-                    project_id, number, attachment_id
-                )
-            except NotFound:
-                return CallbackAction(
-                    reply=(
-                        f"Attachment {attachment_id} not found on task "
-                        f"#{number} ({project['name']}). Use /task "
-                        f"{project['name']} {number} to list the task's "
-                        "attachments."
-                    )
-                )
-            except Exception:
-                return CallbackAction(reply=ATTACHMENT_ERROR_TEXT)
-            return CallbackAction(reply=attachment_reply(meta, data, task))
-        if len(parts) == 2 and parts[0] in ("s", "u") and parts[1].isdigit():
-            project_id = int(parts[1])
-            # The family's error text, per prefix (a failed press of the
-            # subscribe toggle reports a subscribe failure, etc.).
-            error_text = (
-                SUBSCRIBE_ERROR_TEXT if parts[0] == "s" else UNSUBSCRIBE_ERROR_TEXT
-            )
-            try:
-                project = store.get_project(project_id)
-            except NotFound:
-                return CallbackAction(
-                    reply=(
-                        f"Project '{project_id}' not found. "
-                        "Use /projects to list projects."
-                    )
-                )
-            except Exception:
-                return CallbackAction(reply=error_text)
-            message = callback_query.get("message") or {}
-            # A subscription is per chat: an inaccessible message (no chat)
-            # cannot be toggled → the out-of-date toast.
-            chat_id = (message.get("chat") or {}).get("id")
-            if chat_id is None:
-                return None
-            if parts[0] == "s":
-                try:
-                    store.subscribe_project(chat_id, project_id)
-                except Exception:
-                    return CallbackAction(reply=error_text)
-                subscribed = True
-                answer = f"Subscribed to {project['name']}"
-            else:
-                try:
-                    store.unsubscribe_project(chat_id, project_id)
-                except Exception:
-                    return CallbackAction(reply=error_text)
-                subscribed = False
-                answer = f"Unsubscribed from {project['name']}"
-            # In-place re-render: a toggle leaves the message text unchanged
-            # and only flips the pressed toggle button; an inaccessible
-            # message (no text) gets the toast only.
-            text = message.get("text")
-            if text is None:
-                return CallbackAction(answer_text=answer)
-            rows = (message.get("reply_markup") or {}).get("inline_keyboard") or []
-            return CallbackAction(
-                answer_text=answer,
-                edit=MessageEdit(
-                    text,
-                    {"inline_keyboard": _flip_toggle(rows, project_id, data, subscribed)},
-                ),
-            )
-        if len(parts) == 4 and parts[0] in ("m", "c") and all(
-            parts[i].isdigit() for i in (1, 2, 3)
-        ):
-            # The /task view's per-state buttons (m:) and the confirm
-            # button (c:). The state index is the payload's last field;
-            # out of range → malformed → the out-of-date toast.
-            if int(parts[3]) >= len(db.WORKFLOW_STATES):
-                return None
-            project_id, number = int(parts[1]), int(parts[2])
-            target = db.WORKFLOW_STATES[int(parts[3])]
-            resolved = _resolve_move_context(store, project_id, number)
-            if not isinstance(resolved, tuple):
-                return resolved
-            project, task = resolved
-            # Archived details never carry state buttons (or confirms).
-            if task["state"] == db.ARCHIVED_STATE:
-                return None
-            if task["state"] == target:
-                # m: a stale button; c: someone moved it in the meantime.
-                # A toast only — no store call, no edit.
-                return CallbackAction(answer_text=f"Already in {target}.")
-            try:
-                affected = store.plan_move(project_id, number, target)
-            except Exception:
-                return CallbackAction(reply=MOVE_ERROR_TEXT)
-            if parts[0] == "m" and len(affected) > 1:
-                # The move would pull prerequisites along: edit the message
-                # to the confirm keyboard, nothing is written.
-                confirm = _confirm_move_markup(
-                    project_id, task, target, affected
-                )
-                return CallbackAction(
-                    edit=MessageEdit(confirm.text, confirm.reply_markup)
-                )
-            try:
-                store.move_task(
-                    project_id, number, target,
-                    confirm=(parts[0] == "c"),
-                )
-            except Exception:
-                return CallbackAction(reply=MOVE_ERROR_TEXT)
-            detail = _detail_edit(store, project, number, callback_query)
-            if not isinstance(detail, MessageEdit):
-                return detail
-            if len(affected) == 1:
-                answer = f"Moved #{number} to {target}."
-            else:
-                answer = f"Moved {len(affected)} tasks to {target}."
-            return CallbackAction(answer_text=answer, edit=detail)
-        if len(parts) == 3 and parts[0] == "x" and all(
-            parts[i].isdigit() for i in (1, 2)
-        ):
-            # The confirm keyboard's Cancel: re-render the plain detail,
-            # no store change.
-            project_id, number = int(parts[1]), int(parts[2])
-            resolved = _resolve_move_context(store, project_id, number)
-            if not isinstance(resolved, tuple):
-                return resolved
-            project, task = resolved
-            detail = _detail_edit(store, project, number, callback_query)
-            if not isinstance(detail, MessageEdit):
-                return detail
-            return CallbackAction(answer_text="Cancelled.", edit=detail)
-        if len(parts) == 1 and parts[0] == "h":
-            # The main-menu hub's own button (what the other views'
-            # Main-menu rows will send): opens the menu view, static.
-            return CallbackAction(reply=menu_view())
-        if len(parts) == 2 and parts[0] == "h" and parts[1] in ("p", "t", "s", "a", "h"):
-            # The menu's route buttons (#61 sends the same payloads). The
-            # store-backed routes report a non-NotFound store failure with
-            # the board family's error text; the static routes cannot fail.
-            route = parts[1]
-            if route == "p":
-                try:
-                    return CallbackAction(reply=project_view(store))
-                except Exception:
-                    return CallbackAction(reply=PROJECTS_ERROR_TEXT)
-            if route == "t":
-                try:
-                    return CallbackAction(reply=tasks_view(store))
-                except Exception:
-                    return CallbackAction(reply=TASKS_ERROR_TEXT)
-            if route == "s":
-                # The subscription list is per chat: an inaccessible
-                # message (no chat) → the out-of-date toast.
-                message = callback_query.get("message") or {}
-                chat_id = (message.get("chat") or {}).get("id")
-                if chat_id is None:
-                    return None
-                try:
-                    return CallbackAction(reply=subscribe_view(store, chat_id))
-                except Exception:
-                    return CallbackAction(reply=SUBSCRIBE_ERROR_TEXT)
-            if route == "a":
-                return CallbackAction(reply=ADD_USAGE_TEXT)
-            return CallbackAction(reply=HELP_TEXT)
-        # Any other shape (wrong family, arity, or non-numeric fields):
-        # nothing to do → run_bot's out-of-date toast.
-        return None
+        handler = handlers.get((parts[0], len(parts)))
+        # Any other shape (unknown family or arity; each handler also
+        # rejects its own malformed fields): nothing to do → run_bot's
+        # out-of-date toast.
+        return handler(parts, callback_query) if handler is not None else None
 
     return callback_dispatch
 
