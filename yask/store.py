@@ -642,8 +642,12 @@ class Store:
                 {"number": p["number"], "title": p["title"], "state": p["state"]}
             )
         attachment_map: dict[int, list[dict]] = {}
+        # length(data) is metadata-only: SQLite gets the byte count from the
+        # record header and never copies the BLOB bytes into the row, so a
+        # listing stays O(metadata) no matter how many attachments exist.
         for a in self.conn.execute(
-            f"SELECT * FROM attachments WHERE task_id IN ({ph}) "
+            f"SELECT id, task_id, filename, content_type, length(data) AS size, "
+            f"created_at FROM attachments WHERE task_id IN ({ph}) "
             "ORDER BY task_id, id",
             params,
         ).fetchall():
@@ -652,7 +656,7 @@ class Store:
                     "id": a["id"],
                     "filename": a["filename"],
                     "content_type": a["content_type"],
-                    "size": len(a["data"]),
+                    "size": a["size"],
                     "created_at": a["created_at"],
                 }
             )
@@ -1556,15 +1560,15 @@ class Store:
                 " VALUES (?, ?, ?, ?, ?)",
                 (row["id"], filename, content_type, data, now),
             )
-        a = self.conn.execute(
-            "SELECT * FROM attachments WHERE id = ?", (cur.lastrowid,)
-        ).fetchone()
+        # Build the response from the in-memory values just inserted — the
+        # INSERT stores exactly these (no DB-side transforms), so no
+        # post-INSERT SELECT * is needed and the BLOB is never re-read.
         return {
-            "id": a["id"],
-            "filename": a["filename"],
-            "content_type": a["content_type"],
-            "size": len(a["data"]),
-            "created_at": a["created_at"],
+            "id": cur.lastrowid,
+            "filename": filename,
+            "content_type": content_type,
+            "size": len(data),
+            "created_at": now,
         }
 
     def list_attachments(self, project_id: int, number: int) -> list[dict]:
@@ -1574,17 +1578,21 @@ class Store:
                 "id": a["id"],
                 "filename": a["filename"],
                 "content_type": a["content_type"],
-                "size": len(a["data"]),
+                "size": a["size"],
                 "created_at": a["created_at"],
             }
             for a in self.conn.execute(
-                "SELECT * FROM attachments WHERE task_id = ? ORDER BY id", (row["id"],)
+                "SELECT id, filename, content_type, length(data) AS size, "
+                "created_at FROM attachments WHERE task_id = ? ORDER BY id",
+                (row["id"],),
             ).fetchall()
         ]
 
     def get_attachment(self, attachment_id: int) -> tuple[dict, bytes]:
         a = self.conn.execute(
-            "SELECT * FROM attachments WHERE id = ?", (attachment_id,)
+            "SELECT filename, content_type, length(data) AS size, created_at, data "
+            "FROM attachments WHERE id = ?",
+            (attachment_id,),
         ).fetchone()
         if a is None:
             raise NotFound(f"attachment {attachment_id} not found")
@@ -1592,7 +1600,7 @@ class Store:
             {
                 "filename": a["filename"],
                 "content_type": a["content_type"],
-                "size": len(a["data"]),
+                "size": a["size"],
                 "created_at": a["created_at"],
             },
             bytes(a["data"]),
@@ -1611,7 +1619,8 @@ class Store:
         """
         row = self._get_task(project_id, number)
         a = self.conn.execute(
-            "SELECT * FROM attachments WHERE id = ? AND task_id = ?",
+            "SELECT filename, content_type, length(data) AS size, created_at, data "
+            "FROM attachments WHERE id = ? AND task_id = ?",
             (attachment_id, row["id"]),
         ).fetchone()
         if a is None:
@@ -1620,7 +1629,7 @@ class Store:
             {
                 "filename": a["filename"],
                 "content_type": a["content_type"],
-                "size": len(a["data"]),
+                "size": a["size"],
                 "created_at": a["created_at"],
             },
             bytes(a["data"]),
