@@ -48,7 +48,7 @@ Everything is provided by the flake (nixpkgs 26.05). Enter the dev environment
 nix develop
 ```
 
-Run the test suite (131 tests covering the domain rules above):
+Run the test suite (538 tests covering the domain rules above):
 
 ```
 python3 -m pytest tests -q
@@ -105,7 +105,8 @@ from `TELEGRAM_BOT_TOKEN` (get one from @BotFather) and answers `/start`,
 In progress and Review — grouped by project and state), `/task
 <project> <number|title>` (one task's details — state, estimate,
 description, prerequisites, attachments and recent history — the task
-found by number or by title), `/attachment <project> <task> <id>`
+found by number or by title), `/backlog [project]` (the tasks in the
+Backlog state, grouped by project), `/attachment <project> <task> <id>`
 (shows a task's attachment — small markdown/plain text (<16 KB) inline as
 a message, images as a photo, larger content as a file) and `/move
 <project> <task> <state>` (moves a task to another state; a move that

@@ -349,6 +349,70 @@ def test_list_in_progress_unknown_project(store):
         store.list_in_progress(999)
 
 
+def test_list_backlog_empty(store, project):
+    assert store.list_backlog(project["id"]) == []
+
+
+def test_list_backlog_only_backlog_tasks_and_isolation(store):
+    alpha = store.create_project("alpha")["id"]
+    beta = store.create_project("beta")["id"]
+
+    # alpha: one task in every state
+    backlog = store.create_task(alpha, "backlog")
+    todo = store.create_task(alpha, "todo")
+    store.move_task(alpha, todo["number"], "Todo", confirm=True)
+    planning = store.create_task(alpha, "planning")
+    store.move_task(alpha, planning["number"], "Planning", confirm=True)
+    working = store.create_task(alpha, "working")
+    store.move_task(alpha, working["number"], "In progress", confirm=True)
+    review = store.create_task(alpha, "review")
+    store.move_task(alpha, review["number"], "Review", confirm=True)
+    done = store.create_task(alpha, "done")
+    store.move_task(alpha, done["number"], "Done", confirm=True)
+    blocked = store.create_task(alpha, "blocked")
+    store.move_task(alpha, blocked["number"], "Blocked")
+    archived = store.create_task(alpha, "archived")
+    store.archive_task(alpha, archived["number"], confirm=True)
+
+    # beta: a Backlog task that must not leak into alpha's view
+    other = store.create_task(beta, "other backlog")
+
+    out = store.list_backlog(alpha)
+    assert out == [
+        {"number": backlog["number"], "title": "backlog", "state": "Backlog"}
+    ]
+    # the excluded states never appear
+    for t in out:
+        assert t["state"] not in (
+            "Todo", "Planning", "In progress", "Review", "Done",
+            "Blocked", "Archived",
+        )
+    # per-project isolation
+    assert all(t["title"] != "other backlog" for t in out)
+
+
+def test_list_backlog_ordering(store, project):
+    pid = project["id"]
+    # create a then b, then move b before a (column order != creation
+    # order) to prove sort_order is honored
+    a = store.create_task(pid, "a")
+    b = store.create_task(pid, "b")
+    store.reorder_task(pid, b["number"], before_number=a["number"])
+    c = store.create_task(pid, "c")
+
+    out = store.list_backlog(pid)
+    assert [(t["state"], t["title"]) for t in out] == [
+        ("Backlog", "b"),
+        ("Backlog", "a"),
+        ("Backlog", "c"),
+    ]
+
+
+def test_list_backlog_unknown_project(store):
+    with pytest.raises(NotFound):
+        store.list_backlog(999)
+
+
 def test_find_tasks_by_title_case_insensitive_and_number_order(store):
     pid = store.create_project("yask")["id"]
     a = store.create_task(pid, "Fix the bug")

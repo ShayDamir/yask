@@ -21,7 +21,9 @@ active states — Todo, Planning, In progress and Review — grouped by
 project and state, with one inline button per task),
 ``/task <project> <number|title>`` (one task's details — state, estimate,
 description, prerequisites, attachments and recent history — the task
-found by number or by case-insensitive title), ``/attachment
+found by number or by case-insensitive title),
+``/backlog [project]`` (the tasks in the Backlog state, grouped by
+project, with one inline button per task), ``/attachment
 <project> <task> <id>`` (shows one of the task's attachments — small
 markdown/plain text (<16 KB) inline as a message, images as a photo,
 larger content as a file, via ``sendDocument``/``sendPhoto``),
@@ -194,6 +196,11 @@ COMMAND_REGISTRY: list[Command] = [
         auth_gated=True,
     ),
     Command(
+        "/backlog",
+        "tasks in Backlog (optionally [project])",
+        auth_gated=True,
+    ),
+    Command(
         "/move",
         "move a task to another state (/move <project> <task> <state>)",
         auth_gated=True,
@@ -315,6 +322,7 @@ UNKNOWN_CALLBACK_TEXT = (
 # Store-backed command failed: reply, don't crash the poll loop.
 PROJECTS_ERROR_TEXT = "I could not read the board right now. Please try again."
 TASKS_ERROR_TEXT = "I could not read the board right now. Please try again."
+BACKLOG_ERROR_TEXT = "I could not read the board right now. Please try again."
 TASK_ERROR_TEXT = "I could not read the board right now. Please try again."
 ATTACHMENT_ERROR_TEXT = "I could not read the board right now. Please try again."
 SUBSCRIBE_ERROR_TEXT = (
@@ -685,6 +693,63 @@ def tasks_view(store: Store, project_arg: Optional[str] = None) -> Reply:
                         }
                     ]
                 )
+    rows.append([_main_menu_button()])
+    return KeyboardReply("\n".join(lines), {"inline_keyboard": rows})
+
+
+def backlog_view(store: Store, project_arg: Optional[str] = None) -> Reply:
+    """Format the ``/backlog [project]`` reply.
+
+    Without an argument, lists every project (in name order, the same order
+    as ``/projects``) that has at least one task in the Backlog state. With
+    an argument, resolves the project (case-insensitive name or integer id)
+    and lists only its Backlog tasks. An empty board — or a resolved project
+    with no Backlog tasks — shows ``(none)`` under the header; an
+    unresolvable argument yields a not-found reply pointing at ``/projects``.
+
+    When at least one task is listed the reply is a
+    :class:`KeyboardReply`: the task lines read ``#<n> <title>`` and the
+    same tasks, in reading order, become one inline-keyboard row each with
+    label ``#<n> <title>`` and ``callback_data``
+    ``t:<project-id>:<number>`` (the task-detail button, answered by
+    :func:`make_callback_dispatch`), followed by a final row carrying the
+    Main-menu button (:func:`_main_menu_button`, payload ``h``). A reply
+    with no tasks is a plain ``str`` — the Bot API rejects an empty inline
+    keyboard, and there are no tap targets anyway.
+    """
+    if project_arg is None:
+        projects = []
+        for p in store.list_projects():
+            tasks = store.list_backlog(p["id"])
+            if tasks:
+                projects.append((p, tasks))
+        if not projects:
+            return "Backlog:\n(none)"
+    else:
+        project = _resolve_project(store, project_arg)
+        if project is None:
+            return (
+                f"Project '{project_arg}' not found. Use /projects to list projects."
+            )
+        tasks = store.list_backlog(project["id"])
+        if not tasks:
+            return "Backlog:\n(none)"
+        projects = [(project, tasks)]
+
+    lines = ["Backlog:"]
+    rows = []
+    for p, tasks in projects:
+        lines.append(f"{p['id']}. {p['name']}")
+        for t in tasks:
+            lines.append(f"    #{t['number']} {t['title']}")
+            rows.append(
+                [
+                    {
+                        "text": f"#{t['number']} {t['title']}",
+                        "callback_data": f"t:{p['id']}:{t['number']}",
+                    }
+                ]
+            )
     rows.append([_main_menu_button()])
     return KeyboardReply("\n".join(lines), {"inline_keyboard": rows})
 
@@ -1749,6 +1814,13 @@ def _handle_tasks(
     return tasks_view(store, _tasks_arg(text))
 
 
+def _handle_backlog(
+    store: Store, text: Optional[str], chat_id: Optional[int]
+) -> Reply:
+    """``/backlog``: the Backlog view for the (optional) project argument."""
+    return backlog_view(store, _tasks_arg(text))
+
+
 def _handle_task(
     store: Store, text: Optional[str], chat_id: Optional[int]
 ) -> Reply:
@@ -1826,6 +1898,7 @@ def _handle_unsubscribe(
 COMMAND_TABLE: dict[str, tuple[CommandHandler, str]] = {
     "/projects": (_handle_projects, PROJECTS_ERROR_TEXT),
     "/tasks": (_handle_tasks, TASKS_ERROR_TEXT),
+    "/backlog": (_handle_backlog, BACKLOG_ERROR_TEXT),
     "/task": (_handle_task, TASK_ERROR_TEXT),
     "/attachment": (_handle_attachment, ATTACHMENT_ERROR_TEXT),
     "/attach": (_handle_attach, ATTACH_ERROR_TEXT),
@@ -1866,11 +1939,12 @@ def make_dispatch(
     """Build the message→reply dispatcher for a bot bound to ``store``.
 
     Store-backed commands — the rows of :data:`COMMAND_TABLE`
-    (``/projects``, ``/tasks``, ``/task``, ``/attachment``, ``/attach``,
-    ``/move``, ``/add``, ``/describe``, ``/type``, ``/subscribe``,
-    ``/unsubscribe``) — read the board through ``store`` via their table
-    handler (``/attach`` typed as a plain text message answers its usage
-    text; its real path is the file handler below); the subscription
+    (``/projects``, ``/tasks``, ``/backlog``, ``/task``, ``/attachment``,
+    ``/attach``, ``/move``, ``/add``, ``/describe``, ``/type``,
+    ``/subscribe``, ``/unsubscribe``) — read the board through ``store``
+    via their table handler (``/attach`` typed as a plain text message
+    answers its usage text; its real path is the file handler below); the
+    subscription
     commands additionally need the sender's chat id, hence
     ``dispatch(text, chat_id)``. ``/login`` and ``/whoami`` are explicit
     special cases before the table lookup (they need the auth state and

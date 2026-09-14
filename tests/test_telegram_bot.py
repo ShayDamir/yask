@@ -1385,6 +1385,207 @@ def test_help_mentions_tasks():
     assert "/tasks" in telegram_bot.HELP_TEXT
 
 
+# --- /backlog (store-backed dispatch) ----------------------------------------
+
+
+def test_backlog_empty_board(store):
+    script = run_bot_until_stop(
+        Script([[message_update(181, "/backlog")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 7
+    assert script.sent[0]["text"] == "Backlog:\n(none)"
+    # no tasks → no keyboard (the Bot API rejects an empty inline_keyboard)
+    assert "reply_markup" not in script.sent[0]
+
+
+def test_backlog_populated_board_exact(store):
+    # zeta is created first (id 1) but "alpha" sorts before "zeta", so the
+    # id-2 project is listed first — display order is by name.
+    zeta = store.create_project("zeta")["id"]
+    alpha = store.create_project("alpha")["id"]
+
+    # alpha: two Backlog tasks plus one task in each other state
+    store.create_task(alpha, "backlog 1")                        # #1 Backlog
+    store.create_task(alpha, "backlog 2")                        # #2 Backlog
+    t = store.create_task(alpha, "todo")
+    store.move_task(alpha, t["number"], "Todo", confirm=True)    # #3
+    t = store.create_task(alpha, "working")
+    store.move_task(alpha, t["number"], "In progress", confirm=True)  # #4
+    t = store.create_task(alpha, "done")
+    store.move_task(alpha, t["number"], "Done", confirm=True)    # #5
+    t = store.create_task(alpha, "blocked")
+    store.move_task(alpha, t["number"], "Blocked")               # #6
+    t = store.create_task(alpha, "archived")
+    store.archive_task(alpha, t["number"], confirm=True)         # #7
+
+    # zeta: a single Backlog task
+    store.create_task(zeta, "z backlog")                         # #1
+
+    script = run_bot_until_stop(
+        Script([[message_update(182, "/backlog")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    # exact text: name order, id prefixes, column order, and the
+    # non-Backlog states absent
+    assert script.sent[0]["text"] == (
+        "Backlog:\n"
+        f"{alpha}. alpha\n"
+        f"    #1 backlog 1\n"
+        f"    #2 backlog 2\n"
+        f"{zeta}. zeta\n"
+        f"    #1 z backlog"
+    )
+    # one button per task, in reading order (the t: callback payloads),
+    # then the Main-menu row (payload h)
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 backlog 1", "callback_data": f"t:{alpha}:1"}],
+            [{"text": "#2 backlog 2", "callback_data": f"t:{alpha}:2"}],
+            [{"text": "#1 z backlog", "callback_data": f"t:{zeta}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
+
+
+def test_backlog_filter_by_id_and_name(store):
+    zeta = store.create_project("zeta")["id"]
+    alpha = store.create_project("alpha")["id"]
+    store.create_task(alpha, "alpha backlog")
+    t = store.create_task(alpha, "alpha working")
+    store.move_task(alpha, t["number"], "In progress", confirm=True)
+    store.create_task(zeta, "zeta backlog")
+
+    # by project name, case-insensitive
+    script = run_bot_until_stop(
+        Script([[message_update(183, "/backlog ALPHA")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Backlog:\n"
+        f"{alpha}. alpha\n"
+        f"    #1 alpha backlog"
+    )
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 alpha backlog", "callback_data": f"t:{alpha}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
+
+    # by project id
+    script = run_bot_until_stop(
+        Script([[message_update(184, f"/backlog {zeta}")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Backlog:\n"
+        f"{zeta}. zeta\n"
+        f"    #1 zeta backlog"
+    )
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 zeta backlog", "callback_data": f"t:{zeta}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
+
+
+def test_backlog_filter_name_with_spaces(store):
+    pid = store.create_project("my big project")["id"]
+    store.create_task(pid, "backlog")
+    script = run_bot_until_stop(
+        Script([[message_update(185, "/backlog my big project")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Backlog:\n"
+        f"{pid}. my big project\n"
+        f"    #1 backlog"
+    )
+    assert script.sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 backlog", "callback_data": f"t:{pid}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
+
+
+def test_backlog_filter_zero_backlog(store):
+    alpha = store.create_project("alpha")["id"]
+    zeta = store.create_project("zeta")["id"]
+    # alpha has only active-state tasks (no Backlog)
+    t = store.create_task(alpha, "working only")
+    store.move_task(alpha, t["number"], "In progress", confirm=True)
+    # zeta has a Backlog task, so the board is non-empty overall
+    store.create_task(zeta, "z backlog")
+
+    # project found but zero Backlog tasks
+    script = run_bot_until_stop(
+        Script([[message_update(186, "/backlog alpha")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == "Backlog:\n(none)"
+    # no tasks → no keyboard (the Bot API rejects an empty inline_keyboard)
+    assert "reply_markup" not in script.sent[0]
+
+
+def test_backlog_unknown_project(store):
+    store.create_project("alpha")
+    script = run_bot_until_stop(
+        Script([[message_update(187, "/backlog nope")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Project 'nope' not found. Use /projects to list projects."
+    )
+    assert "reply_markup" not in script.sent[0]
+    # unknown by id
+    script = run_bot_until_stop(
+        Script([[message_update(188, "/backlog 999")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Project '999' not found. Use /projects to list projects."
+    )
+    assert "reply_markup" not in script.sent[0]
+
+
+def test_backlog_with_bot_mention(store):
+    script = run_bot_until_stop(
+        Script([[message_update(189, "/backlog@yask_test_bot")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == "Backlog:\n(none)"
+    assert "reply_markup" not in script.sent[0]
+
+
+def test_backlog_store_failure_replies_and_recovers(store, monkeypatch):
+    # a project must exist so the no-arg view reaches list_backlog
+    store.create_project("alpha")
+
+    def boom(project_id):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "list_backlog", boom)
+    script = run_bot_until_stop(
+        Script([[message_update(190, "/backlog"), message_update(191, "/start")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    # the failure produces a reply, not a crash; the next message is still
+    # answered
+    assert len(script.sent) == 2
+    assert script.sent[0]["text"] == telegram_bot.BACKLOG_ERROR_TEXT
+    assert "reply_markup" not in script.sent[0]
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+
+
+def test_help_mentions_backlog():
+    assert "/backlog" in telegram_bot.HELP_TEXT
+
+
 # --- /task (store-backed dispatch) -------------------------------------------
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 100  # 108 bytes
@@ -3506,9 +3707,9 @@ def test_help_mentions_subscribe():
 # --- command registry (source of truth for /help + setMyCommands) ---------
 
 _REGISTRY_NAMES = (
-    "/start", "/help", "/login", "/whoami", "/projects", "/tasks", "/task",
-    "/attachment", "/move", "/add", "/describe", "/type", "/attach",
-    "/subscribe", "/unsubscribe",
+    "/start", "/help", "/login", "/whoami", "/projects", "/tasks",
+    "/task", "/backlog", "/move", "/add", "/describe", "/type",
+    "/attachment", "/attach", "/subscribe", "/unsubscribe",
 )
 
 
@@ -3565,6 +3766,7 @@ def test_dispatch_table_error_texts_match_family_constants():
     expected = {
         "/projects": telegram_bot.PROJECTS_ERROR_TEXT,
         "/tasks": telegram_bot.TASKS_ERROR_TEXT,
+        "/backlog": telegram_bot.BACKLOG_ERROR_TEXT,
         "/task": telegram_bot.TASK_ERROR_TEXT,
         "/attachment": telegram_bot.ATTACHMENT_ERROR_TEXT,
         "/attach": telegram_bot.ATTACH_ERROR_TEXT,
@@ -3656,11 +3858,11 @@ def test_startup_posts_registry_commands_via_setmycommands(tmp_path):
     assert body["commands"] == telegram_bot.build_my_commands(
         telegram_bot.COMMAND_REGISTRY
     )
-    # strong exactness: registry names in order, all 15, well-formed entries
+    # strong exactness: registry names in order, all 16, well-formed entries
     assert [e["command"] for e in body["commands"]] == [
         c.name for c in telegram_bot.COMMAND_REGISTRY
     ]
-    assert len(body["commands"]) == 15
+    assert len(body["commands"]) == 16
     for entry in body["commands"]:
         assert set(entry) == {"command", "description"}
 

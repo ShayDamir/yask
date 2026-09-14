@@ -306,6 +306,27 @@ class Store:
             for r in rows
         ]
 
+    def list_backlog(self, project_id: int) -> list[dict]:
+        """The project's tasks in the Backlog state (the bot's ``/backlog`` view).
+
+        Returns lean ``{"number", "title", "state"}`` dicts for every task
+        whose state is ``Backlog``, in column order (``sort_order``). The
+        ``/backlog`` counterpart of :meth:`list_in_progress` (the active
+        states); Done, Blocked and Archived tasks are excluded. Raises
+        ``NotFound`` for an unknown project id.
+        """
+        self._get_project(project_id)
+        rows = self.conn.execute(
+            "SELECT number, title, state, sort_order, id FROM tasks "
+            "WHERE project_id = ? AND state = 'Backlog'",
+            (project_id,),
+        ).fetchall()
+        rows = sorted(rows, key=lambda r: (r["sort_order"], r["id"]))
+        return [
+            {"number": r["number"], "title": r["title"], "state": r["state"]}
+            for r in rows
+        ]
+
     def find_tasks_by_title(self, project_id: int, title: str) -> list[dict]:
         """Exact, case-insensitive task-title lookup (the bot's ``/task`` view).
 
