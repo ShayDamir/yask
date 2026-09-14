@@ -974,6 +974,23 @@ def task_view(
     return format_task_view(task, project, history, chat_id, subscribed)
 
 
+def _attachment_caption(task: dict, meta: dict) -> str:
+    """The ``#<n> <title> — <filename>`` context line shared by the inline
+    attachment message header and the file-reply caption."""
+    return f"#{task['number']} {task['title']} — {meta['filename']}"
+
+
+def _truncate_inline(text: str, total: int) -> str:
+    """``text`` truncated to :data:`INLINE_TEXT_MAX` with a
+    ``… (truncated, N chars total)`` note, where ``total`` is the pre-
+    truncation content length (the body, excluding the note)."""
+    if len(text) <= INLINE_TEXT_MAX:
+        return text
+    note = f"\n… (truncated, {total} chars total)"
+    budget = max(0, INLINE_TEXT_MAX - len(note))
+    return text[:budget] + note
+
+
 def attachment_reply(meta: dict, data: bytes, task: dict) -> Union[str, FileReply]:
     """The reply for one attachment.
 
@@ -985,23 +1002,23 @@ def attachment_reply(meta: dict, data: bytes, task: dict) -> Union[str, FileRepl
     ``… (truncated, N chars total)`` note. Everything else is a
     :class:`FileReply` — images as a photo (already displayed inline by
     Telegram), other content as a document.
+
+    The caption prefix and the truncation note are produced by
+    :func:`_attachment_caption` and :func:`_truncate_inline`.
     """
     if (
         meta["size"] < INLINE_MARKDOWN_MAX_SIZE
         and meta["content_type"] in ("text/markdown", "text/plain")
     ):
         body = data.decode("utf-8", errors="replace")
-        text = f"#{task['number']} {task['title']} — {meta['filename']}\n{body}"
-        if len(text) > INLINE_TEXT_MAX:
-            note = f"\n… (truncated, {len(body)} chars total)"
-            budget = max(0, INLINE_TEXT_MAX - len(note))
-            text = text[:budget] + note
-        return text
+        return _truncate_inline(
+            f"{_attachment_caption(task, meta)}\n{body}", len(body)
+        )
     return FileReply(
         filename=meta["filename"],
         data=data,
         content_type=meta["content_type"],
-        caption=f"#{task['number']} {task['title']} — {meta['filename']}",
+        caption=_attachment_caption(task, meta),
     )
 
 
