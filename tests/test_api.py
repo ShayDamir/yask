@@ -5,7 +5,7 @@ import base64
 import pytest
 from fastapi.testclient import TestClient
 
-from yask.api import CSP, create_app
+from yask.api import ATTACHMENT_CSP, CSP, create_app
 
 
 @pytest.fixture()
@@ -249,6 +249,47 @@ def test_svg_attachment_served_as_download(client, pid):
     got2 = client.get(f"/api/attachments/{r2.json()['id']}")
     assert got2.status_code == 200
     assert got2.headers["content-disposition"].startswith("inline")
+
+
+def test_svg_script_payload_attachment_is_inert(client, pid):
+    """#84: an image/svg+xml attachment carrying an embedded <script> is
+    served inert: the bytes are returned as-is, but the response is a
+    forced download with the inert CSP (sandbox; default-src 'none') and
+    nosniff, so even direct navigation to the API URL cannot execute the
+    script. The rule is uniform: a text/markdown attachment keeps its
+    inline disposition but carries the same inert CSP."""
+    client.post(f"/api/projects/{pid}/tasks", json={"title": "t"})
+
+    payload = (
+        b'<svg xmlns="http://www.w3.org/2000/svg">'
+        b'<script>fetch("/api/projects",{method:"POST"})</script></svg>'
+    )
+    r = client.post(
+        f"/api/projects/{pid}/tasks/1/attachments",
+        files={"file": ("evil.svg", payload, "image/svg+xml")},
+    )
+    assert r.status_code == 201
+    got = client.get(f"/api/attachments/{r.json()['id']}")
+    assert got.status_code == 200
+    assert got.content == payload  # bytes served as-is
+    assert got.headers["content-type"] == "image/svg+xml"
+    assert got.headers["content-disposition"].startswith("attachment")
+    assert got.headers["x-content-type-options"] == "nosniff"
+    # the dedicated inert policy — not the UI CSP
+    assert got.headers["content-security-policy"] == ATTACHMENT_CSP
+
+    # uniform rule: text/markdown also carries the inert CSP while
+    # keeping its inline disposition
+    r2 = client.post(
+        f"/api/projects/{pid}/tasks/1/attachments",
+        files={"file": ("notes.md", b"# hi", "text/markdown")},
+    )
+    assert r2.status_code == 201
+    got2 = client.get(f"/api/attachments/{r2.json()['id']}")
+    assert got2.status_code == 200
+    assert got2.headers["content-disposition"].startswith("inline")
+    assert got2.headers["x-content-type-options"] == "nosniff"
+    assert got2.headers["content-security-policy"] == ATTACHMENT_CSP
 
 
 def _multipart_body(boundary, filename, data, content_type):

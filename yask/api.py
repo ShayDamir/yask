@@ -37,6 +37,13 @@ CSP = (
     "base-uri 'none'; form-action 'none'"
 )
 
+# Inert CSP for attachment byte responses (task #84): sandbox blocks
+# script execution outright and the document is treated as a unique
+# origin, so an SVG served as a document can never run its embedded
+# <script> even if Content-Disposition were lost or a consumer
+# rendered the response directly.
+ATTACHMENT_CSP = "sandbox; default-src 'none'"
+
 
 # -- Host/Origin checks (task #85: CSRF / DNS rebinding) --------------------
 #
@@ -292,8 +299,13 @@ def create_app(db_path: str | Path, allow_remote: bool = False) -> FastAPI:
         # channels), X-Frame-Options (clickjacking), nosniff (MIME
         # sniffing), no-referrer (Referer leakage). App-level, so it
         # covers API routes, the /static mount, and error responses.
+        # The UI CSP is the default; an endpoint that supplies its own
+        # policy keeps it — attachment bytes carry the inert policy
+        # (task #84) — so the invariant is: every response has the four
+        # headers, and the CSP is endpoint-specific when set.
         response = await call_next(request)
-        response.headers["Content-Security-Policy"] = CSP
+        if "content-security-policy" not in response.headers:
+            response.headers["Content-Security-Policy"] = CSP
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -474,9 +486,12 @@ def create_app(db_path: str | Path, allow_remote: bool = False) -> FastAPI:
             meta, data = store().get_attachment(attachment_id)
             # SVG is the only executable type in the attachment allowlist:
             # force a download so direct navigation cannot render (and
-            # script) it (task #86; task #84 owns the deeper SVG
-            # hardening). The web UI viewer fetches the blob and renders
-            # it, so it is unaffected by the disposition.
+            # script) it, and give every attachment the inert CSP so the
+            # bytes are never an executable document this app serves
+            # (task #84 owns the download disposition and the CSP; the
+            # global security headers are task #86's). The web UI viewer
+            # fetches the blob and renders it, so it is unaffected by the
+            # disposition.
             disposition = (
                 "attachment" if meta["content_type"] == "image/svg+xml"
                 else "inline"
@@ -487,7 +502,8 @@ def create_app(db_path: str | Path, allow_remote: bool = False) -> FastAPI:
                 headers={
                     "Content-Disposition": (
                         f'{disposition}; filename="{meta["filename"]}"'
-                    )
+                    ),
+                    "Content-Security-Policy": ATTACHMENT_CSP,
                 },
             )
 
