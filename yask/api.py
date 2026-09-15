@@ -24,15 +24,16 @@ from .store import (
 
 WEB_DIR = Path(__file__).parent / "web"
 
-# Strict CSP for the web UI (task #86): only the module script and the
+# Strict CSP for the web UI (tasks #86/#98): only the module script and the
 # stylesheet from /static, images from self/data:/blob: (data: favicon,
 # blob: attachment viewer), same-origin fetch only, no framing, no
 # <base>, no native form submits (the UI intercepts every form).
-# ``style-src 'unsafe-inline'`` is deliberate: the UI sets inline
-# style="..." attributes via h(); the path to full strictness is tracked
-# as task #98.
+# ``style-src`` is fully strict: the UI uses stylesheet classes for static
+# styling, and the dynamic label-chip color is applied via CSSOM custom
+# properties (el.style.setProperty), which CSP does not block — so no
+# inline style="..." attributes remain in the markup.
 CSP = (
-    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "default-src 'none'; script-src 'self'; style-src 'self'; "
     "img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; "
     "base-uri 'none'; form-action 'none'"
 )

@@ -478,11 +478,13 @@ def test_web_ui_served(client):
 
 def test_security_headers_on_web_responses(client):
     """#86: every web response carries the four security headers, and the
-    CSP matches the module-level policy constant."""
+    CSP matches the module-level policy constant. #98: style-src is fully
+    strict — 'unsafe-inline' must not creep back in."""
     for path in ("/", "/static/js/main.js", "/static/style.css"):
         r = client.get(path)
         assert r.status_code == 200
         assert r.headers["content-security-policy"] == CSP
+        assert "'unsafe-inline'" not in r.headers["content-security-policy"]
         assert r.headers["x-frame-options"] == "DENY"
         assert r.headers["x-content-type-options"] == "nosniff"
         assert r.headers["referrer-policy"] == "no-referrer"

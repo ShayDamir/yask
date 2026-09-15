@@ -84,10 +84,10 @@ export function confirmDialog({
     );
     const body = [
       h("h2", {}, title),
-      message ? h("p", { style: "margin:0;color:var(--text-dim)" }, message) : null,
+      message ? h("p", { class: "confirm-message" }, message) : null,
     ];
     if (affected.length) {
-      body.push(h("p", { style: "margin:12px 0 0;font-size:max(13px,var(--min-font))" }, "This also affects:"));
+      body.push(h("p", { class: "affects-head" }, "This also affects:"));
       body.push(
         h(
           "ul",
@@ -96,11 +96,11 @@ export function confirmDialog({
             h(
               "li",
               {},
-              h("span", { class: "num", style: "color:var(--text-dim)" }, `#${a.number}`),
+              h("span", { class: "num dim" }, `#${a.number}`),
               h("span", {}, a.title || ""),
               h(
                 "span",
-                { class: "arrow", style: "margin-left:auto" },
+                { class: "arrow" },
                 `${a.from ?? "—"} → ${a.to}`
               )
             )
@@ -361,22 +361,22 @@ export function openEditorModal(project, task, actions) {
         "label",
         {},
         h("input", { type: "checkbox", value: String(t.number), checked: chosen.has(t.number) ? "checked" : null }),
-        h("span", { class: "num", style: "color:var(--text-dim)" }, `#${t.number}`),
-        h("span", { style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, t.title),
+        h("span", { class: "num dim" }, `#${t.number}`),
+        h("span", { class: "ellipsis" }, t.title),
         h("span", { class: `state-chip ${t.state}` }, t.state)
       );
       return label;
     })
   );
-  if (!others.length) checkList.append(h("span", { style: "color:var(--text-dim);font-size:max(12px,var(--min-font))" }, "No other tasks in this project."));
+  if (!others.length) checkList.append(h("span", { class: "dim-sm" }, "No other tasks in this project."));
 
   // attachments
   const attList = h("div", { class: "attachment-list" });
-  const fileInput = h("input", { type: "file", id: "ed-file", accept: ".md,.markdown,.txt,image/*", style: "max-width:100%" });
+  const fileInput = h("input", { type: "file", id: "ed-file", accept: ".md,.markdown,.txt,image/*" });
   const renderAttachments = (list) => {
     clear(attList);
     if (!list.length) {
-      attList.append(h("span", { style: "color:var(--text-dim);font-size:max(12px,var(--min-font))" }, "No attachments."));
+      attList.append(h("span", { class: "dim-sm" }, "No attachments."));
       return;
     }
     for (const a of list) {
@@ -433,7 +433,7 @@ export function openEditorModal(project, task, actions) {
   const renderLabels = () => {
     clear(labelList);
     if (!projectLabels.length) {
-      labelList.append(h("span", { style: "color:var(--text-dim);font-size:max(12px,var(--min-font))" }, "No labels in this project yet."));
+      labelList.append(h("span", { class: "dim-sm" }, "No labels in this project yet."));
       return;
     }
     for (const l of projectLabels) {
@@ -651,7 +651,7 @@ export function openEditorModal(project, task, actions) {
     h("div", { class: "field" }, h("label", {}, "Parent epic"), parentSelect),
     h("div", { class: "section-title" }, "Prerequisites"),
     checkList,
-    h("div", { class: "hint", style: "margin-top:5px" }, "Moving a task forward also moves prerequisites still behind the target stage."),
+    h("div", { class: "hint" }, "Moving a task forward also moves prerequisites still behind the target stage."),
     h("div", { class: "section-title" }, "Attachments"),
     fileInput,
     attList,
@@ -718,13 +718,13 @@ export function openTelegramUsersModal() {
       users = await api.listTelegramUsers();
     } catch (err) {
       listEl.append(
-        h("span", { style: "color:var(--text-dim)" }, `Could not load users: ${err.message}`)
+        h("span", { class: "dim" }, `Could not load users: ${err.message}`)
       );
       return;
     }
     if (!users.length) {
       listEl.append(
-        h("span", { style: "color:var(--text-dim);font-size:max(12px,var(--min-font))" },
+        h("span", { class: "dim-sm" },
           "No users yet. Add one below.")
       );
       return;

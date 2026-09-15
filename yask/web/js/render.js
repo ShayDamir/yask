@@ -56,19 +56,26 @@ function labelChips(task) {
     "span",
     { class: "label-chips" },
     task.labels.map((l) => {
-      const chipStyle = l.color ? labelChipStyle(l.color) : undefined;
+      const chipProps = l.color ? labelChipStyle(l.color) : undefined;
       const title = l.color
         ? `Label: ${l.name} (${l.color})`
         : `Label: ${l.name}`;
-      return h("span", { class: "label-chip", title, style: chipStyle }, l.name);
+      const chip = h("span", { class: "label-chip", title }, l.name);
+      // CSSOM property assignment (not a style= attribute in markup), so it
+      // survives the strict style-src 'self' CSP (#98).
+      for (const [k, v] of Object.entries(chipProps || {})) chip.style.setProperty(k, v);
+      return chip;
     })
   );
 }
 
-// Turn a normalized #RRGGBB color into an inline style that paints the chip
-// background with a slightly darker border, and picks a black/white foreground
-// from the chip's relative luminance so the label text stays readable. A
-// non-hex/empty color yields undefined so the default class styling is used.
+// Turn a normalized #RRGGBB color into CSS custom properties that paint the
+// chip background with a slightly darker border, and pick a black/white
+// foreground from the chip's relative luminance so the label text stays
+// readable. The properties are applied via CSSOM (el.style.setProperty) and
+// consumed by the .label-chip rule in style.css, so they stay CSP-safe under
+// strict style-src 'self' (#98). A non-hex/empty color yields undefined so
+// the default class styling is used.
 function labelChipStyle(color) {
   const m = /^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.exec(color);
   if (!m) return undefined;
@@ -89,7 +96,7 @@ function labelChipStyle(color) {
   const border = `#${Math.round(r * shade).toString(16).padStart(2, "0")}`
     + `${Math.round(g * shade).toString(16).padStart(2, "0")}`
     + `${Math.round(b * shade).toString(16).padStart(2, "0")}`;
-  return `background:${bg};border-color:${border};color:${fg}`;
+  return { "--chip-bg": bg, "--chip-border": border, "--chip-fg": fg };
 }
 
 // The four standard badges shared by board cards and epic child rows:
@@ -175,7 +182,7 @@ export function renderEpicChildren(task, actions, filterLabel) {
   if (filterLabel) children = children.filter((c) => subtreeHasLabel(c, filterLabel));
   if (!children.length) {
     wrap.append(
-      h("span", { style: "color:var(--text-dim);font-size:max(12px,var(--min-font))" }, "No tasks in this epic yet.")
+      h("span", { class: "dim-sm" }, "No tasks in this epic yet.")
     );
     return wrap;
   }
@@ -311,7 +318,7 @@ export function renderEpicBoard(project, epicNumber, actions, { showArchived, fi
   clear(board);
   const epic = findEpic(project.tasks, epicNumber);
   if (!epic) {
-    board.append(h("div", { class: "empty-column", style: "flex:1;text-align:center" }, "Epic not found."));
+    board.append(h("div", { class: "empty-column fill" }, "Epic not found."));
     return;
   }
   let children = epic.children || [];
@@ -319,7 +326,7 @@ export function renderEpicBoard(project, epicNumber, actions, { showArchived, fi
   if (!children.length) {
     const emptyWrap = h(
       "div",
-      { class: "empty-column", style: "flex:1;text-align:center" },
+      { class: "empty-column fill" },
       h("span", {}, "This epic has no tasks yet."),
       addToEpicBtn(epic, actions)
     );
@@ -385,7 +392,7 @@ export function renderSearchResults(project, query, actions, filterLabel) {
   if (filterLabel) matches = matches.filter((t) => hasLabel(t, filterLabel));
   el.append(h("h2", {}, `${matches.length} task${matches.length === 1 ? "" : "s"} matching “${query.trim()}”`));
   if (!matches.length) {
-    el.append(h("p", { style: "color:var(--text-dim)" }, "No tasks match. Try a different search."));
+    el.append(h("p", { class: "dim" }, "No tasks match. Try a different search."));
     return;
   }
   for (const t of matches) {
@@ -393,7 +400,7 @@ export function renderSearchResults(project, query, actions, filterLabel) {
       h(
         "div",
         { class: "result-card", onclick: () => actions.onEdit(t) },
-        h("span", { class: "num", style: "color:var(--text-dim)" }, `#${t.number}`),
+        h("span", { class: "num dim" }, `#${t.number}`),
         h("span", { class: "title" }, t.title),
         h("span", { class: `badge ${typeClass(t.type)}` }, t.type),
         estimateBadge(t),
@@ -416,7 +423,7 @@ export function renderSidebar(projects, currentId, onSelect) {
           class: `project-item${p.id === currentId ? " active" : ""}`,
           onclick: () => onSelect(p.id),
         },
-        h("span", { style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, p.name),
+        h("span", { class: "ellipsis" }, p.name),
         h("span", { class: "count" }, String(p.task_count))
       )
     );

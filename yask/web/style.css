@@ -70,6 +70,12 @@ html[data-theme="dark"] {
    `hidden` attribute, or hidden sections steal the board's flex space */
 [hidden] { display: none !important; }
 
+/* ---- utilities (class replacements for former inline styles, #98) ------- */
+
+.dim { color: var(--text-dim); }
+.dim-sm { color: var(--text-dim); font-size: max(12px, var(--min-font)); }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 html, body {
   margin: 0;
   height: 100%;
@@ -274,6 +280,7 @@ html, body {
   border: 1px dashed var(--border);
   border-radius: var(--radius);
 }
+.empty-column.fill { flex: 1; } /* epic board placeholder fills the board width */
 
 /* ---- cards -------------------------------------------------------------- */
 
@@ -333,11 +340,14 @@ html, body {
 
 .label-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
 .card-top + .label-chips { margin-top: 7px; }
+/* The per-label colors arrive as CSS custom properties set via CSSOM from
+   render.js (labelChipStyle) — CSP-safe under strict style-src (#98). The
+   fallbacks keep colorless chips on the default gray look. */
 .label-chip {
   font-size: max(11px, var(--min-font));
-  background: var(--bg-hover);
-  border: 1px solid var(--border);
-  color: var(--text);
+  background: var(--chip-bg, var(--bg-hover));
+  border: 1px solid var(--chip-border, var(--border));
+  color: var(--chip-fg, var(--text));
   border-radius: 9px;
   padding: 1px 7px;
   white-space: nowrap;
@@ -519,14 +529,18 @@ textarea { resize: vertical; min-height: 70px; width: 100%; }
 .modal-actions .spacer { flex: 1; }
 
 /* confirm modal */
+.confirm-message { margin: 0; color: var(--text-dim); }
+.affects-head { margin: 12px 0 0; font-size: max(13px, var(--min-font)); }
 .affected-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .affected-list li {
   display: flex; gap: 8px; align-items: center;
   background: var(--bg-hover); border-radius: 6px; padding: 7px 10px; font-size: max(13px, var(--min-font));
 }
-.affected-list .arrow { color: var(--text-dim); }
+.affected-list .arrow { color: var(--text-dim); margin-left: auto; }
 
 /* editor details */
+#ed-file { max-width: 100%; }
+.check-list + .hint { margin-top: 5px; } /* only the Prerequisites hint directly follows a .check-list */
 .section-title { font-size: max(12px, var(--min-font)); font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-dim); margin: 18px 0 8px; border-top: 1px solid var(--border); padding-top: 14px; }
 .check-list { display: flex; flex-direction: column; gap: 4px; max-height: 170px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); padding: 8px; }
 .check-list label { display: flex; align-items: center; gap: 8px; font-size: max(13px, var(--min-font)); cursor: pointer; padding: 3px 4px; border-radius: 5px; }
