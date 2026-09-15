@@ -6,6 +6,7 @@ never called.
 
 import asyncio
 import json
+import re
 import sqlite3
 import time
 
@@ -2104,6 +2105,206 @@ def test_task_store_failure_replies_and_recovers(store, monkeypatch):
 def test_help_mentions_task_and_attachment():
     assert "/task" in telegram_bot.HELP_TEXT
     assert "/attachment" in telegram_bot.HELP_TEXT
+
+
+# --- markdown_to_html (HTML fallback converter) ------------------------------
+
+
+def test_markdown_to_html_escapes_plain_text():
+    assert (
+        telegram_bot.markdown_to_html('a & b < c > d "e"')
+        == "a &amp; b &lt; c &gt; d &quot;e&quot;"
+    )
+
+
+def test_markdown_to_html_escapes_inside_inline_code():
+    assert (
+        telegram_bot.markdown_to_html("use `a < b & c > d` here")
+        == "use <code>a &lt; b &amp; c &gt; d</code> here"
+    )
+
+
+def test_markdown_to_html_escapes_inside_fence():
+    assert (
+        telegram_bot.markdown_to_html("```\n<script>alert(1)</script>\n```")
+        == "<pre><code>&lt;script&gt;alert(1)&lt;/script&gt;</code></pre>"
+    )
+
+
+def test_markdown_to_html_script_stays_inert():
+    out = telegram_bot.markdown_to_html("<script>alert('x')&</script> **b**")
+    assert "<script" not in out
+    assert "</script>" not in out
+
+
+def test_markdown_to_html_link_text_and_href_escaped():
+    assert (
+        telegram_bot.markdown_to_html("[a & b](https://e.com/?x=1&y=2)")
+        == '<a href="https://e.com/?x=1&amp;y=2">a &amp; b</a>'
+    )
+
+
+def test_markdown_to_html_link_href_cannot_break_out_of_quotes():
+    out = telegram_bot.markdown_to_html('[x](https://e.com/"onerror=1)')
+    assert out == '<a href="https://e.com/&quot;onerror=1">x</a>'
+    assert out.count('"') == 2  # only the href's own quotes
+
+
+def test_markdown_to_html_bold():
+    assert telegram_bot.markdown_to_html("**b**") == "<strong>b</strong>"
+    assert telegram_bot.markdown_to_html("__b__") == "<strong>b</strong>"
+
+
+def test_markdown_to_html_italic():
+    assert telegram_bot.markdown_to_html("*i*") == "<em>i</em>"
+    assert telegram_bot.markdown_to_html("_i_") == "<em>i</em>"
+
+
+def test_markdown_to_html_underscore_identifier_stays_literal():
+    # the word-boundary guard: snake_case must never be italicized
+    assert telegram_bot.markdown_to_html("a_b_c") == "a_b_c"
+    assert telegram_bot.markdown_to_html("snake_case_name") == "snake_case_name"
+
+
+def test_markdown_to_html_strike():
+    assert telegram_bot.markdown_to_html("~~s~~") == "<del>s</del>"
+
+
+def test_markdown_to_html_inline_code():
+    assert telegram_bot.markdown_to_html("`c`") == "<code>c</code>"
+
+
+def test_markdown_to_html_fence_multiline_newlines_preserved():
+    assert (
+        telegram_bot.markdown_to_html("```\na\nb\n```")
+        == "<pre><code>a\nb</code></pre>"
+    )
+
+
+def test_markdown_to_html_fence_unclosed_at_eof():
+    assert telegram_bot.markdown_to_html("```\nx") == "<pre><code>x</code></pre>"
+
+
+def test_markdown_to_html_fence_empty_no_empty_tags():
+    assert telegram_bot.markdown_to_html("```\n```") == ""
+
+
+def test_markdown_to_html_quote():
+    assert (
+        telegram_bot.markdown_to_html("> q") == "<blockquote>q</blockquote>"
+    )
+    assert (
+        telegram_bot.markdown_to_html(">no-space")
+        == "<blockquote>no-space</blockquote>"
+    )
+
+
+def test_markdown_to_html_bare_quote_no_tag():
+    assert "blockquote" not in telegram_bot.markdown_to_html(">")
+
+
+def test_markdown_to_html_link():
+    assert (
+        telegram_bot.markdown_to_html("[x](https://e.com)")
+        == '<a href="https://e.com">x</a>'
+    )
+    assert (
+        telegram_bot.markdown_to_html("[x](http://e.com)")
+        == '<a href="http://e.com">x</a>'
+    )
+
+
+def test_markdown_to_html_code_span_is_a_leaf():
+    # no <a> inside <code> — the link markup stays literal
+    assert (
+        telegram_bot.markdown_to_html("`[x](https://e.com)`")
+        == "<code>[x](https://e.com)</code>"
+    )
+    # no <strong> inside <code> — the emphasis markers stay literal
+    assert telegram_bot.markdown_to_html("`**x**`") == "<code>**x**</code>"
+
+
+def test_markdown_to_html_quote_context():
+    assert (
+        telegram_bot.markdown_to_html("> **b**")
+        == "<blockquote><strong>b</strong></blockquote>"
+    )
+    # no <a> inside <blockquote> — the link stays literal
+    assert (
+        telegram_bot.markdown_to_html("> [x](https://e.com)")
+        == "<blockquote>[x](https://e.com)</blockquote>"
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://files.example.com/x",
+        "tg://user?id=1",
+        "javascript:alert(1)",
+        "//e.com/x",
+        "e.com",
+    ],
+)
+def test_markdown_to_html_link_scheme_http_https_only(url):
+    assert telegram_bot.markdown_to_html(f"[x]({url})") == f"[x]({url})"
+
+
+def test_markdown_to_html_headings_stay_literal():
+    for level in range(1, 7):
+        src = "#" * level + " H"
+        assert telegram_bot.markdown_to_html(src) == src
+
+
+def test_markdown_to_html_lists_stay_literal():
+    for src in ["- item", "* item", "+ item", "1. item", "1) item"]:
+        assert telegram_bot.markdown_to_html(src) == src
+    # a trailing single asterisk in the item text is not em-wrapped
+    assert telegram_bot.markdown_to_html("* item *") == "* item *"
+
+
+def test_markdown_to_html_tables_and_dividers_stay_literal():
+    assert telegram_bot.markdown_to_html("| a | b |") == "| a | b |"
+    assert telegram_bot.markdown_to_html("---") == "---"
+
+
+def test_markdown_to_html_link_text_may_carry_bold():
+    assert (
+        telegram_bot.markdown_to_html("[**x**](https://e.com)")
+        == '<a href="https://e.com"><strong>x</strong></a>'
+    )
+
+
+def test_markdown_to_html_kitchen_sink_tag_set():
+    src = (
+        "# H1\n"
+        "**bold** and *italic* and __ub__ and _ui_ and ~~gone~~\n"
+        "`code` and [link](https://e.com)\n"
+        "```\nfenced <script> &\n```\n"
+        "> quote **b** and [x](https://e.com)\n"
+        "- item *em*\n"
+        "| t | a | b |\n"
+        "---\n"
+    )
+    out = telegram_bot.markdown_to_html(src)
+    tags = set(re.findall(r"</?([a-z][a-z0-9]*)", out))
+    assert tags <= {"strong", "em", "del", "code", "pre", "a", "blockquote"}
+
+
+def test_markdown_to_html_crlf_normalized_like_lf():
+    assert (
+        telegram_bot.markdown_to_html("a\r\n\r\nb")
+        == telegram_bot.markdown_to_html("a\n\nb")
+    )
+
+
+def test_markdown_to_html_blank_lines_preserved():
+    assert telegram_bot.markdown_to_html("a\n\nb") == "a\n\nb"
+
+
+def test_markdown_to_html_empty_and_none():
+    assert telegram_bot.markdown_to_html("") == ""
+    assert telegram_bot.markdown_to_html(None) == ""
 
 
 # --- /attachment (store-backed dispatch) -------------------------------------

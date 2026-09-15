@@ -108,6 +108,7 @@ import asyncio
 import contextlib
 import inspect
 import json
+import re
 import signal
 import sys
 from dataclasses import dataclass
@@ -1027,6 +1028,180 @@ def _state_button_rows(project_id: int, number: int, current_state: str) -> list
         if state != current_state
     ]
     return [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
+
+
+# Markdown → HTML fallback converter (#100): the pure function the HTML
+# fallback leg of the rich → HTML → plain chain (#101) sends through. It
+# escapes every text fragment (``& < > "`` → the Bot API's named entities)
+# before any tag is emitted, then maps the web renderer's markdown subset
+# (``yask/web/js/markdown.js``) onto the tag set Telegram's HTML parse mode
+# actually supports: strong, em, del, code, pre, a and blockquote. It never
+# emits the unsupported tags (h1–h6, ul, ol, li, p, br, …) — those risk a
+# 400 that would kill the whole HTML leg and drop to plain — and it
+# composes only what the Bot API's entity-nesting rules allow (code spans
+# are strict leaves; blockquote content carries no code or links).
+
+_FENCE_RE = re.compile(r"^```")
+_QUOTE_RE = re.compile(r"^>\s?(.*)$")
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+_UL_RE = re.compile(r"^([-*+])\s+(.*)$")
+_OL_RE = re.compile(r"^(\d+[.)])\s+(.*)$")
+_CODE_SPAN_RE = re.compile(r"`([^`]+)`")
+_STRONG_STAR_RE = re.compile(r"\*\*([^*]+)\*\*")
+_EM_STAR_RE = re.compile(r"(^|[^*])\*([^*\n]+)\*")
+_STRONG_UNDER_RE = re.compile(r"__([^_]+)__")
+_EM_UNDER_RE = re.compile(r"(?<!\w)_([^_\n]+)_(?!\w)")
+_STRIKE_RE = re.compile(r"~~([^~]+)~~")
+_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?:[^)\s]+)\)")
+_CODE_SPAN_PLACEHOLDER_RE = re.compile("\x00(\d+)\x00")
+
+
+def _escape_html(s: str) -> str:
+    """Escape ``& < > "`` as the Bot API's named entities (``&`` first).
+
+    The exact set the web renderer escapes and the Bot API accepts; applied
+    to a fragment before any surrounding tag is emitted, so markup in the
+    source stays inert server-side.
+    """
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _inline_html(s: str, links: bool = True, code: bool = True) -> str:
+    """One escaped line's inline pipeline (``s`` must be pre-escaped).
+
+    Code spans are stashed as placeholders before the emphasis passes so
+    nothing matches inside them, and restored as ``<code>`` leaves at the
+    end. With ``code=False`` code-span markup stays literal, with
+    ``links=False`` link markup stays literal — the blockquote context
+    passes both off, since the Bot API forbids ``<code>`` and ``<a>`` inside
+    ``<blockquote>``. A link whose text carries a stashed code span is left
+    literal as a whole (no ``<code>`` inside ``<a>``); the restored code
+    span then reads ``[<code>…</code>](url)`` with the brackets plain.
+    """
+    spans: list[str] = []
+
+    def stash(match: re.Match) -> str:
+        spans.append(match.group(1))
+        return f"\x00{len(spans) - 1}\x00"
+
+    if code:
+        s = _CODE_SPAN_RE.sub(stash, s)
+    s = _STRONG_STAR_RE.sub(r"<strong>\1</strong>", s)
+    s = _EM_STAR_RE.sub(r"\1<em>\2</em>", s)
+    s = _STRONG_UNDER_RE.sub(r"<strong>\1</strong>", s)
+    s = _EM_UNDER_RE.sub(r"<em>\1</em>", s)
+    s = _STRIKE_RE.sub(r"<del>\1</del>", s)
+
+    def link(match: re.Match) -> str:
+        if "\x00" in match.group(1):
+            return match.group(0)  # code span in link text: stay literal
+        return f'<a href="{match.group(2)}">{match.group(1)}</a>'
+
+    if links:
+        s = _LINK_RE.sub(link, s)
+    if code:
+        s = _CODE_SPAN_PLACEHOLDER_RE.sub(
+            lambda m: f"<code>{spans[int(m.group(1))]}</code>", s
+        )
+    return s
+
+
+def markdown_to_html(text: str) -> str:
+    """Convert the project's markdown subset to Telegram's HTML parse mode.
+
+    The pure, deterministic converter behind the HTML fallback leg of the
+    rich → HTML → plain chain (no I/O, no Store, no Bot API): it maps the
+    same subset the web renderer (``yask/web/js/markdown.js``) renders onto
+    the tag set Telegram's HTML parse mode actually supports —
+    ``<strong>``, ``<em>``, ``<del>``, ``<code>``, ``<pre><code>``,
+    ``<a href>`` and ``<blockquote>`` — and never the unsupported
+    ``h1``–``h6``/``ul``/``ol``/``li``/``p``/``br`` tags, which risk a 400
+    that would kill the whole HTML leg and drop to plain.
+
+    Every text fragment is HTML-escaped (``& < > "`` → named entities)
+    before any tag is emitted, so markup in an attachment or description
+    (e.g. a ``<script>``) stays inert when the Bot API parses the payload
+    server-side. The mapping: ``**bold**``/``__bold__`` → ``<strong>``,
+    ``*italic*`` → ``<em>``, ``_italic_`` → ``<em>`` (word-boundary
+    guarded, so ``snake_case`` identifiers stay literal — a superset over
+    the web renderer), ``~~strike~~`` → ``<del>``, inline code →
+    ``<code>``, fenced code blocks → ``<pre><code>`` (an unclosed fence
+    closes at EOF, web-renderer parity; an empty fence emits a blank line,
+    never an empty tag), ``[text](url)`` → ``<a href="url">text</a>`` with
+    the URL restricted to ``http``/``https`` (case-sensitive, as in the web
+    renderer; ``target``/``rel`` are not supported by the Bot API), and
+    ``> quote`` lines → one ``<blockquote>`` per line (an empty one a
+    blank line).
+
+    What stays literal — the fallback is the degraded leg, and literal
+    markup equals today's plain behavior: headings (``#``…``######``),
+    lists (``-``/``*``/``+`` and ``1.``/``1)``), tables and dividers —
+    their markers are preserved and the text after a marker is still
+    inline-converted; links with any other scheme (``ftp:``, ``tg:``,
+    ``javascript:``, …); and a link whose text carries a code span.
+    Composition follows the Bot API's entity-nesting rules: code spans are
+    strict leaves (no emphasis or links inside them), and the blockquote
+    context applies no code or link conversion (the API forbids
+    ``<code>``/``<a>`` inside ``<blockquote>``). Blank lines are preserved
+    — with no ``<p>``, the newlines are the paragraph separator — and
+    CRLF/CR input is normalized to LF, as in the web renderer.
+    """
+    lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    out: list[str] = []
+    in_code = False
+    code_lines: list[str] = []
+    for line in lines:
+        if _FENCE_RE.match(line):
+            if in_code:
+                body = "\n".join(code_lines)
+                out.append(
+                    f"<pre><code>{_escape_html(body)}</code></pre>"
+                    if body
+                    else ""
+                )
+                code_lines = []
+            in_code = not in_code
+            continue
+        if in_code:
+            code_lines.append(line)
+            continue
+        quote = _QUOTE_RE.match(line)
+        if quote:
+            content = quote.group(1)
+            out.append(
+                "<blockquote>"
+                f"{_inline_html(_escape_html(content), links=False, code=False)}"
+                "</blockquote>"
+                if content.strip()
+                else ""
+            )
+            continue
+        heading = _HEADING_RE.match(line)
+        if heading:
+            out.append(
+                heading.group(1)
+                + " "
+                + _inline_html(_escape_html(heading.group(2)))
+            )
+            continue
+        ul = _UL_RE.match(line)
+        ol = _OL_RE.match(line)
+        if ul or ol:
+            match = ul or ol
+            out.append(
+                match.group(1) + " " + _inline_html(_escape_html(match.group(2)))
+            )
+            continue
+        out.append(_inline_html(_escape_html(line)))
+    if in_code:
+        body = "\n".join(code_lines)
+        out.append(f"<pre><code>{_escape_html(body)}</code></pre>" if body else "")
+    return "\n".join(out)
 
 
 def format_task_view(
