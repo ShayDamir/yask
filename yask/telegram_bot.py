@@ -24,9 +24,10 @@ description, prerequisites, attachments and recent history — the task
 found by number or by case-insensitive title),
 ``/backlog [project]`` (the tasks in the Backlog state, grouped by
 project, with one inline button per task), ``/attachment
-<project> <task> <id>`` (shows one of the task's attachments — small
-markdown/plain text (<16 KB) inline as a message, images as a photo,
-larger content as a file, via ``sendDocument``/``sendPhoto``),
+ <project> <task> <id>`` (shows one of the task's attachments — small
+markdown (<16 KB) inline as a Rich Message, small plain text inline as a
+plain message, images as a photo, larger content as a file, via
+``sendRichMessage``/``sendDocument``/``sendPhoto``),
 ``/move <project> <task> <state>`` (moves a task to another workflow
 state — a move that would pull prerequisites along is confirmed with
 inline buttons first, nothing is applied before the confirmation) and
@@ -70,8 +71,9 @@ a toast instead of a crash; the ``p:`` payload (the per-project buttons of
 view as a new message (the detail's keyboard also carries one state
 button per other workflow state), the ``a:`` payload (the per-attachment
 buttons of the ``/task`` view) shows the attachment in the chat — small
-markdown/plain text (<16 KB) inline as a message, images as a photo,
-larger content as a file — the ``s:``/``u:`` payload (the
+markdown (<16 KB) inline as a Rich Message, small plain text inline as a
+plain message, images as a photo, larger content as a file — the
+``s:``/``u:`` payload (the
 subscribe/unsubscribe toggle of the ``/task`` view) toggles the chat's
 subscription and flips the button in place, and the ``m:``/``c:``/``x:``
 payload (the per-state buttons of the ``/task`` view) moves the task to a
@@ -1454,29 +1456,38 @@ def _truncate_inline(
     return text[:room] + note
 
 
-def attachment_reply(meta: dict, data: bytes, task: dict) -> Union[str, FileReply]:
+def attachment_reply(
+    meta: dict, data: bytes, task: dict
+) -> Union[str, FileReply, RichReply]:
     """The reply for one attachment.
 
-    Small text attachments (``text/markdown`` / ``text/plain`` under
-    :data:`INLINE_MARKDOWN_MAX_SIZE`) come back as the decoded content as a
-    plain ``str`` (sent with sendMessage — inline in the chat), prefixed
-    with the same ``#<number> <title> — <filename>`` context line the file
-    caption uses, truncated to :data:`INLINE_TEXT_MAX` with a
-    ``… (truncated, N chars total)`` note. Everything else is a
-    :class:`FileReply` — images as a photo (already displayed inline by
-    Telegram), other content as a document.
+    A ``text/markdown`` attachment under :data:`INLINE_MARKDOWN_MAX_SIZE`
+    comes back as a :class:`RichReply` (sent with ``sendRichMessage``,
+    falling back through the rich → HTML → plain chain on failure): the
+    same ``#<number> <title> — <filename>`` context line the file caption
+    uses, then the **raw** markdown body. The 16 KiB threshold fits the
+    Rich Message budget (:data:`RICH_MESSAGE_MAX`), so the rich payload is
+    never truncated; the fallback legs re-truncate at send time.
+
+    A ``text/plain`` attachment under the same threshold stays a plain
+    ``str`` — the decoded content prefixed with the context line,
+    truncated to :data:`INLINE_TEXT_MAX` with a ``… (truncated, N chars
+    total)`` note (plain text is deliberately not formatted). Everything
+    else is a :class:`FileReply` — images as a photo (already displayed
+    inline by Telegram), other content as a document.
 
     The caption prefix and the truncation note are produced by
     :func:`_attachment_caption` and :func:`_truncate_inline`.
     """
-    if (
-        meta["size"] < INLINE_MARKDOWN_MAX_SIZE
-        and meta["content_type"] in ("text/markdown", "text/plain")
-    ):
-        body = data.decode("utf-8", errors="replace")
-        return _truncate_inline(
-            f"{_attachment_caption(task, meta)}\n{body}", len(body)
-        )
+    if meta["size"] < INLINE_MARKDOWN_MAX_SIZE:
+        if meta["content_type"] == "text/markdown":
+            body = data.decode("utf-8", errors="replace")
+            return RichReply(f"{_attachment_caption(task, meta)}\n{body}")
+        if meta["content_type"] == "text/plain":
+            body = data.decode("utf-8", errors="replace")
+            return _truncate_inline(
+                f"{_attachment_caption(task, meta)}\n{body}", len(body)
+            )
     return FileReply(
         filename=meta["filename"],
         data=data,
@@ -1485,15 +1496,18 @@ def attachment_reply(meta: dict, data: bytes, task: dict) -> Union[str, FileRepl
     )
 
 
-def attachment_view(store: Store, arg: Optional[str]) -> Union[str, FileReply]:
+def attachment_view(
+    store: Store, arg: Optional[str]
+) -> Union[str, FileReply, RichReply]:
     """Resolve ``/attachment <project> <task> <attachment-id>``.
 
     Project by longest prefix, task by number or title (a disambiguation
     list when the title is ambiguous — never an attachment send), then the
     attachment id (the last word) is looked up scoped to that task. Returns
-    the attachment's reply — :func:`attachment_reply`: an inline text reply
-    for small text attachments, a :class:`FileReply` for images (photo) and
-    larger content (document) — or a usage / not-found text.
+    the attachment's reply — :func:`attachment_reply`: a rich message for
+    small markdown attachments, an inline text reply for small plain text,
+    a :class:`FileReply` for images (photo) and larger content (document)
+    — or a usage / not-found text.
     """
     if arg is None or not arg.strip():
         return ATTACHMENT_USAGE_TEXT
@@ -2532,9 +2546,9 @@ def make_callback_dispatch(
     inaccessible message, with no chat, gets the plain text instead).
     ``a:<project-id>:<number>:<attachment-id>`` (the per-attachment buttons
     of the ``/task`` view) shows the attachment in the button's chat: small
-    markdown/plain text (<16 KB) inline as a message, images as a photo,
-    other content as a file — the same resolution as ``/attachment``
-    (:func:`attachment_reply`). ``s:<project-id>``/``u:<project-id>`` (the
+    markdown (<16 KB) inline as a Rich Message, small plain text inline as
+    a plain message, images as a photo, other content as a file — the same
+    resolution as ``/attachment`` (:func:`attachment_reply`). ``s:<project-id>``/``u:<project-id>`` (the
     subscribe/unsubscribe toggle of the ``/task`` view) toggles the
     button's chat's subscription in the store and re-renders the message in
     place (``editMessageText``): the text is unchanged, the pressed toggle

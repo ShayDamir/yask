@@ -1792,6 +1792,15 @@ def expected_inline_text(number, title, filename, body):
     return text
 
 
+def expected_rich_markdown(number, title, filename, body):
+    """The Rich Message markdown the bot sends for a small markdown
+    attachment: the ``#<n> <title> — <filename>`` context line plus the
+    raw body (no truncation — the 16 KiB inline threshold fits the Rich
+    Message budget; the fallback legs re-truncate at send time).
+    """
+    return f"#{number} {title} — {filename}\n{body}"
+
+
 def expected_task_text(store, d):
     """The exact /task detail markdown for the seed_task_view task.
 
@@ -2450,8 +2459,8 @@ def test_markdown_to_html_empty_and_none():
 
 
 def test_attachment_small_markdown_rendered_inline(store):
-    """A <16 KB markdown attachment goes out as an inline text message
-    (the 7800-char seed body truncates to the message cap)."""
+    """A <16 KB markdown attachment goes out as a Rich Message — the full
+    7800-char seed body, no truncation."""
     d = seed_task_view(store)
     script = run_bot_until_stop(
         Script(
@@ -2465,11 +2474,15 @@ def test_attachment_small_markdown_rendered_inline(store):
         ),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert script.sent_files == []  # inline text, not a file
-    assert len(script.sent) == 1
-    assert script.sent[0]["chat_id"] == 7
-    assert script.sent[0]["text"] == expected_inline_text(
-        d["t"]["number"], "working", "plan.md", d["plan_bytes"].decode()
+    assert script.sent_files == []  # inline rich, not a file
+    assert script.sent == []  # a Rich Message, not sendMessage
+    assert len(script.sent_rich) == 1
+    assert script.sent_rich[0]["chat_id"] == 7
+    assert (
+        script.sent_rich[0]["rich_message"]["markdown"]
+        == expected_rich_markdown(
+            d["t"]["number"], "working", "plan.md", d["plan_bytes"].decode()
+        )
     )
 
 
@@ -2493,27 +2506,168 @@ def test_attachment_large_markdown_sent_as_document(store):
     assert f["caption"] == f"#{t['number']} working — big.md"
 
 
-def test_attachment_inline_truncated_to_message_cap(store):
-    """A <16 KB attachment over the message cap is truncated with a note."""
+def test_attachment_plain_inline_truncated_to_message_cap(store):
+    """A <16 KB plain text attachment over the message cap is still
+    truncated with a note — the plain path's cap is untouched by the
+    rich change."""
     pid = store.create_project("yask")["id"]
     t = store.create_task(pid, "working")
     body = b"#" + b"m" * 4999  # 5000 chars — over INLINE_TEXT_MAX, under 16 KB
-    a = store.add_attachment(pid, t["number"], "long.md", "text/markdown", body)
+    a = store.add_attachment(pid, t["number"], "long.txt", "text/plain", body)
     script = run_bot_until_stop(
         Script(
             [[message_update(276, f"/attachment yask {t['number']} {a['id']}")]],
         ),
         dispatch=telegram_bot.make_dispatch(store),
     )
+    assert script.sent_rich == []  # plain text is not rich-formatted
     assert script.sent_files == []
     assert len(script.sent) == 1
+    assert "parse_mode" not in script.sent[0]
     text = script.sent[0]["text"]
     assert len(text) <= telegram_bot.INLINE_TEXT_MAX
-    assert text.startswith(f"#{t['number']} working — long.md\n")
+    assert text.startswith(f"#{t['number']} working — long.txt\n")
     assert text.endswith("\n… (truncated, 5000 chars total)")
     assert text == expected_inline_text(
-        t["number"], "working", "long.md", body.decode()
+        t["number"], "working", "long.txt", body.decode()
     )
+
+
+def test_attachment_small_plain_text_stays_plain(store):
+    """A <16 KB text/plain attachment is sent as plain text as before
+    (plain text is deliberately not formatted)."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    body = b"plain body line 1\nplain body line 2"
+    a = store.add_attachment(pid, t["number"], "notes.txt", "text/plain", body)
+    script = run_bot_until_stop(
+        Script(
+            [[message_update(277, f"/attachment yask {t['number']} {a['id']}")]],
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent_rich == []
+    assert script.sent_files == []
+    assert len(script.sent) == 1
+    sent = script.sent[0]
+    assert sent["chat_id"] == 7
+    assert "parse_mode" not in sent
+    assert sent["text"] == expected_inline_text(
+        t["number"], "working", "notes.txt", body.decode()
+    )
+
+
+def test_attachment_inline_boundary(store):
+    """The inline threshold is strict: 16383 bytes is a Rich Message,
+    exactly 16384 a document."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    just_under = b"x" * 16383
+    a = store.add_attachment(pid, t["number"], "edge.md", "text/markdown", just_under)
+    script = run_bot_until_stop(
+        Script(
+            [[message_update(278, f"/attachment yask {t['number']} {a['id']}")]],
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent_files == []
+    assert script.sent == []
+    assert len(script.sent_rich) == 1
+    assert (
+        script.sent_rich[0]["rich_message"]["markdown"]
+        == expected_rich_markdown(
+            t["number"], "working", "edge.md", just_under.decode()
+        )
+    )
+    exactly = b"y" * 16384
+    b2 = store.add_attachment(pid, t["number"], "edge2.md", "text/markdown", exactly)
+    script = run_bot_until_stop(
+        Script(
+            [[message_update(279, f"/attachment yask {t['number']} {b2['id']}")]],
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent_rich == []
+    assert script.sent == []
+    assert len(script.sent_files) == 1
+    f = script.sent_files[0]
+    assert f["method"] == "sendDocument"
+    assert f["chat_id"] == 7
+    assert f["filename"] == "edge2.md"
+    assert f["data"] == exactly
+    assert f["caption"] == f"#{t['number']} working — edge2.md"
+
+
+def test_attachment_rich_fallback_to_html(store):
+    """A failing rich leg degrades through the shared funnel: the HTML leg
+    carries the markdown re-truncated to the regular budget, converted."""
+    d = seed_task_view(store)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    message_update(
+                        280, f"/attachment yask {d['t']['number']} {d['plan']['id']}"
+                    )
+                ]
+            ],
+            fail_rich_once=(400, "can't parse rich markdown"),
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    # the rich leg fired (and failed) exactly once, full payload
+    assert len(script.sent_rich) == 1
+    markdown = expected_rich_markdown(
+        d["t"]["number"], "working", "plan.md", d["plan_bytes"].decode()
+    )
+    assert script.sent_rich[0]["rich_message"]["markdown"] == markdown
+    # the HTML leg replaced it — the markdown re-truncated to the regular
+    # budget with the note, converted, not raw-sent
+    assert len(script.sent) == 1
+    body = script.sent[0]
+    assert body["chat_id"] == 7
+    assert body["parse_mode"] == "HTML"
+    truncated = telegram_bot._truncate_inline(
+        markdown, len(markdown), telegram_bot.REGULAR_TEXT_MAX
+    )
+    assert len(truncated) <= telegram_bot.REGULAR_TEXT_MAX
+    assert truncated.endswith(
+        f"\n… (truncated, {len(markdown)} chars total)"
+    )
+    assert body["text"] == telegram_bot.markdown_to_html(truncated)
+
+
+def test_attachment_rich_kill_switch_off(store):
+    """With rich disabled the markdown attachment takes the HTML leg
+    first — no sendRichMessage call (the epic's degradation)."""
+    d = seed_task_view(store)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    message_update(
+                        281, f"/attachment yask {d['t']['number']} {d['plan']['id']}"
+                    )
+                ]
+            ],
+            fail_rich_once=(400, "should never be called"),
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        rich=False,
+    )
+    assert script.sent_rich == []
+    assert script.sent_files == []
+    assert len(script.sent) == 1
+    body = script.sent[0]
+    assert body["chat_id"] == 7
+    assert body["parse_mode"] == "HTML"
+    markdown = expected_rich_markdown(
+        d["t"]["number"], "working", "plan.md", d["plan_bytes"].decode()
+    )
+    truncated = telegram_bot._truncate_inline(
+        markdown, len(markdown), telegram_bot.REGULAR_TEXT_MAX
+    )
+    assert body["text"] == telegram_bot.markdown_to_html(truncated)
 
 
 def test_attachment_image_sent_as_photo(store):
@@ -2541,8 +2695,8 @@ def test_attachment_image_sent_as_photo(store):
 
 
 def test_attachment_by_task_title(store):
-    """Task resolution by title still works — the small attachment goes
-    out inline."""
+    """Task resolution by title still works — the small markdown
+    attachment goes out as a Rich Message."""
     d = seed_task_view(store)
     script = run_bot_until_stop(
         Script(
@@ -2557,9 +2711,13 @@ def test_attachment_by_task_title(store):
         dispatch=telegram_bot.make_dispatch(store),
     )
     assert script.sent_files == []
-    assert len(script.sent) == 1
-    assert script.sent[0]["text"] == expected_inline_text(
-        d["t"]["number"], "working", "plan.md", d["plan_bytes"].decode()
+    assert script.sent == []
+    assert len(script.sent_rich) == 1
+    assert (
+        script.sent_rich[0]["rich_message"]["markdown"]
+        == expected_rich_markdown(
+            d["t"]["number"], "working", "plan.md", d["plan_bytes"].decode()
+        )
     )
 
 
@@ -5495,7 +5653,8 @@ def test_callback_t_store_failure_replies_and_recovers(store, monkeypatch):
 
 
 def test_callback_dispatch_attachment_renders_inline(store):
-    """An a: press on a small markdown attachment replies inline text."""
+    """An a: press on a small markdown attachment replies with a
+    RichReply (pins the a: entry point at the dispatch level)."""
     d = seed_task_view(store)
     pid, t = d["pid"], d["t"]
     dispatch = telegram_bot.make_callback_dispatch(store)
@@ -5508,8 +5667,9 @@ def test_callback_dispatch_attachment_renders_inline(store):
     assert action.answer_text is None
     assert action.edit is None
     reply = action.reply
-    assert isinstance(reply, str)
-    assert reply == expected_inline_text(
+    assert isinstance(reply, telegram_bot.RichReply)
+    assert reply.reply_markup is None
+    assert reply.markdown == expected_rich_markdown(
         t["number"], "working", "plan.md", d["plan_bytes"].decode()
     )
 
@@ -5517,7 +5677,7 @@ def test_callback_dispatch_attachment_renders_inline(store):
 def test_callback_dispatch_attachment_round_trip(store):
     d = seed_task_view(store)
     pid, t = d["pid"], d["t"]
-    # markdown attachment → inline text message
+    # markdown attachment → Rich Message
     script = run_bot_until_stop(
         Script(
             [[callback_update(292, f"a:{pid}:{t['number']}:{d['plan']['id']}", chat_id=13)]]
@@ -5527,10 +5687,14 @@ def test_callback_dispatch_attachment_round_trip(store):
     )
     assert script.answered == [{"callback_query_id": "cbq-292"}]
     assert script.sent_files == []
-    assert len(script.sent) == 1
-    assert script.sent[0]["chat_id"] == 13
-    assert script.sent[0]["text"] == expected_inline_text(
-        t["number"], "working", "plan.md", d["plan_bytes"].decode()
+    assert script.sent == []
+    assert len(script.sent_rich) == 1
+    assert script.sent_rich[0]["chat_id"] == 13
+    assert (
+        script.sent_rich[0]["rich_message"]["markdown"]
+        == expected_rich_markdown(
+            t["number"], "working", "plan.md", d["plan_bytes"].decode()
+        )
     )
     # image attachment → sendPhoto (the /attachment convention)
     script = run_bot_until_stop(
