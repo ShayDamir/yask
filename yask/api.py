@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import ipaddress
 import re
 import threading
 from pathlib import Path
@@ -35,6 +36,81 @@ CSP = (
     "img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; "
     "base-uri 'none'; form-action 'none'"
 )
+
+
+# -- Host/Origin checks (task #85: CSRF / DNS rebinding) --------------------
+#
+# The loopback bind is a safety measure, not a security boundary: a page on
+# attacker.com can still POST a CORS-simple multipart form to
+# http://127.0.0.1:4304 (CSRF, CWE-352), and DNS rebinding can make
+# attacker.com present itself to the browser as 127.0.0.1 (CWE-350). The
+# ``origin_host_check`` middleware closes both vectors:
+#   * the ``Host`` header must name a loopback interface — a rebound
+#     page's requests carry ``Host: attacker.com:4304`` and are rejected
+#     before routing, so a rebound origin can neither read nor write;
+#   * an ``Origin`` header, when present, must be same-origin with the
+#     ``Host`` header (same host, same port) — the browser's
+#     ``Origin: https://evil.com`` on the cross-site multipart upload
+#     fails;
+#   * ``Sec-Fetch-Site: cross-site`` is rejected — defense in depth for
+#     intermediaries that would strip ``Origin``.
+# Non-browser clients (curl, scripts) send no ``Origin`` and pass the
+# Origin check; the Host check still applies to them, so a local
+# ``curl http://127.0.0.1:4304/...`` keeps working.
+
+
+def _is_loopback_name(name: str) -> bool:
+    """True if *name* is a loopback host name (localhost, 127.0.0.0/8, ::1).
+
+    Duplicates ``cli._is_loopback_host`` on purpose: the CLI helper decides
+    whether a *bind* is safe, this one decides whether a *request* is local.
+    Keeping them local avoids a cross-module dependency.
+    """
+    if name == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+
+def _split_host_header(value: str) -> tuple[str, str | None]:
+    """Split a ``Host`` header into ``(host, port)``; port is None when absent.
+
+    IPv6 arrives bracketed (``[::1]:4304``), so brackets and port are
+    stripped separately. Malformed values are kept opaque — they then fail
+    the loopback check.
+    """
+    value = value.strip()
+    if value.startswith("["):
+        end = value.find("]")
+        if end == -1:
+            return value, None
+        host = value[1:end]
+        rest = value[end + 1:]
+        return (host, rest[1:]) if rest.startswith(":") else (value, None)
+    if ":" in value:
+        host, _, port = value.rpartition(":")
+        return host, port
+    return value, None
+
+
+def _origin_host_port(value: str) -> tuple[str, str] | None:
+    """Parse an ``Origin`` header into ``(host, port)`` with default ports
+    applied (http -> 80, https -> 443).
+
+    Returns None for values that are not a valid http(s) origin
+    (``null``, ``javascript:…``, unparseable garbage) — the caller rejects
+    those.
+    """
+    value = value.strip()
+    m = re.match(r"^(?:https?)://([^:/?]+)(?::(\d+))?$", value)
+    if m is None:
+        return None
+    host, port = m.groups()
+    if port is None:
+        port = "443" if value.lower().startswith("https") else "80"
+    return host.lower(), port
 
 
 class Db:
@@ -140,9 +216,74 @@ class TelegramUserPasswordIn(BaseModel):
 # -- app factory -------------------------------------------------------------
 
 
-def create_app(db_path: str | Path) -> FastAPI:
+def create_app(db_path: str | Path, allow_remote: bool = False) -> FastAPI:
     db_ = Db(db_path)
     app = FastAPI(title="yask", version="0.1.0")
+
+    # NOTE (task #85): middleware order matters. Starlette stacks these
+    # decorators in reverse code order, so ``origin_host_check`` must be
+    # declared BEFORE ``security_headers`` to stay inner to it — the
+    # headers middleware then decorates even the 403 this check returns
+    # (task #86's "every response carries the four headers" invariant).
+    @app.middleware("http")
+    async def origin_host_check(request, call_next):
+        # CSRF / DNS-rebinding guard (task #85), skipped wholesale when the
+        # server was started with allow_remote (the CLI's --allow-remote):
+        # the explicit override already warns that the API runs without
+        # these protections, and remote clients must keep working.
+        if allow_remote:
+            return await call_next(request)
+
+        # 1. Host must name a loopback interface (DNS-rebinding kill: a
+        #    rebound origin's requests carry the attacker's hostname).
+        host_header = request.headers.get("host", "")
+        host, host_port = _split_host_header(host_header)
+        if not _is_loopback_name(host):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": "Host header must name a loopback interface"
+                },
+            )
+
+        # 2. An Origin header, when present, must be same-origin with the
+        #    Host header (same host, same port). This is what stops the
+        #    cross-site multipart attachment upload: the browser always
+        #    sends Origin on POST/PUT/PATCH/DELETE, and curl & co send
+        #    none (the non-browser exemption).
+        origin = request.headers.get("origin")
+        if origin is not None:
+            parsed = _origin_host_port(origin)
+            # A Host header without an explicit port means the browser is
+            # on the scheme's default port (http -> 80, https -> 443).
+            expected_port = host_port
+            if expected_port is None:
+                expected_port = (
+                    "443" if origin.strip().lower().startswith("https") else "80"
+                )
+            if (
+                parsed is None
+                or parsed[0] != host.lower()
+                or parsed[1] != expected_port
+            ):
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "detail": (
+                            "Origin must be same-origin with the Host header"
+                        )
+                    },
+                )
+
+        # 3. Sec-Fetch-Site: cross-site is rejected outright (defense in
+        #    depth for intermediaries that strip Origin).
+        if request.headers.get("sec-fetch-site", "").lower() == "cross-site":
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "cross-site requests are rejected"},
+            )
+
+        return await call_next(request)
 
     @app.middleware("http")
     async def security_headers(request, call_next):

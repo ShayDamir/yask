@@ -72,6 +72,12 @@ yask serve --data DIR     # or: YASK_DATA=DIR yask serve
 The UI is vanilla ES modules (no build step). State lives in a SQLite database
 inside the data directory (default `~/.local/share/yask/yask.db`).
 
+The server is loopback-only by design and unauthenticated: the loopback bind
+is the boundary. As defense in depth it also rejects non-loopback `Host`
+headers and cross-origin `Origin` / `Sec-Fetch-Site: cross-site` requests, so
+a web page elsewhere cannot read or write it (CSRF, DNS rebinding).
+`--allow-remote` disables these checks.
+
 ### MCP interface
 
 ```

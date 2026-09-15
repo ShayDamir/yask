@@ -57,7 +57,9 @@ def cmd_serve(args) -> int:
         print(
             "yask: refusing to bind to non-loopback host "
             f"{args.host!r}.\n"
-            "The web REST API has no authentication or CSRF protection. By design\n"
+            "The web REST API has no authentication. On the default loopback\n"
+            "bind it is additionally protected against CSRF and DNS rebinding by\n"
+            "Host/Origin checks; a remote bind disables those checks too. By design\n"
             "yask is a loopback-only tool for a single local user. Use --allow-remote\n"
             "to override this safety check (not recommended).\n",
             file=sys.stderr,
@@ -66,9 +68,10 @@ def cmd_serve(args) -> int:
     if verdict == "warn":
         print(
             f"yask: WARNING — serving on {args.host}:{args.port} WITHOUT\n"
-            "authentication or CSRF protection. The entire /api/* REST surface is\n"
-            "unauthenticated, including Telegram bot user management. Only do this\n"
-            "on a trusted network.\n",
+            "authentication, with the Host/Origin (CSRF/DNS-rebinding) checks\n"
+            "disabled so remote clients can reach it. The entire /api/* REST\n"
+            "surface is unauthenticated, including Telegram bot user management.\n"
+            "Only do this on a trusted network.\n",
             file=sys.stderr,
         )
 
@@ -76,7 +79,11 @@ def cmd_serve(args) -> int:
 
     from .api import create_app
 
-    app = create_app(db_path)
+    # allow_remote=True turns the Host/Origin checks off: the "warn" verdict
+    # means an explicit --allow-remote override was given, whose warning
+    # already says the API runs without CSRF protection, and remote clients
+    # must keep working (task #85).
+    app = create_app(db_path, allow_remote=(verdict == "warn"))
     print(f"yask: serving web UI on http://{args.host}:{args.port} (data: {db_path})")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
@@ -116,7 +123,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-remote",
         action="store_true",
         help="override the loopback-only safety check and bind to any host; "
-             "note the /api/* REST surface then has NO authentication or CSRF",
+             "note the /api/* REST surface then has NO authentication and the "
+             "Host/Origin (CSRF/DNS-rebinding) checks are disabled",
     )
     s.add_argument("--data", help="data directory (default: $YASK_DATA or ~/.local/share/yask)")
     s.set_defaults(func=cmd_serve)

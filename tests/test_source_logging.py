@@ -19,7 +19,9 @@ from yask.store import Store, ValidationError
 @pytest.fixture()
 def client(tmp_path):
     app = create_app(tmp_path / "api.db")
-    with TestClient(app) as c:
+    # loopback base URL (task #85): the enforced app rejects non-loopback
+    # Host headers, so the suite must hit it as a local client
+    with TestClient(app, base_url="http://127.0.0.1:4304") as c:
         yield c
 
 

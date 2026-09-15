@@ -22,7 +22,9 @@ from yask.store import (
 @pytest.fixture()
 def client(tmp_path):
     app = create_app(tmp_path / "auth.db")
-    with TestClient(app) as c:
+    # loopback base URL (task #85): the enforced app rejects non-loopback
+    # Host headers, so the suite must hit it as a local client
+    with TestClient(app, base_url="http://127.0.0.1:4304") as c:
         yield c
 
 
@@ -250,7 +252,9 @@ def test_telegram_users_api_crud(client):
 def test_telegram_users_api_password_verifiable(tmp_path):
     """A password created through the API is accepted by the store."""
     app = create_app(tmp_path / "auth.db")
-    with TestClient(app) as c:
+    # loopback base URL (task #85): the enforced app rejects non-loopback
+    # Host headers, so the suite must hit it as a local client
+    with TestClient(app, base_url="http://127.0.0.1:4304") as c:
         r = c.post("/api/telegram-users", json={"chat_id": 42, "password": "via-api"})
         assert r.status_code == 201
         assert c.put("/api/telegram-users/42", json={"password": "rotated"}).status_code == 200

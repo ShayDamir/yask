@@ -245,7 +245,9 @@ def test_label_color_embedded_in_get_task_and_project(store, project):
 @pytest.fixture()
 def client(tmp_path):
     app = create_app(tmp_path / "api.db")
-    with TestClient(app) as c:
+    # loopback base URL (task #85): the enforced app rejects non-loopback
+    # Host headers, so the suite must hit it as a local client
+    with TestClient(app, base_url="http://127.0.0.1:4304") as c:
         yield c
 
 
@@ -496,6 +498,8 @@ def test_migration_adds_color_column_to_existing_database(tmp_path):
 
     # And a Store/REST on that DB sees the column.
     app = create_app(path)
-    with TestClient(app) as c:
+    # loopback base URL (task #85): the enforced app rejects non-loopback
+    # Host headers, so the suite must hit it as a local client
+    with TestClient(app, base_url="http://127.0.0.1:4304") as c:
         listed = c.get(f"/api/projects/{pid}/labels").json()
         assert listed == [{"id": 1, "name": "old", "color": ""}]
