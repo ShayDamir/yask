@@ -163,7 +163,8 @@ class Script:
     entries are exhausted, getUpdates returns empty results and sets ``stop``
     (when configured), so a bot run always terminates. ``fail_once_with``
     raises once on the first request to simulate a transport failure.
-    ``sent`` records sendMessage bodies; ``sent_files`` records multipart
+    ``sent`` records sendMessage bodies; ``sent_rich`` records
+    sendRichMessage bodies; ``sent_files`` records multipart
     file uploads (sendDocument/sendPhoto): one dict per upload with the
     method, chat id, caption, filename, bytes and the ``reply_markup`` form
     field (None when absent); ``answered`` records answerCallbackQuery
@@ -187,6 +188,7 @@ class Script:
         self.file_gets = []
         self.file_downloads = []
         self.sent = []
+        self.sent_rich = []
         self.sent_files = []
         self.answered = []
         self.edited = []
@@ -263,6 +265,9 @@ class Script:
             return httpx.Response(200, json={"ok": True, "result": []})
         if method == "sendMessage":
             self.sent.append(body)
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 99}})
+        if method == "sendRichMessage":
+            self.sent_rich.append(body)
             return httpx.Response(200, json={"ok": True, "result": {"message_id": 99}})
         if method == "answerCallbackQuery":
             self.answered.append(body)
@@ -4445,6 +4450,133 @@ def test_send_message_reply_markup_threaded():
         {"chat_id": 7, "text": "hello"},
         {"chat_id": 7, "text": "hello", "reply_markup": markup},
     ]
+
+
+def test_send_rich_message_body():
+    markup = {"inline_keyboard": [[{"text": "go", "callback_data": "p:1"}]]}
+    script = Script([])
+
+    async def calls(api):
+        await api.send_rich_message(7, "# Title")
+        await api.send_rich_message(7, "# Title", reply_markup=markup)
+
+    bot_api_call(script, calls)
+    assert script.sent_rich == [
+        # no markup → no key
+        {"chat_id": 7, "rich_message": {"markdown": "# Title"}},
+        {
+            "chat_id": 7,
+            "rich_message": {"markdown": "# Title"},
+            "reply_markup": markup,
+        },
+    ]
+    # a rich send never touches the plain-send recorder
+    assert script.sent == []
+
+
+def test_edit_message_text_rich_payload():
+    markup = {"inline_keyboard": [[{"text": "off", "callback_data": "u:1"}]]}
+    script = Script([])
+
+    async def calls(api):
+        await api.edit_message_text(7, 99, rich_markdown="# Rich", reply_markup=markup)
+
+    bot_api_call(script, calls)
+    assert script.edited == [
+        {
+            "chat_id": 7,
+            "message_id": 99,
+            "rich_message": {"markdown": "# Rich"},
+            "reply_markup": markup,
+        }
+    ]
+    # a rich edit sends no ``text`` key at all (a text edit of a rich
+    # message fails server-side)
+    assert "text" not in script.edited[0]
+
+
+def test_edit_message_text_requires_exactly_one_payload():
+    script = Script([])
+
+    async def calls(api):
+        with pytest.raises(ValueError):
+            await api.edit_message_text(7, 99)
+        with pytest.raises(ValueError):
+            await api.edit_message_text(7, 99, "plain", rich_markdown="# Rich")
+
+    bot_api_call(script, calls)
+    # the guard fires before any request is made
+    assert script.edited == []
+
+
+def _rich_method_handler(method, status, description):
+    """A MockTransport handler failing ``/bot<token>/<method>`` with
+    ``ok:false`` and the API ``error_code``; any other URL is an error, so
+    the new methods must route to the right endpoint."""
+
+    def handler(request):
+        if not request.url.path.endswith(f"/{method}"):
+            raise AssertionError(f"unexpected URL: {request.url.path}")
+        return httpx.Response(
+            status,
+            json={
+                "ok": False,
+                "error_code": status,
+                "description": description,
+            },
+        )
+
+    return handler
+
+
+def _expect_rich_error(call, method, status, description):
+    """Run one BotAPI call (``call(api)``) against a failing mock endpoint
+    named ``method`` and assert the raised ``BotAPIError`` carries the API
+    ``error_code`` — callers use it to detect a rich-markdown parse failure
+    (400) or an unknown method on an old local Bot API server (404) and
+    fall back."""
+    client = make_client(_rich_method_handler(method, status, description))
+    api = telegram_bot.BotAPI(BOT_TOKEN, client=client)
+
+    async def go():
+        try:
+            with pytest.raises(telegram_bot.BotAPIError) as err:
+                await call(api)
+        finally:
+            await client.aclose()
+        assert err.value.error_code == status
+        assert err.value.description == description
+
+    asyncio.run(go())
+
+
+def test_send_rich_message_400_parse_error_surfaces_code():
+    _expect_rich_error(
+        lambda api: api.send_rich_message(7, "bad [link]("),
+        "sendRichMessage",
+        400,
+        "can't parse rich markdown: unmatched '['",
+    )
+
+
+def test_send_rich_message_404_unknown_method_surfaces_code():
+    # an old local telegram-bot-api server answers unknown methods with
+    # ok:false, error_code 404
+    _expect_rich_error(
+        lambda api: api.send_rich_message(7, "# hi"),
+        "sendRichMessage",
+        404,
+        "Not Found",
+    )
+
+
+def test_edit_message_text_rich_400_parse_error_surfaces_code():
+    _expect_rich_error(
+        lambda api: api.edit_message_text(7, 99, rich_markdown="bad [link]("),
+        "editMessageText",
+        400,
+        "can't parse rich markdown: unmatched '['",
+    )
 
 
 def test_send_document_photo_reply_markup_threaded():

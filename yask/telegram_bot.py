@@ -2647,8 +2647,8 @@ def make_callback_dispatch(
 
 class BotAPI:
     """Minimal Telegram Bot API client: getMe, getUpdates, sendMessage,
-    sendDocument, sendPhoto, answerCallbackQuery, editMessageText,
-    getFile.
+    sendRichMessage, sendDocument, sendPhoto, answerCallbackQuery,
+    editMessageText, getFile.
 
     Accepts an ``httpx.AsyncClient`` for tests (e.g. with
     ``httpx.MockTransport``); production uses a default client that
@@ -2772,6 +2772,28 @@ class BotAPI:
         result = await self._call("sendMessage", **params)
         return result if isinstance(result, dict) else {}
 
+    async def send_rich_message(
+        self,
+        chat_id: int,
+        markdown: str,
+        reply_markup: Optional[ReplyMarkup] = None,
+    ) -> dict:
+        """Send a Rich Message (Bot API 10.1+): ``markdown`` is
+        GFM-compatible; ``reply_markup`` threads an inline keyboard.
+
+        An ``ok:false`` 400 (unparseable markdown) or 404 (method unknown on
+        an old local Bot API server) surfaces as ``BotAPIError`` with the
+        ``error_code`` set — callers use it to fall back.
+        """
+        params: dict[str, Any] = {
+            "chat_id": chat_id,
+            "rich_message": {"markdown": markdown},
+        }
+        if reply_markup:
+            params["reply_markup"] = reply_markup
+        result = await self._call("sendRichMessage", **params)
+        return result if isinstance(result, dict) else {}
+
     async def send_document(
         self,
         chat_id: int,
@@ -2841,15 +2863,29 @@ class BotAPI:
         self,
         chat_id: int,
         message_id: int,
-        text: str,
+        text: Optional[str] = None,
         reply_markup: Optional[ReplyMarkup] = None,
+        rich_markdown: Optional[str] = None,
     ) -> dict:
-        """Update a message's text (and inline keyboard) in place."""
+        """Update a message's text (and inline keyboard) in place.
+
+        Exactly one payload is required: the plain ``text``, or
+        ``rich_markdown`` (a Rich Message edit, Bot API 10.1+). A text edit
+        of a rich message fails server-side, so rich messages must be edited
+        with ``rich_markdown``.
+        """
+        if (text is None) == (rich_markdown is None):
+            raise ValueError(
+                "exactly one of text / rich_markdown must be given"
+            )
         params: dict[str, Any] = {
             "chat_id": chat_id,
             "message_id": message_id,
-            "text": text,
         }
+        if rich_markdown is not None:
+            params["rich_message"] = {"markdown": rich_markdown}
+        else:
+            params["text"] = text
         if reply_markup:
             params["reply_markup"] = reply_markup
         result = await self._call("editMessageText", **params)
