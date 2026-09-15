@@ -413,9 +413,13 @@ def type_usage_text(store: Store) -> str:
         "Example: /type yask 4 Bug"
     )
 
-# Telegram caps a message at 4096 chars; the task view stays well under it
-# by capping the description and the visible history.
-DESCRIPTION_MAX = 2500
+# The rich task view lives under the Rich Message budget
+# (:data:`RICH_MESSAGE_MAX`, 32 768 chars): the description is capped
+# below it, leaving headroom for the header, the section lists and the
+# truncation note. A pathological overflow (dozens of attachments) 400s
+# the rich leg and degrades through the fallback chain, whose
+# HTML/plain legs re-truncate at send time.
+DESCRIPTION_MAX = 30000
 HISTORY_MAX = 10
 
 # Attachments strictly smaller than this are rendered inline instead of
@@ -1239,66 +1243,101 @@ def format_task_view(
 ) -> Reply:
     """The ``/task`` detail reply for one task.
 
-    A header line in the ``/tasks`` task-line style (``#n title — type``),
-    then the sections that have data: state, estimate (``%g``), parent,
-    description (truncated at :data:`DESCRIPTION_MAX` with a total-length
-    note), prerequisites, attachments (each with its ``/attachment``
-    drill-down reference) and the most recent :data:`HISTORY_MAX` history
-    rows (with an earlier-count note). Creation rows (``from_state`` is
-    NULL) render as ``created``.
+    The view is a single markdown string built as blocks joined by one
+    blank line:
 
-    Without a ``chat_id`` (the pure formatter) the reply is that text as a
-    plain :class:`str`, byte-identical to the no-button form. With a
-    ``chat_id`` it is a :class:`KeyboardReply` carrying the same text and an
-    inline keyboard: one row per attachment (label = filename, payload
+    1. The header block — the task as an H1 heading (``# <n> <title> —
+       <type>``), then ``**State:**``, ``**Estimate:**`` (``%g``, only
+       when set) and ``**Parent:**`` (only when set) lines, with no blank
+       lines between them.
+    2. The description, embedded **raw** (agent-written markdown —
+       headings, lists, code blocks, tables — is meant to render): cut to
+       :data:`DESCRIPTION_MAX` with a ``… (truncated, N chars total)``
+       note as its own paragraph when longer (the cut also closes a fence
+       it left open, so the unclosed code block cannot swallow the rest
+       of the view in the rich renderer or the HTML fallback).
+    3. A ``**Prerequisites:**`` list — one ``- #<n> <title> — <state>``
+       line per prerequisite (only when present).
+    4. An ``**Attachments:**`` list — one
+       ``- <id>. <filename> (<size>) — /attachment <project> <number>
+       <id>`` line per attachment (only when present).
+    5. A ``**History:**`` list — an earlier-count note when
+       :data:`HISTORY_MAX` is exceeded, then one line per visible row
+       (creation rows, ``from_state`` NULL, render as ``created``) (only
+       when present).
+
+    The description cap leaves headroom for the rest of the view under
+    the Rich Message budget (:data:`RICH_MESSAGE_MAX`); a pathological
+    overflow 400s the rich leg and degrades through the fallback chain,
+    whose HTML/plain legs re-truncate at send time.
+
+    Without a ``chat_id`` (the pure formatter) the reply is that markdown
+    as a plain :class:`str`, with no keyboard. With a ``chat_id`` it is a
+    :class:`RichReply` carrying the markdown and the inline keyboard: one
+    row per attachment (label = filename, payload
     ``a:<project-id>:<number>:<attachment-id>``, answered by
     :func:`make_callback_dispatch`) in id order, then the workflow-state
     rows (:func:`_state_button_rows` — hidden on an archived task), then
-    the subscribe/unsubscribe toggle row (:func:`_toggle_button`, driven by
-    ``subscribed``), then the Main-menu row (:func:`_main_menu_button`,
+    the subscribe/unsubscribe toggle row (:func:`_toggle_button`, driven
+    by ``subscribed``), then the Main-menu row (:func:`_main_menu_button`,
     payload ``h``). The keyboard always has at least one row (the toggle,
     and with it the Main-menu row), so the Bot API's
     empty-inline-keyboard rejection never triggers.
     """
-    lines = [f"#{task['number']} {task['title']} — {task['type']}"]
-    lines.append(f"State: {task['state']}")
+    header = [f"# {task['number']} {task['title']} — {task['type']}"]
+    header.append(f"**State:** {task['state']}")
     if task["estimate"] is not None:
-        lines.append(f"Estimate: {task['estimate']:g}")
+        header.append(f"**Estimate:** {task['estimate']:g}")
     if task["parent_number"] is not None:
-        lines.append(f"Parent: #{task['parent_number']}")
+        header.append(f"**Parent:** #{task['parent_number']}")
+    blocks = ["\n".join(header)]
     description = task["description"] or ""
     if description.strip():
-        lines.append("Description:")
         if len(description) > DESCRIPTION_MAX:
+            cut = description[:DESCRIPTION_MAX]
+            fence_lines = sum(
+                1 for line in cut.split("\n") if _FENCE_RE.match(line)
+            )
+            if fence_lines % 2 == 1:
+                # the cut left a code fence open: close it, or the
+                # unclosed block swallows the note and every section
+                # after it (rich renderer and markdown_to_html alike)
+                cut += "\n```"
             description = (
-                f"{description[:DESCRIPTION_MAX]}"
-                f"… (truncated, {len(task['description'])} chars total)"
+                f"{cut}\n\n… (truncated, {len(description)} chars total)"
             )
-        lines.append(description)
+        blocks.append(description)
     if task["prerequisites"]:
-        lines.append("Prerequisites:")
-        for p in task["prerequisites"]:
-            lines.append(f"  #{p['number']} {p['title']} — {p['state']}")
-    if task["attachments"]:
-        lines.append("Attachments:")
-        for a in task["attachments"]:
-            lines.append(
-                f"  {a['id']}. {a['filename']} ({_human_size(a['size'])}) — "
-                f"/attachment {project['name']} {task['number']} {a['id']}"
+        blocks.append(
+            "**Prerequisites:**\n"
+            + "\n".join(
+                f"- #{p['number']} {p['title']} — {p['state']}"
+                for p in task["prerequisites"]
             )
+        )
+    if task["attachments"]:
+        blocks.append(
+            "**Attachments:**\n"
+            + "\n".join(
+                f"- {a['id']}. {a['filename']} ({_human_size(a['size'])}) — "
+                f"/attachment {project['name']} {task['number']} {a['id']}"
+                for a in task["attachments"]
+            )
+        )
     if history:
-        lines.append("History:")
+        lines = []
         if len(history) > HISTORY_MAX:
-            lines.append(f"  … {len(history) - HISTORY_MAX} earlier transitions")
+            lines.append(f"- … {len(history) - HISTORY_MAX} earlier transitions")
         for h in history[-HISTORY_MAX:]:
             if h["from_state"] is None:
-                lines.append(f"  {h['changed_at']} — created ({h['source']})")
+                lines.append(f"- {h['changed_at']} — created ({h['source']})")
             else:
                 lines.append(
-                    f"  {h['changed_at']} — {h['from_state']} → {h['to_state']} "
+                    f"- {h['changed_at']} — {h['from_state']} → {h['to_state']} "
                     f"({h['source']})"
                 )
-    text = "\n".join(lines)
+        blocks.append("**History:**\n" + "\n".join(lines))
+    text = "\n\n".join(blocks)
     if chat_id is None:
         return text
     rows = [
@@ -1321,7 +1360,7 @@ def format_task_view(
         )
     rows.append([_toggle_button(project["id"], subscribed)])
     rows.append([_main_menu_button()])
-    return KeyboardReply(text, {"inline_keyboard": rows})
+    return RichReply(text, {"inline_keyboard": rows})
 
 
 def _resolve_task(store: Store, project: dict, ref: str) -> Union[str, dict]:
@@ -1365,7 +1404,8 @@ def task_view(
     usage text; an unresolvable project gets the not-found reply pointing
     at ``/projects``.
 
-    With a ``chat_id`` the reply is the task view's keyboard form: the
+    With a ``chat_id`` the reply is the task view's rich form: the markdown
+    detail as a :class:`RichReply` carrying the view's keyboard, whose
     subscribe/unsubscribe toggle button reflects whether the chat is
     currently subscribed to the project (computed from
     ``store.list_subscriptions``). Without one, the plain text form is
@@ -2425,6 +2465,11 @@ def _detail_edit(
     state); the chat id and subscription state come from the callback's
     message (an inaccessible message, with no chat, gets the plain text).
     A store failure answers :data:`MOVE_ERROR_TEXT` instead.
+
+    The re-render is a :class:`RichReply` (the view's rich form); until
+    the in-place rich edit lands (#104 — the ``rich_markdown`` edit plus
+    the rich → HTML → plain fallback chain), the markdown rides the edit's
+    plain ``text`` field.
     """
     project_id = project["id"]
     try:
@@ -2447,6 +2492,9 @@ def _detail_edit(
     reply = format_task_view(task, project, history, chat_id, subscribed)
     if isinstance(reply, str):
         return MessageEdit(reply)
+    if isinstance(reply, RichReply):
+        # Plain-text edit until the in-place rich edit lands (#104).
+        return MessageEdit(reply.markdown, reply.reply_markup)
     return MessageEdit(reply.text, reply.reply_markup)
 
 

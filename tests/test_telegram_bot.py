@@ -1793,29 +1793,37 @@ def expected_inline_text(number, title, filename, body):
 
 
 def expected_task_text(store, d):
-    """The exact /task detail reply for the seed_task_view task."""
+    """The exact /task detail markdown for the seed_task_view task.
+
+    Blocks joined by one blank line: the header (H1 heading, then the
+    State/Estimate/Parent bold lines), the raw description, and the
+    Prerequisites/Attachments/History list blocks.
+    """
     pid, t = d["pid"], d["t"]
     history = store.get_history(pid, t["number"])
     assert len(history) == 3
     return (
-        f"#{t['number']} working — Story\n"
-        "State: In progress\n"
-        "Estimate: 3\n"
-        f"Parent: #{d['epic']['number']}\n"
-        "Description:\n"
+        f"# {t['number']} working — Story\n"
+        "**State:** In progress\n"
+        "**Estimate:** 3\n"
+        f"**Parent:** #{d['epic']['number']}\n"
+        "\n"
         "The task at hand.\n"
-        "Prerequisites:\n"
-        f"  #{d['p1']['number']} prereq one — Review\n"
-        f"  #{d['p2']['number']} prereq two — In progress\n"
-        "Attachments:\n"
-        f"  {d['plan']['id']}. plan.md (7.6 KB) — /attachment yask "
+        "\n"
+        "**Prerequisites:**\n"
+        f"- #{d['p1']['number']} prereq one — Review\n"
+        f"- #{d['p2']['number']} prereq two — In progress\n"
+        "\n"
+        "**Attachments:**\n"
+        f"- {d['plan']['id']}. plan.md (7.6 KB) — /attachment yask "
         f"{t['number']} {d['plan']['id']}\n"
-        f"  {d['img']['id']}. img.png (108 B) — /attachment yask "
+        f"- {d['img']['id']}. img.png (108 B) — /attachment yask "
         f"{t['number']} {d['img']['id']}\n"
-        "History:\n"
-        f"  {history[0]['changed_at']} — created (web)\n"
-        f"  {history[1]['changed_at']} — Backlog → Todo (web)\n"
-        f"  {history[2]['changed_at']} — Todo → In progress (web)"
+        "\n"
+        "**History:**\n"
+        f"- {history[0]['changed_at']} — created (web)\n"
+        f"- {history[1]['changed_at']} — Backlog → Todo (web)\n"
+        f"- {history[2]['changed_at']} — Todo → In progress (web)"
     )
 
 
@@ -1825,9 +1833,14 @@ def test_task_by_number_exact(store):
         Script([[message_update(231, f"/task yask {d['t']['number']}")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert len(script.sent) == 1
-    assert script.sent[0]["chat_id"] == 7
-    assert script.sent[0]["text"] == expected_task_text(store, d)
+    # the detail goes out as a Rich Message, not sendMessage
+    assert len(script.sent_rich) == 1
+    assert script.sent_rich[0]["chat_id"] == 7
+    assert (
+        script.sent_rich[0]["rich_message"]["markdown"]
+        == expected_task_text(store, d)
+    )
+    assert script.sent == []
 
 
 def test_task_by_title_case_insensitive(store):
@@ -1836,8 +1849,12 @@ def test_task_by_title_case_insensitive(store):
         Script([[message_update(232, "/task yask WORKING")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert len(script.sent) == 1
-    assert script.sent[0]["text"] == expected_task_text(store, d)
+    assert len(script.sent_rich) == 1
+    assert (
+        script.sent_rich[0]["rich_message"]["markdown"]
+        == expected_task_text(store, d)
+    )
+    assert script.sent == []
 
 
 def test_task_title_two_matches_disambiguates(store):
@@ -1899,7 +1916,8 @@ def test_task_numeric_title_fallback(store):
         dispatch=telegram_bot.make_dispatch(store),
     )
     # no task #2024 — the all-digit reference falls back to the title
-    assert script.sent[0]["text"].startswith(f"#{t['number']} 2024 — Task\n")
+    markdown = script.sent_rich[0]["rich_message"]["markdown"]
+    assert markdown.startswith(f"# {t['number']} 2024 — Task\n")
 
 
 def test_task_number_wins_over_same_title(store):
@@ -1910,9 +1928,10 @@ def test_task_number_wins_over_same_title(store):
         Script([[message_update(239, "/task yask 2")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert script.sent[0]["text"].startswith(
-        f"#{two['number']} real two — Task\n"
+    assert script.sent_rich[0]["rich_message"]["markdown"].startswith(
+        f"# {two['number']} real two — Task\n"
     )
+    assert script.sent == []
 
 
 def test_task_project_and_title_with_spaces(store):
@@ -1924,7 +1943,10 @@ def test_task_project_and_title_with_spaces(store):
         dispatch=telegram_bot.make_dispatch(store),
     )
     # longest-prefix project resolution: "my big project" + title "fix the bug"
-    assert script.sent[0]["text"].startswith(f"#{t['number']} fix the bug — Task\n")
+    assert script.sent_rich[0]["rich_message"]["markdown"].startswith(
+        f"# {t['number']} fix the bug — Task\n"
+    )
+    assert script.sent == []
 
 
 def test_task_archived_by_number_not_by_title(store):
@@ -1935,8 +1957,10 @@ def test_task_archived_by_number_not_by_title(store):
         Script([[message_update(241, f"/task yask {t['number']}")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert script.sent[0]["text"].startswith(f"#{t['number']} doomed — Task\n")
-    assert "State: Archived" in script.sent[0]["text"]
+    markdown = script.sent_rich[0]["rich_message"]["markdown"]
+    assert markdown.startswith(f"# {t['number']} doomed — Task\n")
+    assert "**State:** Archived" in markdown
+    assert script.sent == []
     # the title search excludes archived tasks
     script = run_bot_until_stop(
         Script([[message_update(242, "/task yask doomed")]]),
@@ -1952,7 +1976,10 @@ def test_task_with_bot_mention(store):
         Script([[message_update(243, f"/task@yask_test_bot yask {t['number']}")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert script.sent[0]["text"].startswith(f"#{t['number']} working — Task\n")
+    assert script.sent_rich[0]["rich_message"]["markdown"].startswith(
+        f"# {t['number']} working — Task\n"
+    )
+    assert script.sent == []
 
 
 def test_task_usage_texts(store):
@@ -1972,18 +1999,19 @@ def test_task_usage_texts(store):
 
 def test_task_long_description_truncated(store):
     pid = store.create_project("yask")["id"]
-    store.create_task(pid, "chatty", description="x" * 4000)
+    store.create_task(pid, "chatty", description="x" * 31000)
     script = run_bot_until_stop(
         Script([[message_update(246, "/task yask chatty")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    text = script.sent[0]["text"]
-    assert "… (truncated, 4000 chars total)" in text
-    # capped at exactly 2500 description chars
-    assert "x" * 2500 in text
-    assert "x" * 2501 not in text
-    # the whole reply stays under Telegram's message cap
-    assert len(text) <= 4096
+    markdown = script.sent_rich[0]["rich_message"]["markdown"]
+    assert "… (truncated, 31000 chars total)" in markdown
+    # capped at exactly DESCRIPTION_MAX description chars
+    assert "x" * telegram_bot.DESCRIPTION_MAX in markdown
+    assert "x" * (telegram_bot.DESCRIPTION_MAX + 1) not in markdown
+    # the whole view stays under the Rich Message budget
+    assert len(markdown) <= telegram_bot.RICH_MESSAGE_MAX
+    assert script.sent == []
 
 
 def test_task_history_capped_at_ten(store):
@@ -2000,16 +2028,17 @@ def test_task_history_capped_at_ten(store):
         Script([[message_update(247, f"/task yask {t['number']}")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    lines = script.sent[0]["text"].split("\n")
-    idx = lines.index("History:")
+    lines = script.sent_rich[0]["rich_message"]["markdown"].split("\n")
+    idx = lines.index("**History:**")
     assert lines[idx:] == (
-        ["History:", f"  … {12 - telegram_bot.HISTORY_MAX} earlier transitions"]
+        ["**History:**", f"- … {12 - telegram_bot.HISTORY_MAX} earlier transitions"]
         + [
-            f"  {h['changed_at']} — {h['from_state']} → {h['to_state']} "
+            f"- {h['changed_at']} — {h['from_state']} → {h['to_state']} "
             f"({h['source']})"
             for h in history[-telegram_bot.HISTORY_MAX:]
         ]
     )
+    assert script.sent == []
 
 
 def test_tasks_drill_down_to_task_view(store):
@@ -2042,15 +2071,15 @@ def test_tasks_drill_down_to_task_view(store):
         callback_dispatch=telegram_bot.make_callback_dispatch(store),
     )
     # the press is answered (no toast) and the detail view goes out as a
-    # new message to the button's chat
+    # new Rich Message to the button's chat
     assert script.answered == [{"callback_query_id": "cbq-249"}]
-    assert len(script.sent) == 1
-    assert script.sent[0]["chat_id"] == 11
-    assert script.sent[0]["text"].startswith(
-        f"#{t['number']} drill down — Story\n"
-    )
-    assert "State: In progress" in script.sent[0]["text"]
-    assert "Estimate: 2" in script.sent[0]["text"]
+    assert len(script.sent_rich) == 1
+    assert script.sent_rich[0]["chat_id"] == 11
+    markdown = script.sent_rich[0]["rich_message"]["markdown"]
+    assert markdown.startswith(f"# {t['number']} drill down — Story\n")
+    assert "**State:** In progress" in markdown
+    assert "**Estimate:** 2" in markdown
+    assert script.sent == []
     assert script.edited == []
 
 
@@ -2080,22 +2109,23 @@ def test_task_view_attachment_and_toggle_buttons(store):
         Script([[message_update(281, f"/task yask {n}")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    sent = script.sent[0]
-    # the text is unchanged from the no-button form
-    assert sent["text"] == expected_task_text(store, d)
+    sent = script.sent_rich[0]
+    # the markdown is unchanged from the no-button form
+    assert sent["rich_message"]["markdown"] == expected_task_text(store, d)
     assert sent["reply_markup"] == {
         "inline_keyboard": attachment_rows
         + state_rows
         + [[{"text": "Subscribe", "callback_data": f"s:{pid}"}]]
         + [[{"text": "Main menu", "callback_data": "h"}]]
     }
+    assert script.sent == []
     # subscribing the chat flips only the toggle button
     store.subscribe_project(7, pid)
     script = run_bot_until_stop(
         Script([[message_update(282, f"/task yask {n}")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    rows = script.sent[0]["reply_markup"]["inline_keyboard"]
+    rows = script.sent_rich[0]["reply_markup"]["inline_keyboard"]
     assert rows[:2] == attachment_rows
     assert rows[2:4] == state_rows
     assert rows[4] == [{"text": "Unsubscribe", "callback_data": f"u:{pid}"}]
@@ -2103,7 +2133,7 @@ def test_task_view_attachment_and_toggle_buttons(store):
 
 
 def test_format_task_view_without_chat_is_plain_str(store):
-    """No chat id → the plain text form, byte-identical (no keyboard)."""
+    """No chat id → the plain markdown form as a str (no keyboard)."""
     d = seed_task_view(store)
     pid, t = d["pid"], d["t"]
     reply = telegram_bot.format_task_view(
@@ -2113,6 +2143,83 @@ def test_format_task_view_without_chat_is_plain_str(store):
     )
     assert isinstance(reply, str)
     assert reply == expected_task_text(store, d)
+
+
+def test_format_task_view_with_chat_is_rich_reply(store):
+    """A chat id → a RichReply: the same markdown, the unchanged keyboard
+    (attachment rows, state rows, toggle, Main menu)."""
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    n = t["number"]
+    reply = telegram_bot.format_task_view(
+        store.get_task(pid, n),
+        store.get_project(pid),
+        store.get_history(pid, n),
+        chat_id=7,
+        subscribed=False,
+    )
+    assert isinstance(reply, telegram_bot.RichReply)
+    assert reply.markdown == expected_task_text(store, d)
+    # 'working' is In progress: one button per other workflow state
+    # (Backlog=0, Todo=1, Planning=2, Review=4, Done=5), 3 per row
+    assert reply.reply_markup == {
+        "inline_keyboard": [
+            [{"text": "plan.md", "callback_data": f"a:{pid}:{n}:{d['plan']['id']}"}],
+            [{"text": "img.png", "callback_data": f"a:{pid}:{n}:{d['img']['id']}"}],
+            [
+                {"text": "Backlog", "callback_data": f"m:{pid}:{n}:0"},
+                {"text": "Todo", "callback_data": f"m:{pid}:{n}:1"},
+                {"text": "Planning", "callback_data": f"m:{pid}:{n}:2"},
+            ],
+            [
+                {"text": "Review", "callback_data": f"m:{pid}:{n}:4"},
+                {"text": "Done", "callback_data": f"m:{pid}:{n}:5"},
+            ],
+            [{"text": "Subscribe", "callback_data": f"s:{pid}"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
+
+
+def test_task_view_unclosed_fence_at_cut_closes(store):
+    """A truncation cut that leaves a code fence open appends the closing
+    fence, so the note and the tail sections survive."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "fenced", description="```\n" + "x" * 40000)
+    t = store.get_task(pid, 1)
+    text = telegram_bot.format_task_view(
+        t, store.get_project(pid), store.get_history(pid, 1)
+    )
+    assert isinstance(text, str)
+    assert "… (truncated, 40004 chars total)" in text
+    fences = [
+        line for line in text.split("\n") if telegram_bot._FENCE_RE.match(line)
+    ]
+    # the cut's opening fence is closed: the count stays even
+    assert len(fences) % 2 == 0
+    assert "**History:**" in text
+
+
+def test_format_task_view_minimal(store):
+    """No estimate/parent/description/prerequisites/attachments → the
+    heading, the State line and the History block only."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "bare")
+    history = store.get_history(pid, t["number"])
+    assert len(history) == 1
+    text = telegram_bot.format_task_view(
+        store.get_task(pid, t["number"]),
+        store.get_project(pid),
+        history,
+    )
+    assert isinstance(text, str)
+    assert text == (
+        f"# {t['number']} bare — Task\n"
+        "**State:** Backlog\n"
+        "\n"
+        "**History:**\n"
+        f"- {history[0]['changed_at']} — created (web)"
+    )
 
 
 def test_task_store_failure_replies_and_recovers(store, monkeypatch):
@@ -2790,12 +2897,14 @@ def test_add_reply_button_opens_task_view(store):
         callback_dispatch=telegram_bot.make_callback_dispatch(store),
     )
     # the press is answered (no toast) and the detail view goes out as a
-    # new message to the pressing chat
+    # new Rich Message to the pressing chat
     assert script.answered == [{"callback_query_id": "cbq-723"}]
-    assert len(script.sent) == 1
-    assert script.sent[0]["chat_id"] == 11
-    assert script.sent[0]["text"].startswith("#1 fix the bug — Task\n")
-    assert "State: Backlog" in script.sent[0]["text"]
+    assert len(script.sent_rich) == 1
+    assert script.sent_rich[0]["chat_id"] == 11
+    markdown = script.sent_rich[0]["rich_message"]["markdown"]
+    assert markdown.startswith("# 1 fix the bug — Task\n")
+    assert "**State:** Backlog" in markdown
+    assert script.sent == []
     assert script.edited == []
 
 
@@ -3072,7 +3181,7 @@ def test_describe_number_form_sets_and_overwrites(store):
         ),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert len(script.sent) == 3
+    assert len(script.sent) == 2
     # the confirmation carries the exact two-row keyboard (the #92 shape)
     assert script.sent[0]["reply_markup"] == {
         "inline_keyboard": [
@@ -3092,10 +3201,12 @@ def test_describe_number_form_sets_and_overwrites(store):
     )
     # replace semantics: the second call overwrote the first
     assert store.get_task(pid, 1)["description"] == "second description"
-    # and the /task detail view shows the new text, not the old one
-    assert "Description:" in script.sent[2]["text"]
-    assert "second description" in script.sent[2]["text"]
-    assert "first description" not in script.sent[2]["text"]
+    # and the /task detail view (a Rich Message) shows the new text, not
+    # the old one — the description is embedded raw, with no label
+    assert len(script.sent_rich) == 1
+    markdown = script.sent_rich[0]["rich_message"]["markdown"]
+    assert "second description" in markdown
+    assert "first description" not in markdown
 
 
 def test_describe_title_form_unique_resolves(store):
@@ -4505,7 +4616,9 @@ def test_run_bot_notifier_end_to_end(store):
 
     asyncio.run(go())
 
-    assert [m["chat_id"] for m in script.sent] == [7, 7, 7, 7]
+    # subscribe confirmation, /start and the notification go out plain;
+    # the detail view is the only Rich Message
+    assert [m["chat_id"] for m in script.sent] == [7, 7, 7]
     assert script.sent[0]["text"] == (
         f"Subscribed to yask ({pid}) — you will be notified about "
         "task state changes in this project."
@@ -4518,8 +4631,8 @@ def test_run_bot_notifier_end_to_end(store):
         pid, t, "working"
     )
     # poll 3's button press sends the task detail view through the real
-    # (mocked) HTTP layer, with the view's own keyboard (chat 7 subscribed
-    # → the toggle in its Unsubscribe state)
+    # (mocked) HTTP layer as a Rich Message, with the view's own keyboard
+    # (chat 7 subscribed → the toggle in its Unsubscribe state)
     expected_detail = telegram_bot.format_task_view(
         store.get_task(pid, t["number"]),
         store.get_project(pid),
@@ -4527,9 +4640,14 @@ def test_run_bot_notifier_end_to_end(store):
         chat_id=7,
         subscribed=True,
     )
-    assert isinstance(expected_detail, telegram_bot.KeyboardReply)
-    assert script.sent[3]["text"] == expected_detail.text
-    assert script.sent[3]["reply_markup"] == expected_detail.reply_markup
+    assert isinstance(expected_detail, telegram_bot.RichReply)
+    assert len(script.sent_rich) == 1
+    assert script.sent_rich[0]["chat_id"] == 7
+    assert (
+        script.sent_rich[0]["rich_message"]["markdown"]
+        == expected_detail.markdown
+    )
+    assert script.sent_rich[0]["reply_markup"] == expected_detail.reply_markup
 
 
 # --- inline-keyboard callbacks (BotAPI + run_bot plumbing) -------------------
@@ -5268,14 +5386,16 @@ def test_callback_dispatch_task_detail_round_trip(store):
         dispatch=telegram_bot.make_dispatch(store),
         callback_dispatch=telegram_bot.make_callback_dispatch(store),
     )
-    # answered without a toast; the detail view goes out as a new message
+    # answered without a toast; the detail view goes out as a new
+    # Rich Message
     assert script.answered == [{"callback_query_id": "cbq-302"}]
-    assert len(script.sent) == 1
-    sent = script.sent[0]
+    assert len(script.sent_rich) == 1
+    sent = script.sent_rich[0]
     assert sent["chat_id"] == 11
-    assert sent["text"].startswith(f"#{t['number']} working — Story\n")
-    assert "State: In progress" in sent["text"]
-    assert "Estimate: 3" in sent["text"]
+    markdown = sent["rich_message"]["markdown"]
+    assert markdown.startswith(f"# {t['number']} working — Story\n")
+    assert "**State:** In progress" in markdown
+    assert "**Estimate:** 3" in markdown
     # the detail carries its own keyboard: no attachments on this task →
     # the state rows (the task is In progress: the other five workflow
     # states, 3 per row) plus the subscribe toggle, reflecting chat 11's
@@ -5296,6 +5416,7 @@ def test_callback_dispatch_task_detail_round_trip(store):
             [{"text": "Main menu", "callback_data": "h"}],
         ]
     }
+    assert script.sent == []
     assert script.edited == []
     assert script.offsets == [None, 303]
 
@@ -5529,10 +5650,10 @@ def test_callback_a_store_failure_replies_and_recovers(store, monkeypatch):
 
 def _detail_callback(update_id, data, chat_id, detail):
     """A callback_update whose original message carries the /task detail
-    (``text`` + ``reply_markup``) — the shape Telegram sends when a button
-    on the detail message is pressed."""
+    (the Rich Message's ``markdown`` + ``reply_markup``) — the shape
+    Telegram sends when a button on the detail message is pressed."""
     update = callback_update(update_id, data, chat_id=chat_id)
-    update["callback_query"]["message"]["text"] = detail["text"]
+    update["callback_query"]["message"]["text"] = detail["rich_message"]["markdown"]
     update["callback_query"]["message"]["reply_markup"] = detail["reply_markup"]
     return update
 
@@ -5541,12 +5662,12 @@ def test_callback_dispatch_subscribe_toggle(store):
     d = seed_task_view(store)
     pid, t = d["pid"], d["t"]
     chat_id = 21
-    # the real /task detail (text + keyboard) as the original message
+    # the real /task detail (Rich Message + keyboard) as the original message
     first = run_bot_until_stop(
         Script([[message_update(298, f"/task yask {t['number']}", chat_id=chat_id)]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    detail = first.sent[0]
+    detail = first.sent_rich[0]
     update = _detail_callback(299, f"s:{pid}", chat_id, detail)
     script = run_bot_until_stop(
         Script([[update]]),
@@ -5565,7 +5686,8 @@ def test_callback_dispatch_subscribe_toggle(store):
     e = script.edited[0]
     assert e["chat_id"] == chat_id
     assert e["message_id"] == 1
-    assert e["text"] == detail["text"]
+    # the edit leg stays plain text until #104: the markdown rides `text`
+    assert e["text"] == detail["rich_message"]["markdown"]
     rows = e["reply_markup"]["inline_keyboard"]
     assert rows[:2] == detail["reply_markup"]["inline_keyboard"][:2]
     assert rows[-2] == [{"text": "Unsubscribe", "callback_data": f"u:{pid}"}]
@@ -5582,7 +5704,7 @@ def test_callback_dispatch_unsubscribe_toggle(store):
         Script([[message_update(300, f"/task yask {t['number']}", chat_id=chat_id)]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    detail = first.sent[0]
+    detail = first.sent_rich[0]
     # the detail shows Unsubscribe for the subscribed chat, followed by
     # the Main-menu row
     assert detail["reply_markup"]["inline_keyboard"][-2] == [
@@ -5752,7 +5874,7 @@ def test_callback_m_single_move_edits_detail_in_place(store):
         Script([[message_update(721, f"/task yask {n}", chat_id=chat_id)]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    detail = first.sent[0]
+    detail = first.sent_rich[0]
     update = _detail_callback(722, f"m:{pid}:{n}:{DONE_IDX}", chat_id, detail)
     script = run_bot_until_stop(
         Script([[update]]),
@@ -5768,7 +5890,7 @@ def test_callback_m_single_move_edits_detail_in_place(store):
     e = script.edited[0]
     assert e["chat_id"] == chat_id
     assert e["message_id"] == 1
-    assert "State: Done" in e["text"]
+    assert "**State:** Done" in e["text"]
     # the fresh keyboard: the new current state (Done) is excluded
     labels = [
         b["text"]
@@ -5790,7 +5912,7 @@ def test_callback_m_cascade_shows_confirm_keyboard(store):
         Script([[message_update(723, f"/task yask {n}", chat_id=chat_id)]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    detail = first.sent[0]
+    detail = first.sent_rich[0]
     update = _detail_callback(724, f"m:{pid}:{n}:{DONE_IDX}", chat_id, detail)
     script = run_bot_until_stop(
         Script([[update]]),
@@ -5838,7 +5960,7 @@ def test_callback_c_confirms_cascade_and_renders_detail(store):
         Script([[message_update(725, f"/task yask {n}", chat_id=chat_id)]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    detail = first.sent[0]
+    detail = first.sent_rich[0]
     script = run_bot_until_stop(
         Script(
             [
@@ -5862,7 +5984,7 @@ def test_callback_c_confirms_cascade_and_renders_detail(store):
     # the second edit is the fresh detail view of the moved task
     e = script.edited[1]
     assert e["chat_id"] == chat_id
-    assert "State: Done" in e["text"]
+    assert "**State:** Done" in e["text"]
     labels = [
         b["text"]
         for row in e["reply_markup"]["inline_keyboard"]
@@ -5881,7 +6003,7 @@ def test_callback_x_cancels_and_renders_detail(store):
         Script([[message_update(728, f"/task yask {n}", chat_id=chat_id)]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    detail = first.sent[0]
+    detail = first.sent_rich[0]
     update = _detail_callback(729, f"x:{pid}:{n}", chat_id, detail)
     script = run_bot_until_stop(
         Script([[update]]),
@@ -5895,8 +6017,8 @@ def test_callback_x_cancels_and_renders_detail(store):
     ]
     assert script.sent == []
     e = script.edited[0]
-    assert e["text"].startswith(f"#{n} working — Story")
-    assert "State: In progress" in e["text"]
+    assert e["text"].startswith(f"# {n} working — Story")
+    assert "**State:** In progress" in e["text"]
     labels = [
         b["text"]
         for row in e["reply_markup"]["inline_keyboard"]
