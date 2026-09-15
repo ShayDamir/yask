@@ -23,6 +23,19 @@ from .store import (
 
 WEB_DIR = Path(__file__).parent / "web"
 
+# Strict CSP for the web UI (task #86): only the module script and the
+# stylesheet from /static, images from self/data:/blob: (data: favicon,
+# blob: attachment viewer), same-origin fetch only, no framing, no
+# <base>, no native form submits (the UI intercepts every form).
+# ``style-src 'unsafe-inline'`` is deliberate: the UI sets inline
+# style="..." attributes via h(); the path to full strictness is tracked
+# as task #98.
+CSP = (
+    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; "
+    "base-uri 'none'; form-action 'none'"
+)
+
 
 class Db:
     """One SQLite connection per worker thread (WAL allows many readers)."""
@@ -130,6 +143,20 @@ class TelegramUserPasswordIn(BaseModel):
 def create_app(db_path: str | Path) -> FastAPI:
     db_ = Db(db_path)
     app = FastAPI(title="yask", version="0.1.0")
+
+    @app.middleware("http")
+    async def security_headers(request, call_next):
+        # Defense-in-depth on every response (task #86): CSP (module
+        # scripts only, no inline scripts, no framing, no exfiltration
+        # channels), X-Frame-Options (clickjacking), nosniff (MIME
+        # sniffing), no-referrer (Referer leakage). App-level, so it
+        # covers API routes, the /static mount, and error responses.
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = CSP
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
 
     def store() -> Store:
         return Store(db_.conn(), source="web")
@@ -304,12 +331,21 @@ def create_app(db_path: str | Path) -> FastAPI:
     def api_get_attachment(attachment_id: int):
         def run():
             meta, data = store().get_attachment(attachment_id)
+            # SVG is the only executable type in the attachment allowlist:
+            # force a download so direct navigation cannot render (and
+            # script) it (task #86; task #84 owns the deeper SVG
+            # hardening). The web UI viewer fetches the blob and renders
+            # it, so it is unaffected by the disposition.
+            disposition = (
+                "attachment" if meta["content_type"] == "image/svg+xml"
+                else "inline"
+            )
             return Response(
                 content=data,
                 media_type=meta["content_type"],
                 headers={
                     "Content-Disposition": (
-                        f'inline; filename="{meta["filename"]}"'
+                        f'{disposition}; filename="{meta["filename"]}"'
                     )
                 },
             )

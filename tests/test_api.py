@@ -5,7 +5,7 @@ import base64
 import pytest
 from fastapi.testclient import TestClient
 
-from yask.api import create_app
+from yask.api import CSP, create_app
 
 
 @pytest.fixture()
@@ -219,6 +219,36 @@ def test_attachment_upload_download(client, pid):
     assert client.get(f"/api/attachments/{att['id']}").status_code == 404
 
 
+def test_svg_attachment_served_as_download(client, pid):
+    """#86: an image/svg+xml attachment (the only executable type in the
+    allowlist) is served with Content-Disposition: attachment so direct
+    navigation downloads it instead of rendering it; every other type
+    keeps the existing inline behavior. The payload is benign — the
+    script-payload regression test belongs to #84."""
+    client.post(f"/api/projects/{pid}/tasks", json={"title": "t"})
+
+    r = client.post(
+        f"/api/projects/{pid}/tasks/1/attachments",
+        files={"file": ("pic.svg", b'<svg xmlns="http://www.w3.org/2000/svg"/>',
+                        "image/svg+xml")},
+    )
+    assert r.status_code == 201
+    got = client.get(f"/api/attachments/{r.json()['id']}")
+    assert got.status_code == 200
+    assert got.headers["content-disposition"].startswith("attachment")
+    assert got.headers["x-content-type-options"] == "nosniff"
+
+    # control: a non-SVG type stays inline (unchanged behavior)
+    r2 = client.post(
+        f"/api/projects/{pid}/tasks/1/attachments",
+        files={"file": ("notes.md", b"# hi", "text/markdown")},
+    )
+    assert r2.status_code == 201
+    got2 = client.get(f"/api/attachments/{r2.json()['id']}")
+    assert got2.status_code == 200
+    assert got2.headers["content-disposition"].startswith("inline")
+
+
 def _multipart_body(boundary, filename, data, content_type):
     """Build a raw multipart/form-data body with the exact filename bytes,
     so a CRLF inside the filename reaches the parser unescaped."""
@@ -401,6 +431,32 @@ def test_web_ui_served(client):
     assert r.status_code == 200
     r = client.get("/static/style.css")
     assert r.status_code == 200
+
+
+def test_security_headers_on_web_responses(client):
+    """#86: every web response carries the four security headers, and the
+    CSP matches the module-level policy constant."""
+    for path in ("/", "/static/js/main.js", "/static/style.css"):
+        r = client.get(path)
+        assert r.status_code == 200
+        assert r.headers["content-security-policy"] == CSP
+        assert r.headers["x-frame-options"] == "DENY"
+        assert r.headers["x-content-type-options"] == "nosniff"
+        assert r.headers["referrer-policy"] == "no-referrer"
+
+
+def test_security_headers_on_api_and_error_responses(client, pid):
+    """#86: the middleware covers JSON API responses and
+    exception-handler responses (404) alike."""
+    ok = client.get("/api/projects")
+    assert ok.status_code == 200
+    not_found = client.get("/api/projects/9999")
+    assert not_found.status_code == 404
+    for r in (ok, not_found):
+        assert r.headers["content-security-policy"] == CSP
+        assert r.headers["x-frame-options"] == "DENY"
+        assert r.headers["x-content-type-options"] == "nosniff"
+        assert r.headers["referrer-policy"] == "no-referrer"
 
 
 def test_project_isolation_over_api(client):
