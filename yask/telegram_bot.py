@@ -108,6 +108,7 @@ import asyncio
 import contextlib
 import inspect
 import json
+import os
 import re
 import signal
 import sys
@@ -424,6 +425,16 @@ INLINE_MARKDOWN_MAX_SIZE = 16 * 1024
 # 4096 (measured in UTF-16 code units); 4000 leaves room for the
 # truncation note and non-BMP characters.
 INLINE_TEXT_MAX = 4000
+
+# Rich Message cap (Bot API 10.1's sendRichMessage), measured in UTF-8
+# characters — shared by the epic's rich reply formatters, which apply it.
+RICH_MESSAGE_MAX = 32768
+# Code-point budget for the rich fallback's HTML/plain legs. Telegram caps
+# a regular message at 4096 (measured in UTF-16 code units); 4000 code
+# points leaves room for the truncation note and non-BMP characters (each
+# counting as two UTF-16 units), the same convention INLINE_TEXT_MAX
+# documents.
+REGULAR_TEXT_MAX = 4000
 
 # Display cap for the state-change notification's button label. Telegram
 # documents no limit on inline button text (only ``callback_data`` is
@@ -828,6 +839,20 @@ class KeyboardReply:
 
 
 @dataclass(frozen=True)
+class RichReply:
+    """A reply whose text is markdown, sent as a Rich Message.
+
+    ``run_bot`` sends it with ``sendRichMessage`` (Bot API 10.1+); on a
+    rich-send failure it falls back to ``sendMessage`` with
+    ``parse_mode=HTML`` (the markdown via :func:`markdown_to_html`), then
+    to plain text — see :func:`_send_rich_with_fallback`.
+    """
+
+    markdown: str
+    reply_markup: Optional[ReplyMarkup] = None
+
+
+@dataclass(frozen=True)
 class MessageEdit:
     """An in-place update of the original message (``editMessageText``).
 
@@ -841,8 +866,9 @@ class MessageEdit:
 
 
 # Every shape a dispatch layer may return: plain text, text with a
-# keyboard, or a file (with an optional keyboard).
-Reply = Union[str, KeyboardReply, FileReply]
+# keyboard, a file (with an optional keyboard), or markdown rendered as a
+# Rich Message (with an optional keyboard).
+Reply = Union[str, KeyboardReply, FileReply, RichReply]
 
 
 @dataclass(frozen=True)
@@ -1374,15 +1400,18 @@ def _attachment_caption(task: dict, meta: dict) -> str:
     return f"#{task['number']} {task['title']} — {meta['filename']}"
 
 
-def _truncate_inline(text: str, total: int) -> str:
-    """``text`` truncated to :data:`INLINE_TEXT_MAX` with a
-    ``… (truncated, N chars total)`` note, where ``total`` is the pre-
-    truncation content length (the body, excluding the note)."""
-    if len(text) <= INLINE_TEXT_MAX:
+def _truncate_inline(
+    text: str, total: int, budget: int = INLINE_TEXT_MAX
+) -> str:
+    """``text`` truncated to ``budget`` code points (default
+    :data:`INLINE_TEXT_MAX`) with a ``… (truncated, N chars total)`` note,
+    where ``total`` is the pre-truncation content length (the body,
+    excluding the note)."""
+    if len(text) <= budget:
         return text
     note = f"\n… (truncated, {total} chars total)"
-    budget = max(0, INLINE_TEXT_MAX - len(note))
-    return text[:budget] + note
+    room = max(0, budget - len(note))
+    return text[:room] + note
 
 
 def attachment_reply(meta: dict, data: bytes, task: dict) -> Union[str, FileReply]:
@@ -2940,8 +2969,14 @@ class BotAPI:
         chat_id: int,
         text: str,
         reply_markup: Optional[ReplyMarkup] = None,
+        parse_mode: Optional[str] = None,
     ) -> dict:
+        """Send a text message; ``parse_mode`` (e.g. ``"HTML"``) joins the
+        params only when truthy, so a plain send stays byte-identical to
+        before (the rich fallback's HTML leg passes ``"HTML"``)."""
         params: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            params["parse_mode"] = parse_mode
         if reply_markup:
             params["reply_markup"] = reply_markup
         result = await self._call("sendMessage", **params)
@@ -3206,10 +3241,12 @@ class Notifier:
         api: BotAPI,
         store: Store,
         auth: Optional[Auth] = None,
+        rich: bool = True,
     ) -> None:
         self._api = api
         self._store = store
         self._auth = auth
+        self._rich = rich
         self._cursor: int = 0
 
     def seed(self) -> None:
@@ -3223,21 +3260,75 @@ class Notifier:
             for chat_id in self._store.subscribed_chats(change["project_id"]):
                 if self._auth is not None and not self._auth.is_authenticated(chat_id):
                     continue  # no board data for unauthenticated chats
-                await _send_reply(self._api, chat_id, format_notification(change))
+                await _send_reply(
+                    self._api, chat_id, format_notification(change), self._rich
+                )
             self._cursor = change["id"]
 
 
-async def _send_reply(api: BotAPI, chat_id: int, reply: Reply) -> None:
+async def _send_rich_with_fallback(
+    api: BotAPI, chat_id: int, reply: RichReply, rich: bool
+) -> None:
+    """Send a :class:`RichReply` through the rich → HTML → plain chain.
+
+    1. Rich mode on: ``sendRichMessage`` (the markdown plus, when set, the
+       keyboard).
+    2. Any rich-leg failure (400 unparseable markdown, 404 unknown method
+       on an old local Bot API server, or any transport failure) →
+       ``sendMessage`` with ``parse_mode=HTML`` on
+       :func:`markdown_to_html` of the markdown.
+    3. Any HTML-leg failure (e.g. 400) → plain text — exactly today's
+       behavior.
+
+    Each leg fires only if the previous one raised, so a failure never
+    double-sends and the worst case is exactly today's plain output. The
+    markdown source — not the converted HTML — is re-truncated to
+    :data:`REGULAR_TEXT_MAX` for the degraded legs: the converter
+    total-escapes its input, so truncated markdown still converts to
+    valid HTML, while cutting a converted string could split a tag or an
+    entity and 400 the whole leg. The keyboard threads every leg. If the
+    plain leg raises, it propagates — the caller's error handling already
+    logs and survives plain-send failures.
+    """
+    if rich:
+        try:
+            await api.send_rich_message(
+                chat_id, reply.markdown, reply_markup=reply.reply_markup
+            )
+            return
+        except BotAPIError:
+            pass  # 400 parse / 404 old server / transport → HTML leg
+    text = _truncate_inline(reply.markdown, len(reply.markdown), REGULAR_TEXT_MAX)
+    try:
+        await api.send_message(
+            chat_id,
+            markdown_to_html(text),
+            reply_markup=reply.reply_markup,
+            parse_mode="HTML",
+        )
+        return
+    except BotAPIError:
+        pass  # e.g. 400 on the HTML payload → plain leg
+    await api.send_message(chat_id, text, reply_markup=reply.reply_markup)
+
+
+async def _send_reply(
+    api: BotAPI, chat_id: int, reply: Reply, rich: bool = True
+) -> None:
     """Send one dispatch reply to ``chat_id``.
 
     A ``str`` goes out with ``sendMessage``; a :class:`KeyboardReply`
-    with ``sendMessage`` plus the keyboard; a :class:`FileReply` with
-    ``sendPhoto`` (image content types) or ``sendDocument``, with its
-    caption and (when set) keyboard. Both dispatch paths (message and
-    callback) share this helper, so failed sends are caught by the same
-    error handling everywhere.
+    with ``sendMessage`` plus the keyboard; a :class:`RichReply` through
+    the rich → HTML → plain fallback chain (
+    :func:`_send_rich_with_fallback` — the rich leg only when ``rich``);
+    a :class:`FileReply` with ``sendPhoto`` (image content types) or
+    ``sendDocument``, with its caption and (when set) keyboard. Both
+    dispatch paths (message and callback) share this helper, so failed
+    sends are caught by the same error handling everywhere.
     """
-    if isinstance(reply, FileReply):
+    if isinstance(reply, RichReply):
+        await _send_rich_with_fallback(api, chat_id, reply, rich)
+    elif isinstance(reply, FileReply):
         if reply.is_image:
             await api.send_photo(
                 chat_id,
@@ -3270,15 +3361,17 @@ async def run_bot(
     error_delay: float = 1.0,
     on_cycle: Optional[Callable[[], Any]] = None,
     callback_dispatch: Optional[Callable[[dict], Optional[CallbackAction]]] = None,
+    rich: bool = True,
 ) -> None:
     """Long-poll ``getUpdates`` and dispatch message handlers until stopped.
 
     The offset advances to ``update_id + 1`` after each processed update.
     A string reply is sent with ``sendMessage``; a :class:`KeyboardReply`
-    with ``sendMessage`` plus its inline keyboard; a :class:`FileReply` is
-    sent with ``sendPhoto`` (image content types) or ``sendDocument``, so
-    failed file sends are caught by the same error handling as failed
-    messages.
+    with ``sendMessage`` plus its inline keyboard; a :class:`RichReply`
+    through the rich → HTML → plain fallback chain (the rich leg only when
+    ``rich``); a :class:`FileReply` is sent with ``sendPhoto`` (image
+    content types) or ``sendDocument``, so failed file sends are caught by
+    the same error handling as failed messages.
 
     A message carrying a document or a photo (and no text) is extracted
     to an :class:`IncomingFile` and passed to ``dispatch`` as its
@@ -3357,7 +3450,7 @@ async def run_bot(
                     if inspect.iscoroutine(reply):
                         reply = await reply
                     if reply is not None and "id" in chat:
-                        await _send_reply(api, chat["id"], reply)
+                        await _send_reply(api, chat["id"], reply, rich)
                 elif callback is not None:
                     action = (
                         callback_dispatch(callback)
@@ -3388,7 +3481,7 @@ async def run_bot(
                                 action.edit.reply_markup,
                             )
                     if action.reply is not None and "id" in cb_chat:
-                        await _send_reply(api, cb_chat["id"], action.reply)
+                        await _send_reply(api, cb_chat["id"], action.reply, rich)
             except BotAPIError as exc:
                 print(f"yask: telegram dispatch failed: {exc}", file=sys.stderr)
                 await asyncio.sleep(error_delay)
@@ -3399,6 +3492,17 @@ async def run_bot(
                 await on_cycle()
             except Exception as exc:
                 print(f"yask: telegram notify failed: {exc}", file=sys.stderr)
+
+
+def _rich_enabled() -> bool:
+    """Rich-message kill switch (``YASK_TELEGRAM_RICH``).
+
+    Rich mode is on unless the variable is exactly ``0`` — client
+    compatibility is the driver (Telegram Web refused to render rich
+    messages as of June 2026). Read once at startup, never per send, so a
+    restart-free environment change does not flip behavior mid-process.
+    """
+    return os.environ.get("YASK_TELEGRAM_RICH") != "0"
 
 
 async def _amain(
@@ -3429,9 +3533,12 @@ async def _amain(
     # Login sessions live in the store: a restart does not log anyone out.
     auth = Auth(store)
 
+    # The rich-message kill switch, read once at startup (not per send).
+    rich = _rich_enabled()
+
     # Seed the notification cursor to the current history maximum so only
     # changes made while this process runs are pushed (no replay on restart).
-    notifier = Notifier(api, store, auth)
+    notifier = Notifier(api, store, auth, rich)
     notifier.seed()
 
     # Without an externally supplied stop event (production), SIGINT is the
@@ -3458,6 +3565,7 @@ async def _amain(
             poll_timeout=POLL_TIMEOUT,
             on_cycle=notifier.check,
             callback_dispatch=make_callback_dispatch(store, auth),
+            rich=rich,
         )
     finally:
         if handler_installed:

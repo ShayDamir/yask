@@ -176,15 +176,23 @@ class Script:
     records the file ids passed to getFile; ``file_downloads`` the URL paths
     requested from the file CDN (``/file/bot<token>/<path>``), served with
     the ``file_bytes`` argument (a 404 when it is None).
+    ``fail_rich_once`` / ``fail_send_once`` each take a ``(status,
+    description)`` pair: the first sendRichMessage / sendMessage is then
+    answered ``ok:false`` with that ``error_code`` (a simulated rich-leg or
+    HTML-leg failure), subsequent calls succeed.
     """
 
-    def __init__(self, get_updates, get_me_ok=True, fail_once_with=None, fail_set_my_commands=False, file_bytes=None):
+    def __init__(self, get_updates, get_me_ok=True, fail_once_with=None, fail_set_my_commands=False, file_bytes=None, fail_rich_once=None, fail_send_once=None):
         self.get_updates = list(get_updates)
         self.get_me_ok = get_me_ok
         self.fail_once_with = fail_once_with
         self.failed_once = False
         self.fail_set_my_commands = fail_set_my_commands
         self.failed_set_my_commands = False
+        self.fail_rich_once = fail_rich_once
+        self.failed_rich_once = False
+        self.fail_send_once = fail_send_once
+        self.failed_send_once = False
         self.file_bytes = file_bytes
         self.file_gets = []
         self.file_downloads = []
@@ -266,9 +274,31 @@ class Script:
             return httpx.Response(200, json={"ok": True, "result": []})
         if method == "sendMessage":
             self.sent.append(body)
+            if self.fail_send_once is not None and not self.failed_send_once:
+                self.failed_send_once = True
+                status, description = self.fail_send_once
+                return httpx.Response(
+                    status,
+                    json={
+                        "ok": False,
+                        "error_code": status,
+                        "description": description,
+                    },
+                )
             return httpx.Response(200, json={"ok": True, "result": {"message_id": 99}})
         if method == "sendRichMessage":
             self.sent_rich.append(body)
+            if self.fail_rich_once is not None and not self.failed_rich_once:
+                self.failed_rich_once = True
+                status, description = self.fail_rich_once
+                return httpx.Response(
+                    status,
+                    json={
+                        "ok": False,
+                        "error_code": status,
+                        "description": description,
+                    },
+                )
             return httpx.Response(200, json={"ok": True, "result": {"message_id": 99}})
         if method == "answerCallbackQuery":
             self.answered.append(body)
@@ -306,7 +336,7 @@ class Script:
 
 def run_bot_until_stop(
     script, dispatch=None, on_cycle=None, error_delay=0.01, callback_dispatch=None,
-    build_dispatch=None,
+    build_dispatch=None, rich=True,
 ):
     """Run run_bot against the script until the script drains (sets stop).
 
@@ -314,7 +344,8 @@ def run_bot_until_stop(
     two-argument dispatch signature); pass a ``make_dispatch(store)``
     dispatcher for store-backed commands. ``on_cycle`` is passed through to
     ``run_bot`` (the state-change notifier hook); ``callback_dispatch`` the
-    callback_query dispatcher (None → the out-of-date toast safety net).
+    callback_query dispatcher (None → the out-of-date toast safety net);
+    ``rich`` the kill-switch flag threaded to ``run_bot`` (default on).
     ``build_dispatch`` — when given — is a callback receiving the internal
     :class:`telegram_bot.BotAPI` instance (bound to the same mock
     transport) and returning the dispatch callable; it is how a test wires
@@ -340,6 +371,7 @@ def run_bot_until_stop(
                 error_delay=error_delay,
                 on_cycle=on_cycle,
                 callback_dispatch=callback_dispatch,
+                rich=rich,
             )
         finally:
             await client.aclose()
@@ -4778,6 +4810,171 @@ def test_edit_message_text_rich_400_parse_error_surfaces_code():
         400,
         "can't parse rich markdown: unmatched '['",
     )
+
+
+def _send_reply_via_script(script, reply, rich=True):
+    """Run ``_send_reply`` once against the script's mock transport (no
+    poll loop) — the send-funnel tests below."""
+    client = make_client(script.handler)
+    api = telegram_bot.BotAPI(BOT_TOKEN, client=client)
+
+    async def go():
+        try:
+            await telegram_bot._send_reply(api, 7, reply, rich)
+        finally:
+            await client.aclose()
+
+    asyncio.run(go())
+
+
+def test_send_reply_rich_happy_path():
+    markup = {"inline_keyboard": [[{"text": "go", "callback_data": "p:1"}]]}
+    script = Script([])
+    _send_reply_via_script(
+        script, telegram_bot.RichReply("# Title", reply_markup=markup)
+    )
+    # the first leg is the Rich Message: markdown payload + threaded keyboard
+    assert script.sent_rich == [
+        {
+            "chat_id": 7,
+            "rich_message": {"markdown": "# Title"},
+            "reply_markup": markup,
+        }
+    ]
+    # no double-send: the plain-send recorder stays empty
+    assert script.sent == []
+
+
+def test_send_reply_rich_happy_path_no_markup():
+    script = Script([])
+    _send_reply_via_script(script, telegram_bot.RichReply("# Title"))
+    # no markup → no key
+    assert script.sent_rich == [
+        {"chat_id": 7, "rich_message": {"markdown": "# Title"}}
+    ]
+    assert script.sent == []
+
+
+def test_send_reply_rich_400_falls_back_to_html():
+    markup = {"inline_keyboard": [[{"text": "go", "callback_data": "p:1"}]]}
+    markdown = "**bold** and <script>alert(1)</script>"
+    script = Script([], fail_rich_once=(400, "can't parse rich markdown"))
+    _send_reply_via_script(script, telegram_bot.RichReply(markdown, markup))
+    # the rich leg fired (and failed) exactly once ...
+    assert script.sent_rich == [
+        {
+            "chat_id": 7,
+            "rich_message": {"markdown": markdown},
+            "reply_markup": markup,
+        }
+    ]
+    # ... and the HTML leg replaced it — two sends total, no double-send
+    assert len(script.sent) == 1
+    body = script.sent[0]
+    assert body["chat_id"] == 7
+    assert body["parse_mode"] == "HTML"
+    assert body["reply_markup"] == markup
+    # the markdown was converted, not raw-sent: real escaping
+    assert body["text"] == telegram_bot.markdown_to_html(markdown)
+    assert "<strong>bold</strong>" in body["text"]
+    assert "&lt;script&gt;" in body["text"]
+    assert "<script>" not in body["text"]
+
+
+def test_send_reply_rich_404_then_html_400_falls_back_to_plain():
+    markup = {"inline_keyboard": [[{"text": "go", "callback_data": "p:1"}]]}
+    markdown = "**bold**"
+    script = Script(
+        [],
+        fail_rich_once=(404, "Not Found"),
+        fail_send_once=(400, "can't parse HTML"),
+    )
+    _send_reply_via_script(script, telegram_bot.RichReply(markdown, markup))
+    # rich leg 404 (old local Bot API server), then HTML leg 400
+    assert len(script.sent_rich) == 1
+    assert len(script.sent) == 2
+    html_leg, plain_leg = script.sent
+    assert html_leg["parse_mode"] == "HTML"
+    assert html_leg["text"] == telegram_bot.markdown_to_html(markdown)
+    assert html_leg["reply_markup"] == markup
+    # the plain leg is today's behavior: the markdown verbatim, no
+    # parse_mode key — and the only successful message, keyboard threaded
+    assert plain_leg == {
+        "chat_id": 7,
+        "text": markdown,
+        "reply_markup": markup,
+    }
+
+
+def test_send_reply_rich_kill_switch_off():
+    markup = {"inline_keyboard": [[{"text": "go", "callback_data": "p:1"}]]}
+    markdown = "**bold**"
+    script = Script([], fail_rich_once=(400, "should never be called"))
+    _send_reply_via_script(
+        script, telegram_bot.RichReply(markdown, markup), rich=False
+    )
+    # no sendRichMessage call at all — the first leg is the HTML leg
+    assert script.sent_rich == []
+    assert len(script.sent) == 1
+    body = script.sent[0]
+    assert body["parse_mode"] == "HTML"
+    assert body["text"] == telegram_bot.markdown_to_html(markdown)
+    assert body["reply_markup"] == markup
+
+
+def test_run_bot_rich_reply_kill_switch_off():
+    markup = {"inline_keyboard": [[{"text": "view", "callback_data": "t:1:4"}]]}
+
+    def dispatch(text, chat_id=None, file=None):
+        return telegram_bot.RichReply("**hi**", reply_markup=markup)
+
+    script = run_bot_until_stop(
+        Script([[message_update(401, "hello")]]),
+        dispatch=dispatch,
+        rich=False,
+    )
+    # end-to-end: the kill switch is threaded through run_bot, the rich
+    # leg is never attempted, the HTML leg carries the converted markdown
+    assert script.sent_rich == []
+    assert script.sent == [
+        {
+            "chat_id": 7,
+            "text": "<strong>hi</strong>",
+            "reply_markup": markup,
+            "parse_mode": "HTML",
+        }
+    ]
+
+
+def test_send_reply_rich_oversized_payload_retruncated_on_fallback():
+    markdown = "a" * 5000
+    script = Script([], fail_rich_once=(400, "too long"))
+    _send_reply_via_script(script, telegram_bot.RichReply(markdown))
+    # the rich leg got the full payload (well under RICH_MESSAGE_MAX)
+    assert script.sent_rich[0]["rich_message"]["markdown"] == markdown
+    # the fallback leg carries the re-truncated text with the note
+    assert len(script.sent) == 1
+    text = script.sent[0]["text"]
+    assert len(text) <= telegram_bot.REGULAR_TEXT_MAX
+    assert text.endswith("… (truncated, 5000 chars total)")
+    # and the plain leg carries the same truncated markdown, verbatim
+    script2 = Script(
+        [],
+        fail_rich_once=(404, "Not Found"),
+        fail_send_once=(400, "bad html"),
+    )
+    _send_reply_via_script(script2, telegram_bot.RichReply(markdown))
+    assert script2.sent[0]["text"] == text
+    assert script2.sent[1] == {"chat_id": 7, "text": text}
+
+
+def test_rich_enabled_env(monkeypatch):
+    monkeypatch.delenv("YASK_TELEGRAM_RICH", raising=False)
+    assert telegram_bot._rich_enabled() is True
+    monkeypatch.setenv("YASK_TELEGRAM_RICH", "0")
+    assert telegram_bot._rich_enabled() is False
+    monkeypatch.setenv("YASK_TELEGRAM_RICH", "1")
+    assert telegram_bot._rich_enabled() is True
 
 
 def test_send_document_photo_reply_markup_threaded():
