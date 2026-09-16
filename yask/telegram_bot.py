@@ -82,7 +82,9 @@ rich send degrades to HTML, then plain text, and ``YASK_TELEGRAM_RICH=0``
 disables rich messages — plain text only; rich is on by default — the
 ``s:``/``u:`` payload (the
 subscribe/unsubscribe toggle of the ``/task`` view) toggles the chat's
-subscription and flips the button in place, and the ``m:``/``c:``/``x:``
+subscription and flips the button in place (on a rich view, via the rich
+``editMessageText`` payload — the original's block tree echoed with the
+flipped keyboard), and the ``m:``/``c:``/``x:``
 payload (the per-state buttons of the ``/task`` view) moves the task to a
 workflow state in place — a move that would pull prerequisites along is
 confirmed first (``c:`` confirms the cascade, ``x:`` cancels). The ``h:``
@@ -895,8 +897,8 @@ class MessageEdit:
     A callback action edits the message a button lives in (e.g. the
     subscribe toggle) instead of stacking a new message; the keyboard is
     replaced when ``reply_markup`` is set. The plain counterpart of
-    :class:`RichMessageEdit`: the payload when the original message is a
-    plain text message.
+    :class:`RichMessageEdit` and :class:`RichBlocksEdit`: the payload when
+    the original message is a plain text message.
     """
 
     text: str
@@ -910,12 +912,33 @@ class RichMessageEdit:
 
     The :class:`MessageEdit` counterpart for rich originals: a text edit
     of a rich message fails server-side, so editing one requires the rich
-    payload. ``run_bot`` degrades to a fresh message through the regular
-    send chain when the rich edit fails — there is no plain edit leg
-    below rich.
+    payload; the :class:`RichBlocksEdit` sibling covers edits that keep
+    the content untouched (the keyboard flips). ``run_bot`` degrades to a
+    fresh message through the regular send chain when the rich edit fails
+    — there is no plain edit leg below rich.
     """
 
     markdown: str
+    reply_markup: Optional[ReplyMarkup] = None
+
+
+@dataclass(frozen=True)
+class RichBlocksEdit:
+    """In-place update of a Rich Message by echoing its received block
+    tree (editMessageText's rich_message ``blocks`` input, Bot API 10.2+).
+
+    The :class:`RichMessageEdit` sibling for edits that change the
+    keyboard but not the content — the ``s:``/``u:`` subscribe toggle on
+    a rich view: the message text is unchanged, only the pressed toggle
+    button flips. When the blocks edit fails, ``run_bot`` degrades to the
+    toast only: the in-place update carries no new content worth
+    re-sending as a fresh message (a plain duplicate of a rich view would
+    downgrade it), the stale original stays in the chat, and the worst
+    case equals the pre-#106 behavior.
+    """
+
+    blocks: list
+    is_rtl: bool = False
     reply_markup: Optional[ReplyMarkup] = None
 
 
@@ -987,19 +1010,19 @@ class CallbackAction:
 
     The dispatcher sets at most one of ``reply`` (send a new message) and
     ``edit`` (update the original message in place — a plain
-    :class:`MessageEdit` or, for a rich original, a
-    :class:`RichMessageEdit`); ``run_bot`` answers the callback first,
-    then edits, then sends. ``answer_text`` is the toast shown under the
-    button (None → answer with no text), ``show_alert`` upgrades it to an
-    alert dialog, and ``cache_time`` the client-side answer cache TTL in
-    seconds.
+    :class:`MessageEdit`, a :class:`RichMessageEdit` for a rich original,
+    or a :class:`RichBlocksEdit` echoing a rich original's block tree);
+    ``run_bot`` answers the callback first, then edits, then sends.
+    ``answer_text`` is the toast shown under the button (None → answer
+    with no text), ``show_alert`` upgrades it to an alert dialog, and
+    ``cache_time`` the client-side answer cache TTL in seconds.
     """
 
     answer_text: Optional[str] = None
     show_alert: bool = False
     cache_time: Optional[int] = None
     reply: Optional[Reply] = None
-    edit: Optional[Union[MessageEdit, RichMessageEdit]] = None
+    edit: Optional[Union[MessageEdit, RichMessageEdit, RichBlocksEdit]] = None
 
 
 def _toggle_button(project_id: int, subscribed: bool) -> dict:
@@ -2526,10 +2549,12 @@ def _message_is_rich(callback_query: dict) -> bool:
     formatted message"); a rich message's ``text`` is empty or absent.
     Presence check only — the ``m:``/``c:``/``x:`` handlers re-render the
     view from the store and never need the received content (which is a
-    parsed block tree, not markdown — the reason the ``s:``/``u:``
-    toggle's in-place echo is #106). Note for future readers of a
-    message's content: the ``rich_message`` field is the one to use —
-    a text-based read-back of a rich message sees nothing.
+    parsed block tree, not markdown); the ``s:``/``u:`` toggle reads the
+    received block tree to echo it back in place (a
+    :class:`RichBlocksEdit`), so its content rides the edit's payload.
+    Note for future readers of a message's content: the ``rich_message``
+    field is the one to use — a text-based read-back of a rich message
+    sees nothing.
     """
     return isinstance(
         (callback_query.get("message") or {}).get("rich_message"), dict
@@ -2629,7 +2654,12 @@ def make_callback_dispatch(
     place (``editMessageText``): the text is unchanged, the pressed toggle
     button flips to its other state, and the other rows (the attachment
     buttons) are preserved — a stale keyboard with no toggle falls back to
-    a single toggle row; a toast confirms the new state.
+    a single toggle row; a toast confirms the new state. On a rich
+    original the in-place update echoes the original's block tree via the
+    rich payload (``editMessageText``'s ``rich_message`` ``blocks``
+    input, Bot API 10.2+ — the content is a parsed block tree, not
+    markdown), and a failed blocks edit degrades to the toast only (the
+    store change still applies).
     ``m:<project-id>:<number>:<state-index>`` (the per-state buttons of the
     ``/task`` view) moves the task to the ``db.WORKFLOW_STATES[state-index]``
     workflow state: a single-task move is applied and the message re-renders
@@ -2819,29 +2849,40 @@ def make_callback_dispatch(
             subscribed = False
             answer = f"Unsubscribed from {project['name']}"
         # In-place re-render: a toggle leaves the message text unchanged
-        # and only flips the pressed toggle button; an inaccessible
-        # message (no text) gets the toast only. A Rich Message original
-        # also carries no ``text`` (its content is a parsed block tree,
-        # Bot API 10.1 — the ``rich_message`` field is the one to read,
-        # and the flip is #106), so on a rich view the press bails to
-        # the toast only and the pressed button stays stale — echoing
-        # the rich content with the flipped keyboard is #106.
+        # and only flips the pressed toggle button; a rich original
+        # carries no ``text`` (its content is the parsed block tree,
+        # Bot API 10.1), so it echoes the block tree back through the
+        # rich editMessageText payload (Bot API 10.2+ blocks input) with
+        # the flipped keyboard. An original with neither ``text`` nor a
+        # block tree (anomalous) gets the toast only.
         message = callback_query.get("message") or {}
-        text = message.get("text")
-        if text is None:
-            return CallbackAction(answer_text=answer)
         rows = (message.get("reply_markup") or {}).get("inline_keyboard") or []
-        return CallbackAction(
-            answer_text=answer,
-            edit=MessageEdit(
-                text,
-                {
-                    "inline_keyboard": _flip_toggle(
-                        rows, project_id, callback_query["data"], subscribed
-                    )
-                },
-            ),
-        )
+        flipped = {
+            "inline_keyboard": _flip_toggle(
+                rows, project_id, callback_query["data"], subscribed
+            )
+        }
+        text = message.get("text")
+        if text is not None:
+            return CallbackAction(answer_text=answer, edit=MessageEdit(text, flipped))
+        rich = message.get("rich_message")
+        if isinstance(rich, dict) and isinstance(rich.get("blocks"), list):
+            # A rich original: echo the received block tree back through
+            # the rich payload with the flipped keyboard — the message
+            # text is unchanged, only the pressed toggle flips. The
+            # payload is built explicitly (``{"blocks": ...}`` ±
+            # ``is_rtl``), so future receive-only fields on
+            # ``RichMessage`` cannot leak into the input; a malformed
+            # rich shape falls through to the toast-only leg below.
+            return CallbackAction(
+                answer_text=answer,
+                edit=RichBlocksEdit(
+                    rich["blocks"],
+                    is_rtl=bool(rich.get("is_rtl")),
+                    reply_markup=flipped,
+                ),
+            )
+        return CallbackAction(answer_text=answer)  # no text, no block tree: toast only
 
     def _handle_move(
         parts: list[str], callback_query: dict
@@ -3233,17 +3274,23 @@ class BotAPI:
         text: Optional[str] = None,
         reply_markup: Optional[ReplyMarkup] = None,
         rich_markdown: Optional[str] = None,
+        rich_message: Optional[dict] = None,
     ) -> dict:
         """Update a message's text (and inline keyboard) in place.
 
-        Exactly one payload is required: the plain ``text``, or
-        ``rich_markdown`` (a Rich Message edit, Bot API 10.1+). A text edit
-        of a rich message fails server-side, so rich messages must be edited
-        with ``rich_markdown``.
+        Exactly one payload is required: the plain ``text``,
+        ``rich_markdown`` (a Rich Message edit built from markdown, Bot
+        API 10.1+), or ``rich_message`` — a raw ``InputRichMessage``
+        object (the Bot API's parameter name; a received block tree, e.g.
+        a rich message's ``rich_message`` field echoed back, Bot API 10.2+
+        ``blocks`` input). A text edit of a rich message fails server-side,
+        so rich messages must be edited with ``rich_markdown`` or
+        ``rich_message``.
         """
-        if (text is None) == (rich_markdown is None):
+        payloads = (text, rich_markdown, rich_message)
+        if sum(payload is not None for payload in payloads) != 1:
             raise ValueError(
-                "exactly one of text / rich_markdown must be given"
+                "exactly one of text / rich_markdown / rich_message must be given"
             )
         params: dict[str, Any] = {
             "chat_id": chat_id,
@@ -3251,6 +3298,8 @@ class BotAPI:
         }
         if rich_markdown is not None:
             params["rich_message"] = {"markdown": rich_markdown}
+        elif rich_message is not None:
+            params["rich_message"] = rich_message
         else:
             params["text"] = text
         if reply_markup:
@@ -3548,10 +3597,16 @@ async def run_bot(
     (a text edit of a rich original fails server-side); when a rich edit
     fails, the in-place edit is skipped and the content is re-sent as a
     fresh message through the same send chain (the answer toast has
-    already gone out). A missing or ``None`` action answers with
-    :data:`UNKNOWN_CALLBACK_TEXT` — the safety net for stale buttons —
-    and sends nothing. Callback handling failures are logged and survive
-    like message failures.
+    already gone out). A :class:`RichBlocksEdit` (the ``s:``/``u:``
+    toggle on a rich original) echoes the received block tree back through
+    the rich payload's ``blocks`` input (Bot API 10.2+); when that edit
+    fails, the in-place edit is skipped and the press degrades to the
+    toast only — no fresh send: the toggle's in-place update carries no
+    new content worth re-sending, the stale original stays in the chat,
+    and the worst case equals the pre-#106 behavior. A missing or
+    ``None`` action answers with :data:`UNKNOWN_CALLBACK_TEXT` — the
+    safety net for stale buttons — and sends nothing. Callback handling
+    failures are logged and survive like message failures.
 
     Transient :class:`BotAPIError` failures are logged and
     retried after ``error_delay``; they never stop the loop. After each
@@ -3671,6 +3726,32 @@ async def run_bot(
                                             action.edit.reply_markup,
                                         ),
                                         rich,
+                                    )
+                            elif isinstance(action.edit, RichBlocksEdit):
+                                # A rich original with a block tree: the
+                                # edit echoes the tree back (Bot API 10.2+
+                                # blocks input). A failure (404 on a 10.1
+                                # local server without the blocks input,
+                                # 400 rejection, message gone, transport)
+                                # skips the in-place edit — toast only, no
+                                # fresh message: the toggle's in-place
+                                # update carries no new content, the stale
+                                # original stays in the chat, and nothing
+                                # worse than the pre-#106 behavior happens.
+                                try:
+                                    await api.edit_message_text(
+                                        cb_chat["id"],
+                                        message_id,
+                                        rich_message={
+                                            "blocks": action.edit.blocks,
+                                            **({"is_rtl": True} if action.edit.is_rtl else {}),
+                                        },
+                                        reply_markup=action.edit.reply_markup,
+                                    )
+                                except BotAPIError as exc:
+                                    print(
+                                        f"yask: telegram rich blocks edit failed: {exc}",
+                                        file=sys.stderr,
                                     )
                             else:
                                 await api.edit_message_text(

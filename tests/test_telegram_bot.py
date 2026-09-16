@@ -5284,6 +5284,35 @@ def test_edit_message_text_rich_payload():
     assert "text" not in script.edited[0]
 
 
+def test_edit_message_text_rich_blocks_payload():
+    """The raw ``rich_message`` payload: a received block tree echoed
+    back verbatim (the toggle's blocks edit, Bot API 10.2+)."""
+    markup = {"inline_keyboard": [[{"text": "on", "callback_data": "u:1"}]]}
+    blocks = [
+        {"type": "heading", "level": 1, "text": "# 4 working — Story"},
+        {"type": "paragraph", "text": [{"type": "bold", "text": "State:"}, " In progress"]},
+    ]
+    script = Script([])
+
+    async def calls(api):
+        await api.edit_message_text(
+            7, 99, rich_message={"blocks": blocks}, reply_markup=markup
+        )
+
+    bot_api_call(script, calls)
+    assert script.edited == [
+        {
+            "chat_id": 7,
+            "message_id": 99,
+            "rich_message": {"blocks": blocks},
+            "reply_markup": markup,
+        }
+    ]
+    # a blocks edit sends no ``text`` key at all (a text edit of a rich
+    # message fails server-side)
+    assert "text" not in script.edited[0]
+
+
 def test_edit_message_text_requires_exactly_one_payload():
     script = Script([])
 
@@ -5292,6 +5321,12 @@ def test_edit_message_text_requires_exactly_one_payload():
             await api.edit_message_text(7, 99)
         with pytest.raises(ValueError):
             await api.edit_message_text(7, 99, "plain", rich_markdown="# Rich")
+        with pytest.raises(ValueError):
+            await api.edit_message_text(7, 99, "plain", rich_message={"blocks": []})
+        with pytest.raises(ValueError):
+            await api.edit_message_text(
+                7, 99, rich_markdown="# Rich", rich_message={"blocks": []}
+            )
 
     bot_api_call(script, calls)
     # the guard fires before any request is made
@@ -6092,15 +6127,16 @@ def test_callback_a_store_failure_replies_and_recovers(store, monkeypatch):
 # --- s:/u: payload (the /task view's subscribe toggle) ----------------------
 
 
-def _detail_callback(update_id, data, chat_id, detail):
+def _detail_callback(update_id, data, chat_id, detail, rich=None):
     """A callback_update whose original message is the /task detail Rich
     Message — the shape Telegram sends when a button on the detail
     message is pressed: the ``rich_message`` field (the received
     RichMessage is a parsed block tree, not markdown) and no ``text``
-    (empty on rich messages)."""
+    (empty on rich messages). ``rich`` overrides the (empty) block tree
+    the original carries — the toggle's tests echo it back."""
     update = callback_update(update_id, data, chat_id=chat_id)
     message = update["callback_query"]["message"]
-    message["rich_message"] = {"blocks": []}
+    message["rich_message"] = {"blocks": []} if rich is None else rich
     del message["text"]
     message["reply_markup"] = detail["reply_markup"]
     return update
@@ -6158,39 +6194,147 @@ def test_callback_dispatch_subscribe_toggle(store):
     assert rows[-1] == [{"text": "Main menu", "callback_data": "h"}]
 
 
-def test_callback_dispatch_toggle_on_rich_view_toasts_only(store):
-    """An s:/u: press on a Rich Message view is toast-only until #106.
-
-    The toggle's in-place re-render echoes the original message's text
-    with a flipped keyboard; a rich message carries no ``text`` (its
-    content is a parsed block tree, Bot API 10.1), so the press bails to
-    the toast and the pressed button stays stale — the store change
-    still applies.
-    """
+def test_callback_dispatch_subscribe_toggle_rich_view(store):
+    """An s: press on a *rich* original flips the toggle in place: the
+    original's block tree is echoed back through the rich
+    editMessageText payload (Bot API 10.2+ ``blocks`` input) with the
+    flipped keyboard — the message text is unchanged, nothing stacked."""
     d = seed_task_view(store)
     pid, t = d["pid"], d["t"]
     chat_id = 27
+    # the real /task detail (Rich Message + keyboard) as the original message
     first = run_bot_until_stop(
         Script([[message_update(310, f"/task yask {t['number']}", chat_id=chat_id)]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
     detail = first.sent_rich[0]
-    # a rich-shaped original: rich_message field, no text
-    update = _detail_callback(311, f"s:{pid}", chat_id, detail)
+    # a small realistic received block tree: one heading with a plain
+    # string text, one paragraph with an entity-array text
+    tree = [
+        {"type": "heading", "level": 1, "text": "# 4 working — Story"},
+        {"type": "paragraph", "text": [{"type": "bold", "text": "State:"}, " In progress"]},
+    ]
+    update = _detail_callback(311, f"s:{pid}", chat_id, detail, rich={"blocks": tree})
     script = run_bot_until_stop(
         Script([[update]]),
         dispatch=telegram_bot.make_dispatch(store),
         callback_dispatch=telegram_bot.make_callback_dispatch(store),
     )
-    # the store row is created, the press is toasted, nothing is edited
-    # or sent — the rich view stays stale until #106
+    # the store row is created and the press is toasted
     assert [s["project_id"] for s in store.list_subscriptions(chat_id)] == [pid]
     assert script.answered == [
         {"callback_query_id": "cbq-311", "text": "Subscribed to yask"}
     ]
-    assert script.edited == []
+    # exactly one in-place edit: the rich payload echoes the original's
+    # block tree byte-for-byte (no ``text`` key — a text edit of a rich
+    # message fails server-side), the attachment rows are preserved, the
+    # toggle row flips to Unsubscribe, the Main-menu row stays last
+    assert len(script.edited) == 1
+    e = script.edited[0]
+    assert e["chat_id"] == chat_id
+    assert e["message_id"] == 1
+    assert "text" not in e
+    assert e["rich_message"] == {"blocks": tree}
+    rows = e["reply_markup"]["inline_keyboard"]
+    assert rows[:2] == detail["reply_markup"]["inline_keyboard"][:2]
+    assert rows[-2] == [{"text": "Unsubscribe", "callback_data": f"u:{pid}"}]
+    assert rows[-1] == [{"text": "Main menu", "callback_data": "h"}]
+    # nothing is stacked on top of the rich view
     assert script.sent == []
     assert script.sent_rich == []
+
+
+def test_callback_dispatch_unsubscribe_toggle_rich_view(store):
+    """A u: press on a *rich* original flips the toggle back in place:
+    the store row is removed, the block tree is echoed, the button flips
+    to Subscribe."""
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    chat_id = 28
+    store.subscribe_project(chat_id, pid)
+    first = run_bot_until_stop(
+        Script([[message_update(312, f"/task yask {t['number']}", chat_id=chat_id)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    detail = first.sent_rich[0]
+    # the subscribed detail shows Unsubscribe before the Main-menu row
+    assert detail["reply_markup"]["inline_keyboard"][-2] == [
+        {"text": "Unsubscribe", "callback_data": f"u:{pid}"}
+    ]
+    tree = [{"type": "paragraph", "text": "The task at hand."}]
+    update = _detail_callback(313, f"u:{pid}", chat_id, detail, rich={"blocks": tree})
+    script = run_bot_until_stop(
+        Script([[update]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the store row is removed and the press is toasted
+    assert [s["project_id"] for s in store.list_subscriptions(chat_id)] == []
+    assert script.answered == [
+        {"callback_query_id": "cbq-313", "text": "Unsubscribed from yask"}
+    ]
+    assert len(script.edited) == 1
+    e = script.edited[0]
+    assert e["chat_id"] == chat_id
+    assert e["message_id"] == 1
+    assert "text" not in e
+    assert e["rich_message"] == {"blocks": tree}
+    rows = e["reply_markup"]["inline_keyboard"]
+    assert rows[:2] == detail["reply_markup"]["inline_keyboard"][:2]
+    assert rows[-2] == [{"text": "Subscribe", "callback_data": f"s:{pid}"}]
+    assert rows[-1] == [{"text": "Main menu", "callback_data": "h"}]
+    assert script.sent == []
+    assert script.sent_rich == []
+
+
+def test_callback_dispatch_toggle_rich_edit_failure_toasts_only(store):
+    """A 404 on the blocks edit (a 10.1 local server without the blocks
+    input; a 400 rejection takes the identical path) skips the in-place
+    edit: toast only — the store change still applies, no fresh send (the
+    stale original stays in the chat, the worst case equals the pre-#106
+    behavior), and the loop survives."""
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    chat_id = 29
+    first = run_bot_until_stop(
+        Script([[message_update(314, f"/task yask {t['number']}", chat_id=chat_id)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    detail = first.sent_rich[0]
+    tree = [
+        {"type": "heading", "level": 1, "text": "# 4 working — Story"},
+        {"type": "paragraph", "text": [{"type": "bold", "text": "State:"}, " In progress"]},
+    ]
+    update = _detail_callback(315, f"s:{pid}", chat_id, detail, rich={"blocks": tree})
+    script = run_bot_until_stop(
+        Script(
+            [[update, message_update(316, "/start")]],
+            fail_edit_once=(404, "Not Found"),
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the store change applies and the press is toasted (the toast is
+    # unaffected by the blocks-edit failure)
+    assert [s["project_id"] for s in store.list_subscriptions(chat_id)] == [pid]
+    assert script.answered == [
+        {"callback_query_id": "cbq-315", "text": "Subscribed to yask"}
+    ]
+    # the blocks edit was attempted with the echo payload ...
+    assert len(script.edited) == 1
+    e = script.edited[0]
+    assert e["chat_id"] == chat_id
+    assert e["message_id"] == 1
+    assert "text" not in e
+    assert e["rich_message"] == {"blocks": tree}
+    # ... failed, and no fresh message was sent (toast-only degradation):
+    # the only plain send is the /start reply (to its own chat), proving
+    # the loop survived
+    assert script.sent_rich == []
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 7
+    assert script.sent[0]["text"] == telegram_bot.START_TEXT
+    assert script.offsets == [None, 317]
 
 
 def test_callback_dispatch_unsubscribe_toggle(store):
