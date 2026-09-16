@@ -16,7 +16,8 @@ commands are ``/start``, ``/help``, ``/login`` and ``/whoami`` (the chat's
 own id — the identifier the administrator enters in the web UI). Today the
 authenticated bot answers
 ``/projects`` (the project list with per-state task
-counts, with one inline button per project), ``/tasks`` (the tasks in the
+counts, with one inline button per project — the list is sent as a rich
+message), ``/tasks`` (the tasks in the
 active states — Todo, Planning, In progress and Review — grouped by
 project and state, with one inline button per task),
 ``/task <project> <number|title>`` (one task's details — state, estimate,
@@ -540,7 +541,7 @@ def reply_for(text: Optional[str]) -> Optional[Reply]:
     return COMMANDS.get(cmd, UNKNOWN_HINT)
 
 
-def project_view(store: Store) -> Reply:
+def project_view(store: Store, chat_id: Optional[int] = None) -> Reply:
     """Format the ``/projects`` reply.
 
     One line per project in name order, prefixed with the project's DB id
@@ -548,33 +549,56 @@ def project_view(store: Store) -> Reply:
     of the states that have tasks, in canonical state order. A project with
     no visible tasks is listed without a state segment.
 
-    A non-empty board is a :class:`KeyboardReply`: the same projects, in
-    reading order, become one inline-keyboard row each with a single
-    button — label = the project name, ``callback_data`` =
+    A non-empty board carries one inline-keyboard row per project — a
+    single button, label = the project name, ``callback_data`` =
     ``p:<project-id>`` (the project drill-down button, answered by
     :func:`make_callback_dispatch`) — and a final row carrying the
-    Main-menu button (:func:`_main_menu_button`, payload ``h``). An empty
-    board is just ``Projects:``
-    and ``(none)`` as a plain ``str`` — the Bot API rejects an empty
-    inline keyboard, and there are no tap targets anyway.
+    Main-menu button (:func:`_main_menu_button`, payload ``h``); the
+    keyboard is the same in both reply forms.
+
+    With a ``chat_id`` the reply is a :class:`RichReply`: the board as
+    markdown (blocks joined by one blank line — an H1 ``# Projects``
+    header, then one block per project with ``**<id>. <name>**`` as the
+    block's first line and one ``- <state>: <count>`` line per non-zero
+    state in canonical order; a project with no visible tasks is just its
+    bold line), sent through the rich → HTML → plain fallback chain with
+    the keyboard threaded. Without one the reply is the plain
+    :class:`KeyboardReply` — the ``Projects:`` header plus one
+    ``<id>. <name> — <state>: <count>, ...`` line per project — with the
+    keyboard kept: the per-project buttons are the point of the view, so
+    a press on an inaccessible message (no chat on the original) must not
+    lose the tap targets (the deliberate divergence from
+    :func:`format_task_view`, which drops its keyboard). An empty board is
+    just ``Projects:`` and ``(none)`` as a plain ``str`` in either form —
+    the Bot API rejects an empty inline keyboard, and there are no tap
+    targets anyway.
     """
     overviews = store.list_project_overviews()
     if not overviews:
         return "Projects:\n(none)"
+    blocks = ["# Projects"]
     lines = ["Projects:"]
     rows = []
     for ov in overviews:
+        block = f"**{ov['id']}. {ov['name']}**"
         line = f"{ov['id']}. {ov['name']}"
         if ov["states"]:
+            block += "\n" + "\n".join(
+                f"- {state}: {n}" for state, n in ov["states"].items()
+            )
             line += " — " + ", ".join(
                 f"{state}: {n}" for state, n in ov["states"].items()
             )
+        blocks.append(block)
         lines.append(line)
         rows.append(
             [{"text": ov["name"], "callback_data": f"p:{ov['id']}"}]
         )
     rows.append([_main_menu_button()])
-    return KeyboardReply("\n".join(lines), {"inline_keyboard": rows})
+    keyboard = {"inline_keyboard": rows}
+    if chat_id is None:
+        return KeyboardReply("\n".join(lines), keyboard)
+    return RichReply("\n\n".join(blocks), keyboard)
 
 
 def _arg_words(text: Optional[str]) -> Optional[list[str]]:
@@ -2091,7 +2115,7 @@ def _handle_projects(
     store: Store, text: Optional[str], chat_id: Optional[int]
 ) -> Reply:
     """``/projects``: the project list view (arguments ignored)."""
-    return project_view(store)
+    return project_view(store, chat_id)
 
 
 def _handle_tasks(
@@ -2911,8 +2935,12 @@ def make_callback_dispatch(
         if route not in ("p", "t", "s", "a", "h"):
             return None  # unknown route → run_bot's out-of-date toast
         if route == "p":
+            # The list is rich for the pressing chat; an inaccessible
+            # message (no chat) keeps the plain KeyboardReply form with
+            # its per-project keyboard (the tap targets must survive).
+            chat_id = _callback_chat_id(callback_query)
             try:
-                return CallbackAction(reply=project_view(store))
+                return CallbackAction(reply=project_view(store, chat_id))
             except Exception:
                 return CallbackAction(reply=PROJECTS_ERROR_TEXT)
         if route == "t":

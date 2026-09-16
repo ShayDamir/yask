@@ -106,7 +106,8 @@ yask telegram --data DIR    # or: YASK_DATA=DIR yask telegram
 
 Runs the bot as a separate process: long-polls the Bot API with the token
 from `TELEGRAM_BOT_TOKEN` (get one from @BotFather) and answers `/start`,
-`/help`, `/projects` (the list of projects with their per-state task counts),
+`/help`, `/projects` (the list of projects with their per-state task
+counts, sent as a rich message),
 `/tasks [project]` (the tasks in the active states — Todo, Planning,
 In progress and Review — grouped by project and state), `/task
 <project> <number|title>` (one task's details — state, estimate,
@@ -131,10 +132,10 @@ remaining words name the type) and `/attach <project>
 the bot captioned `/attach <project> <number|title>` — the bot downloads
 the file and attaches it; allowed types are markdown/plain text and
 png/jpeg/gif/webp/svg images, 10 MB max). The rich surfaces (the
-`/task` detail view and small markdown attachments) degrade to HTML,
-then plain text, if the rich send fails (or the Bot API server has no
-`sendRichMessage`); set `YASK_TELEGRAM_RICH=0` to send plain text only
-— rich is on by default. A chat can
+`/projects` list view, the `/task` detail view and small markdown
+attachments) degrade to HTML, then plain text, if the rich send fails (or
+the Bot API server has no `sendRichMessage`); set
+`YASK_TELEGRAM_RICH=0` to send plain text only — rich is on by default. A chat can
 `/subscribe [project]` to receive
 notifications about
 every task state change in that project, and `/unsubscribe [project]` to
