@@ -185,6 +185,25 @@ def _in_clause(seq) -> tuple[str, list]:
     return (",".join("?" * len(seq)) if seq else "NULL"), seq
 
 
+def _validate_estimate(estimate: float | None, is_epic: bool) -> None:
+    """Shared estimate guards for create/update.
+
+    ``None`` means "not provided" and always passes. Otherwise the estimate
+    must be a finite, non-negative number — and an epic may not have one at
+    all (its estimate is the sum of contained tasks).
+    """
+    if estimate is None:
+        return
+    if not math.isfinite(estimate):
+        raise ValidationError("estimate must be a finite number")
+    if estimate < 0:
+        raise ValidationError("estimate must not be negative")
+    if is_epic:
+        raise ValidationError(
+            "epics are not estimated; their estimate is the sum of contained tasks"
+        )
+
+
 class Store:
     def __init__(self, conn: sqlite3.Connection, source: str = "web"):
         if source not in ("web", "mcp", "telegram"):
@@ -536,15 +555,7 @@ class Store:
         ttype = self._type_by_name(type)
         if ttype is None:
             raise ValidationError(f"unknown task type '{type}'")
-        if estimate is not None:
-            if not math.isfinite(estimate):
-                raise ValidationError("estimate must be a finite number")
-            if estimate < 0:
-                raise ValidationError("estimate must not be negative")
-        if ttype["is_epic"] and estimate is not None:
-            raise ValidationError(
-                "epics are not estimated; their estimate is the sum of contained tasks"
-            )
+        _validate_estimate(estimate, ttype["is_epic"])
 
         parent_id = None
         if parent_number is not None:
@@ -880,13 +891,7 @@ class Store:
             if new_type is None:
                 raise ValidationError(f"unknown task type '{type}'")
             ttype = new_type
-        if estimate is not None:
-            if not math.isfinite(estimate):
-                raise ValidationError("estimate must be a finite number")
-            if estimate < 0:
-                raise ValidationError("estimate must not be negative")
-        if ttype["is_epic"] and estimate is not None:
-            raise ValidationError("epics are not estimated")
+        _validate_estimate(estimate, ttype["is_epic"])
 
         new_parent_id = row["parent_id"]
         if parent_number is not _UNSET:

@@ -49,6 +49,14 @@ def test_cannot_estimate_an_epic(store, project):
         store.create_task(pid, "e", type="Epic", estimate=5)
 
 
+def test_cannot_estimate_an_epic_on_update(store, project):
+    pid = project["id"]
+    e = store.create_task(pid, "e", type="Epic")
+    with pytest.raises(ValidationError):
+        store.update_task(pid, e["number"], estimate=5)
+    assert store.get_task(pid, e["number"])["estimate"] is None
+
+
 def test_epic_tree_has_no_cycles(store, project):
     pid = project["id"]
     e = store.create_task(pid, "e", type="Epic")
