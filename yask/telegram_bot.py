@@ -19,13 +19,15 @@ authenticated bot answers
 counts, with one inline button per project — the list is sent as a rich
 message), ``/tasks`` (the tasks in the
 active states — Todo, Planning, In progress and Review — grouped by
-project and state, with one inline button per task),
+project and state, with one inline button per task — the list is sent as
+a rich message),
 ``/task <project> <number|title>`` (one task's details — state, estimate,
 description, prerequisites, attachments and recent history — the task
 found by number or by case-insensitive title; the detail view is sent
 as a rich message),
 ``/backlog [project]`` (the tasks in the Backlog state, grouped by
-project, with one inline button per task), ``/attachment
+project, with one inline button per task — the list is sent as a rich
+message), ``/attachment
 <project> <task> <id>`` (shows one of the task's attachments — small
 markdown (<16 KB) inline as a Rich Message, small plain text inline as a
 plain message, images as a photo, larger content as a file, via
@@ -690,7 +692,11 @@ def _task_sections(tasks: list[dict]) -> list[tuple[str, list[dict]]]:
     return sections
 
 
-def tasks_view(store: Store, project_arg: Optional[str] = None) -> Reply:
+def tasks_view(
+    store: Store,
+    project_arg: Optional[str] = None,
+    chat_id: Optional[int] = None,
+) -> Reply:
     """Format the ``/tasks [project]`` reply.
 
     Without an argument, lists every project (in name order, the same order
@@ -701,15 +707,33 @@ def tasks_view(store: Store, project_arg: Optional[str] = None) -> Reply:
     header; an unresolvable argument yields a not-found reply pointing at
     ``/projects``.
 
-    When at least one task is listed the reply is a
-    :class:`KeyboardReply`: the task lines read ``#<n> <title>`` and the
-    same tasks, in reading order, become one inline-keyboard row each with
-    label ``#<n> <title>`` and ``callback_data``
-    ``t:<project-id>:<number>`` (the task-detail button, answered by
+    When at least one task is listed the reply carries one inline-keyboard
+    row per task, in reading order (label ``#<n> <title>``, ``callback_data``
+    ``t:<project-id>:<number>`` — the task-detail button, answered by
     :func:`make_callback_dispatch`), followed by a final row carrying the
-    Main-menu button (:func:`_main_menu_button`, payload ``h``). A reply
-    with no tasks is a plain ``str`` — the Bot API rejects an empty inline
-    keyboard, and there are no tap targets anyway.
+    Main-menu button (:func:`_main_menu_button`, payload ``h``); the
+    keyboard is the same in both reply forms. With a ``chat_id`` the reply
+    is a :class:`RichReply`: the board as markdown (blocks joined by one
+    blank line — an H1 ``# Tasks in progress`` header, then one block per
+    project with ``**<id>. <name>**`` as the block's first line and, per
+    non-empty state in canonical order, a ``**<state>:**`` line immediately
+    followed by one ``- #<n> <title>`` item per task), sent through the
+    rich → HTML → plain fallback chain with the keyboard threaded. Without
+    one the reply is the plain :class:`KeyboardReply` — the
+    ``Tasks in progress:`` header, one ``<id>. <name>`` line per project
+    and indented ``<state>:`` / ``#<n> <title>`` lines — with the keyboard
+    kept: the per-task buttons are the point of the view, so a press on an
+    inaccessible message (no chat on the original) must not lose the tap
+    targets (the deliberate divergence from :func:`format_task_view`, which
+    drops its keyboard). A reply with no tasks is a plain ``str`` in either
+    form — the Bot API rejects an empty inline keyboard, and there are no
+    tap targets anyway.
+
+    No new truncation cap is added: the task list is unbounded, and a
+    pathological board whose markdown exceeds :data:`RICH_MESSAGE_MAX` 400s
+    the rich leg and degrades through the shared fallback chain, whose
+    HTML/plain legs re-truncate at send time (the same documented
+    philosophy as :func:`format_task_view`).
     """
     if project_arg is None:
         projects = []
@@ -730,13 +754,17 @@ def tasks_view(store: Store, project_arg: Optional[str] = None) -> Reply:
             return "Tasks in progress:\n(none)"
         projects = [(project, tasks)]
 
+    blocks = ["# Tasks in progress"]
     lines = ["Tasks in progress:"]
     rows = []
     for p, tasks in projects:
+        block = f"**{p['id']}. {p['name']}**"
         lines.append(f"{p['id']}. {p['name']}")
         for state, in_state in _task_sections(tasks):
+            block += f"\n**{state}:**"
             lines.append(f"  {state}:")
             for t in in_state:
+                block += f"\n- #{t['number']} {t['title']}"
                 lines.append(f"    #{t['number']} {t['title']}")
                 rows.append(
                     [
@@ -746,11 +774,19 @@ def tasks_view(store: Store, project_arg: Optional[str] = None) -> Reply:
                         }
                     ]
                 )
+        blocks.append(block)
     rows.append([_main_menu_button()])
-    return KeyboardReply("\n".join(lines), {"inline_keyboard": rows})
+    keyboard = {"inline_keyboard": rows}
+    if chat_id is None:
+        return KeyboardReply("\n".join(lines), keyboard)
+    return RichReply("\n\n".join(blocks), keyboard)
 
 
-def backlog_view(store: Store, project_arg: Optional[str] = None) -> Reply:
+def backlog_view(
+    store: Store,
+    project_arg: Optional[str] = None,
+    chat_id: Optional[int] = None,
+) -> Reply:
     """Format the ``/backlog [project]`` reply.
 
     Without an argument, lists every project (in name order, the same order
@@ -760,15 +796,31 @@ def backlog_view(store: Store, project_arg: Optional[str] = None) -> Reply:
     with no Backlog tasks — shows ``(none)`` under the header; an
     unresolvable argument yields a not-found reply pointing at ``/projects``.
 
-    When at least one task is listed the reply is a
-    :class:`KeyboardReply`: the task lines read ``#<n> <title>`` and the
-    same tasks, in reading order, become one inline-keyboard row each with
-    label ``#<n> <title>`` and ``callback_data``
-    ``t:<project-id>:<number>`` (the task-detail button, answered by
+    When at least one task is listed the reply carries one inline-keyboard
+    row per task, in reading order (label ``#<n> <title>``, ``callback_data``
+    ``t:<project-id>:<number>`` — the task-detail button, answered by
     :func:`make_callback_dispatch`), followed by a final row carrying the
-    Main-menu button (:func:`_main_menu_button`, payload ``h``). A reply
-    with no tasks is a plain ``str`` — the Bot API rejects an empty inline
-    keyboard, and there are no tap targets anyway.
+    Main-menu button (:func:`_main_menu_button`, payload ``h``); the
+    keyboard is the same in both reply forms. With a ``chat_id`` the reply
+    is a :class:`RichReply`: the board as markdown (blocks joined by one
+    blank line — an H1 ``# Backlog`` header, then one block per project
+    with ``**<id>. <name>**`` as the block's first line and one
+    ``- #<n> <title>`` item per task), sent through the rich → HTML → plain
+    fallback chain with the keyboard threaded. Without one the reply is the
+    plain :class:`KeyboardReply` — the ``Backlog:`` header, one
+    ``<id>. <name>`` line per project and indented ``#<n> <title>`` lines —
+    with the keyboard kept: the per-task buttons are the point of the view,
+    so a press on an inaccessible message (no chat on the original) must not
+    lose the tap targets (the deliberate divergence from
+    :func:`format_task_view`, which drops its keyboard). A reply with no
+    tasks is a plain ``str`` in either form — the Bot API rejects an empty
+    inline keyboard, and there are no tap targets anyway.
+
+    No new truncation cap is added: the task list is unbounded, and a
+    pathological board whose markdown exceeds :data:`RICH_MESSAGE_MAX` 400s
+    the rich leg and degrades through the shared fallback chain, whose
+    HTML/plain legs re-truncate at send time (the same documented
+    philosophy as :func:`format_task_view`).
     """
     if project_arg is None:
         projects = []
@@ -789,11 +841,14 @@ def backlog_view(store: Store, project_arg: Optional[str] = None) -> Reply:
             return "Backlog:\n(none)"
         projects = [(project, tasks)]
 
+    blocks = ["# Backlog"]
     lines = ["Backlog:"]
     rows = []
     for p, tasks in projects:
+        block = f"**{p['id']}. {p['name']}**"
         lines.append(f"{p['id']}. {p['name']}")
         for t in tasks:
+            block += f"\n- #{t['number']} {t['title']}"
             lines.append(f"    #{t['number']} {t['title']}")
             rows.append(
                 [
@@ -803,8 +858,12 @@ def backlog_view(store: Store, project_arg: Optional[str] = None) -> Reply:
                     }
                 ]
             )
+        blocks.append(block)
     rows.append([_main_menu_button()])
-    return KeyboardReply("\n".join(lines), {"inline_keyboard": rows})
+    keyboard = {"inline_keyboard": rows}
+    if chat_id is None:
+        return KeyboardReply("\n".join(lines), keyboard)
+    return RichReply("\n\n".join(blocks), keyboard)
 
 
 def menu_view() -> KeyboardReply:
@@ -2145,14 +2204,14 @@ def _handle_tasks(
     store: Store, text: Optional[str], chat_id: Optional[int]
 ) -> Reply:
     """``/tasks``: the tasks view for the (optional) project argument."""
-    return tasks_view(store, _tasks_arg(text))
+    return tasks_view(store, _tasks_arg(text), chat_id)
 
 
 def _handle_backlog(
     store: Store, text: Optional[str], chat_id: Optional[int]
 ) -> Reply:
     """``/backlog``: the Backlog view for the (optional) project argument."""
-    return backlog_view(store, _tasks_arg(text))
+    return backlog_view(store, _tasks_arg(text), chat_id)
 
 
 def _handle_task(
@@ -2728,9 +2787,13 @@ def make_callback_dispatch(
         if not isinstance(resolved, dict):
             return resolved
         # The same view typing "/tasks <id>" would send (including its
-        # own t: keyboard when the project has active tasks).
+        # own t: keyboard when the project has active tasks): rich for the
+        # pressing chat; an inaccessible message (no chat) keeps the plain
+        # KeyboardReply form with its per-task keyboard (the tap targets
+        # must survive).
+        chat_id = _callback_chat_id(callback_query)
         try:
-            view = tasks_view(store, str(project_id))
+            view = tasks_view(store, str(project_id), chat_id)
         except Exception:
             return CallbackAction(reply=TASKS_ERROR_TEXT)
         return CallbackAction(reply=view)
@@ -2985,8 +3048,12 @@ def make_callback_dispatch(
             except Exception:
                 return CallbackAction(reply=PROJECTS_ERROR_TEXT)
         if route == "t":
+            # The list is rich for the pressing chat; an inaccessible
+            # message (no chat) keeps the plain KeyboardReply form with
+            # its per-task keyboard (the tap targets must survive).
+            chat_id = _callback_chat_id(callback_query)
             try:
-                return CallbackAction(reply=tasks_view(store))
+                return CallbackAction(reply=tasks_view(store, chat_id=chat_id))
             except Exception:
                 return CallbackAction(reply=TASKS_ERROR_TEXT)
         if route == "s":

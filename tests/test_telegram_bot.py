@@ -1061,13 +1061,15 @@ def test_projects_button_opens_tasks_view(store):
     )
     # the press is answered (no toast) and the project's /tasks view goes
     # out as a new message to the button's chat — the exact same view
-    # typing "/tasks <id>" would send (text lines plus the t: keyboard)
+    # typing "/tasks <id>" would send (rich markdown plus the t: keyboard)
     assert script.answered == [{"callback_query_id": "cbq-94"}]
-    assert len(script.sent) == 1
-    expected = telegram_bot.tasks_view(store, str(pid))
-    assert script.sent[0]["chat_id"] == 11
-    assert script.sent[0]["text"] == expected.text
-    assert script.sent[0]["reply_markup"] == expected.reply_markup
+    assert len(script.sent_rich) == 1
+    assert script.sent == []
+    expected = telegram_bot.tasks_view(store, str(pid), 11)
+    assert isinstance(expected, telegram_bot.RichReply)
+    assert script.sent_rich[0]["chat_id"] == 11
+    assert script.sent_rich[0]["rich_message"]["markdown"] == expected.markdown
+    assert script.sent_rich[0]["reply_markup"] == expected.reply_markup
     assert script.edited == []
 
 
@@ -1276,7 +1278,8 @@ def test_menu_button_projects_inaccessible_message_keeps_keyboard(store):
 
 
 def test_menu_button_tasks_opens_tasks_view(store):
-    """h:t opens the same all-projects view /tasks sends."""
+    """h:t opens the same all-projects view /tasks sends — rich for the
+    pressing chat (the callback's chat id)."""
     pid = store.create_project("yask")["id"]
     t = store.create_task(pid, "working")
     store.move_task(pid, t["number"], "In progress", confirm=True)
@@ -1286,12 +1289,65 @@ def test_menu_button_tasks_opens_tasks_view(store):
         callback_dispatch=telegram_bot.make_callback_dispatch(store),
     )
     assert script.answered == [{"callback_query_id": "cbq-402"}]
-    assert len(script.sent) == 1
-    expected = telegram_bot.tasks_view(store)
-    assert script.sent[0]["chat_id"] == 11
-    assert script.sent[0]["text"] == expected.text
-    assert script.sent[0]["reply_markup"] == expected.reply_markup
+    assert len(script.sent_rich) == 1
+    assert script.sent == []
+    expected = telegram_bot.tasks_view(store, chat_id=11)
+    assert isinstance(expected, telegram_bot.RichReply)
+    assert script.sent_rich[0]["chat_id"] == 11
+    assert script.sent_rich[0]["rich_message"]["markdown"] == expected.markdown
+    assert script.sent_rich[0]["reply_markup"] == expected.reply_markup
     assert script.edited == []
+
+
+def test_menu_button_tasks_inaccessible_message_keeps_keyboard(store):
+    """h:t and p: presses on an inaccessible original message (no message
+    key → no chat) answer the plain KeyboardReply form *with* the per-task
+    keyboard — the tap targets must survive the missing chat (the
+    deliberate divergence from format_task_view's keyboard-less plain
+    form)."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "working")
+    store.move_task(pid, t["number"], "In progress", confirm=True)
+    dispatch = telegram_bot.make_callback_dispatch(store)
+
+    # the menu's Tasks route (h:t): the all-projects view
+    update = callback_update(416, "h:t", chat_id=11)
+    del update["callback_query"]["message"]
+    action = dispatch(update["callback_query"])
+    assert action is not None
+    assert action.answer_text is None
+    assert action.edit is None
+    reply = action.reply
+    assert isinstance(reply, telegram_bot.KeyboardReply)
+    assert reply == telegram_bot.tasks_view(store)
+    assert reply.text == (
+        f"Tasks in progress:\n"
+        f"{pid}. yask\n"
+        "  In progress:\n"
+        f"    #{t['number']} working"
+    )
+    assert reply.reply_markup == {
+        "inline_keyboard": [
+            [
+                {
+                    "text": f"#{t['number']} working",
+                    "callback_data": f"t:{pid}:{t['number']}",
+                }
+            ],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
+
+    # the /projects drill-down (p:<pid>): the same view resolved by id
+    update = callback_update(417, f"p:{pid}", chat_id=11)
+    del update["callback_query"]["message"]
+    action = dispatch(update["callback_query"])
+    assert action is not None
+    assert action.answer_text is None
+    assert action.edit is None
+    reply = action.reply
+    assert isinstance(reply, telegram_bot.KeyboardReply)
+    assert reply == telegram_bot.tasks_view(store, str(pid))
 
 
 def test_menu_button_subscriptions(store):
@@ -1464,27 +1520,32 @@ def test_tasks_populated_board_exact(store):
         Script([[message_update(101, "/tasks")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert len(script.sent) == 1
-    # exact text: name order, state grouping/order, id prefixes, and the
-    # excluded states absent
-    assert script.sent[0]["text"] == (
-        "Tasks in progress:\n"
-        f"{alpha}. alpha\n"
-        "  Todo:\n"
-        f"    #2 todo 1\n"
-        "  Planning:\n"
-        f"    #3 planning 1\n"
-        "  In progress:\n"
-        f"    #4 working\n"
-        "  Review:\n"
-        f"    #5 review 1\n"
-        f"{zeta}. zeta\n"
-        "  In progress:\n"
-        f"    #1 z working"
+    # the list is a rich surface: sendRichMessage with the keyboard, no
+    # plain sendMessage leg
+    assert len(script.sent_rich) == 1
+    assert script.sent == []
+    sent = script.sent_rich[0]
+    assert sent["chat_id"] == 7
+    # exact markdown: name order, state grouping/order, id prefixes, and
+    # the excluded states absent
+    assert sent["rich_message"]["markdown"] == (
+        "# Tasks in progress\n"
+        f"\n**{alpha}. alpha**\n"
+        "**Todo:**\n"
+        "- #2 todo 1\n"
+        "**Planning:**\n"
+        "- #3 planning 1\n"
+        "**In progress:**\n"
+        "- #4 working\n"
+        "**Review:**\n"
+        "- #5 review 1\n"
+        f"\n**{zeta}. zeta**\n"
+        "**In progress:**\n"
+        "- #1 z working"
     )
     # one button per task, in reading order (the t: callback payloads),
     # then the Main-menu row (payload h)
-    assert script.sent[0]["reply_markup"] == {
+    assert sent["reply_markup"] == {
         "inline_keyboard": [
             [{"text": "#2 todo 1", "callback_data": f"t:{alpha}:2"}],
             [{"text": "#3 planning 1", "callback_data": f"t:{alpha}:3"}],
@@ -1494,6 +1555,9 @@ def test_tasks_populated_board_exact(store):
             [{"text": "Main menu", "callback_data": "h"}],
         ]
     }
+    # every payload is well under the Bot API's 64-byte callback_data limit
+    for row in sent["reply_markup"]["inline_keyboard"]:
+        assert len(row[0]["callback_data"].encode("utf-8")) < 64
 
 
 def test_tasks_filter_by_id_and_name(store):
@@ -1504,18 +1568,20 @@ def test_tasks_filter_by_id_and_name(store):
     t = store.create_task(zeta, "zeta working")
     store.move_task(zeta, t["number"], "In progress", confirm=True)
 
-    # by project name, case-insensitive
+    # by project name, case-insensitive — the list is a rich surface
     script = run_bot_until_stop(
         Script([[message_update(111, "/tasks ALPHA")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert script.sent[0]["text"] == (
-        "Tasks in progress:\n"
-        f"{alpha}. alpha\n"
-        "  In progress:\n"
-        f"    #1 alpha working"
+    assert len(script.sent_rich) == 1
+    assert script.sent == []
+    assert script.sent_rich[0]["rich_message"]["markdown"] == (
+        "# Tasks in progress\n"
+        f"\n**{alpha}. alpha**\n"
+        "**In progress:**\n"
+        "- #1 alpha working"
     )
-    assert script.sent[0]["reply_markup"] == {
+    assert script.sent_rich[0]["reply_markup"] == {
         "inline_keyboard": [
             [{"text": "#1 alpha working", "callback_data": f"t:{alpha}:1"}],
             [{"text": "Main menu", "callback_data": "h"}],
@@ -1527,13 +1593,15 @@ def test_tasks_filter_by_id_and_name(store):
         Script([[message_update(112, f"/tasks {zeta}")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert script.sent[0]["text"] == (
-        "Tasks in progress:\n"
-        f"{zeta}. zeta\n"
-        "  In progress:\n"
-        f"    #1 zeta working"
+    assert len(script.sent_rich) == 1
+    assert script.sent == []
+    assert script.sent_rich[0]["rich_message"]["markdown"] == (
+        "# Tasks in progress\n"
+        f"\n**{zeta}. zeta**\n"
+        "**In progress:**\n"
+        "- #1 zeta working"
     )
-    assert script.sent[0]["reply_markup"] == {
+    assert script.sent_rich[0]["reply_markup"] == {
         "inline_keyboard": [
             [{"text": "#1 zeta working", "callback_data": f"t:{zeta}:1"}],
             [{"text": "Main menu", "callback_data": "h"}],
@@ -1549,13 +1617,15 @@ def test_tasks_filter_name_with_spaces(store):
         Script([[message_update(171, "/tasks my big project")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert script.sent[0]["text"] == (
-        "Tasks in progress:\n"
-        f"{pid}. my big project\n"
-        "  In progress:\n"
-        f"    #1 working"
+    assert len(script.sent_rich) == 1
+    assert script.sent == []
+    assert script.sent_rich[0]["rich_message"]["markdown"] == (
+        "# Tasks in progress\n"
+        f"\n**{pid}. my big project**\n"
+        "**In progress:**\n"
+        "- #1 working"
     )
-    assert script.sent[0]["reply_markup"] == {
+    assert script.sent_rich[0]["reply_markup"] == {
         "inline_keyboard": [
             [{"text": "#1 working", "callback_data": f"t:{pid}:1"}],
             [{"text": "Main menu", "callback_data": "h"}],
@@ -1642,6 +1712,104 @@ def test_tasks_store_failure_replies_and_recovers(store, monkeypatch):
     assert script.sent[1]["text"] == telegram_bot.START_TEXT
 
 
+def test_tasks_rich_fallback_to_html(store):
+    """A failing rich leg degrades through the shared funnel: the HTML leg
+    carries the markdown re-truncated to the regular budget, converted,
+    with the per-task keyboard threaded — no double-send."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "working")
+    store.move_task(pid, 1, "In progress", confirm=True)
+    script = run_bot_until_stop(
+        Script(
+            [[message_update(165, "/tasks")]],
+            fail_rich_once=(400, "can't parse rich markdown"),
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    # the rich leg fired (and failed) exactly once, full payload
+    assert len(script.sent_rich) == 1
+    expected = telegram_bot.tasks_view(store, chat_id=7)
+    assert isinstance(expected, telegram_bot.RichReply)
+    assert script.sent_rich[0]["rich_message"]["markdown"] == expected.markdown
+    # the HTML leg replaced it — the markdown re-truncated to the regular
+    # budget, converted, keyboard threaded
+    assert len(script.sent) == 1
+    body = script.sent[0]
+    assert body["chat_id"] == 7
+    assert body["parse_mode"] == "HTML"
+    truncated = telegram_bot._truncate_inline(
+        expected.markdown, len(expected.markdown), telegram_bot.REGULAR_TEXT_MAX
+    )
+    assert body["text"] == telegram_bot.markdown_to_html(truncated)
+    assert body["reply_markup"] == expected.reply_markup
+
+
+def test_tasks_rich_kill_switch_off(store):
+    """With rich disabled the /tasks list takes the HTML leg first — no
+    sendRichMessage call."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "working")
+    store.move_task(pid, 1, "In progress", confirm=True)
+    script = run_bot_until_stop(
+        Script(
+            [[message_update(166, "/tasks")]],
+            fail_rich_once=(400, "should never be called"),
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        rich=False,
+    )
+    assert script.sent_rich == []
+    assert len(script.sent) == 1
+    body = script.sent[0]
+    assert body["chat_id"] == 7
+    assert body["parse_mode"] == "HTML"
+    expected = telegram_bot.tasks_view(store, chat_id=7)
+    assert isinstance(expected, telegram_bot.RichReply)
+    truncated = telegram_bot._truncate_inline(
+        expected.markdown, len(expected.markdown), telegram_bot.REGULAR_TEXT_MAX
+    )
+    assert body["text"] == telegram_bot.markdown_to_html(truncated)
+    assert body["reply_markup"] == expected.reply_markup
+
+
+def test_tasks_overflow_degrades(store):
+    """A board whose markdown exceeds the rich budget 400s the rich leg and
+    degrades through the shared funnel: the HTML leg sends the converted,
+    re-truncated markdown with the keyboard (no new cap is added)."""
+    pid = store.create_project("yask")["id"]
+    # ~73 chars per task line (the markdown form): 520 tasks comfortably
+    # exceed RICH_MESSAGE_MAX (32 768 chars).
+    for i in range(520):
+        t = store.create_task(
+            pid, f"overflow task number {i:04d} " + "x" * 40
+        )
+        store.move_task(pid, t["number"], "In progress", confirm=True)
+    expected = telegram_bot.tasks_view(store, chat_id=7)
+    assert isinstance(expected, telegram_bot.RichReply)
+    assert len(expected.markdown) > telegram_bot.RICH_MESSAGE_MAX
+    script = run_bot_until_stop(
+        Script(
+            [[message_update(167, "/tasks")]],
+            fail_rich_once=(400, "too long"),
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    # the rich leg fired (and failed) exactly once, full payload
+    assert len(script.sent_rich) == 1
+    assert script.sent_rich[0]["rich_message"]["markdown"] == expected.markdown
+    # the HTML leg replaced it — the markdown re-truncated to the regular
+    # budget, converted, keyboard threaded
+    assert len(script.sent) == 1
+    body = script.sent[0]
+    assert body["chat_id"] == 7
+    assert body["parse_mode"] == "HTML"
+    truncated = telegram_bot._truncate_inline(
+        expected.markdown, len(expected.markdown), telegram_bot.REGULAR_TEXT_MAX
+    )
+    assert body["text"] == telegram_bot.markdown_to_html(truncated)
+    assert body["reply_markup"] == expected.reply_markup
+
+
 def test_help_mentions_tasks():
     assert "/tasks" in telegram_bot.HELP_TEXT
 
@@ -1688,20 +1856,25 @@ def test_backlog_populated_board_exact(store):
         Script([[message_update(182, "/backlog")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert len(script.sent) == 1
-    # exact text: name order, id prefixes, column order, and the
+    # the list is a rich surface: sendRichMessage with the keyboard, no
+    # plain sendMessage leg
+    assert len(script.sent_rich) == 1
+    assert script.sent == []
+    sent = script.sent_rich[0]
+    assert sent["chat_id"] == 7
+    # exact markdown: name order, id prefixes, column order, and the
     # non-Backlog states absent
-    assert script.sent[0]["text"] == (
-        "Backlog:\n"
-        f"{alpha}. alpha\n"
-        f"    #1 backlog 1\n"
-        f"    #2 backlog 2\n"
-        f"{zeta}. zeta\n"
-        f"    #1 z backlog"
+    assert sent["rich_message"]["markdown"] == (
+        "# Backlog\n"
+        f"\n**{alpha}. alpha**\n"
+        "- #1 backlog 1\n"
+        "- #2 backlog 2\n"
+        f"\n**{zeta}. zeta**\n"
+        "- #1 z backlog"
     )
     # one button per task, in reading order (the t: callback payloads),
     # then the Main-menu row (payload h)
-    assert script.sent[0]["reply_markup"] == {
+    assert sent["reply_markup"] == {
         "inline_keyboard": [
             [{"text": "#1 backlog 1", "callback_data": f"t:{alpha}:1"}],
             [{"text": "#2 backlog 2", "callback_data": f"t:{alpha}:2"}],
@@ -1709,6 +1882,9 @@ def test_backlog_populated_board_exact(store):
             [{"text": "Main menu", "callback_data": "h"}],
         ]
     }
+    # every payload is well under the Bot API's 64-byte callback_data limit
+    for row in sent["reply_markup"]["inline_keyboard"]:
+        assert len(row[0]["callback_data"].encode("utf-8")) < 64
 
 
 def test_backlog_filter_by_id_and_name(store):
@@ -1719,17 +1895,19 @@ def test_backlog_filter_by_id_and_name(store):
     store.move_task(alpha, t["number"], "In progress", confirm=True)
     store.create_task(zeta, "zeta backlog")
 
-    # by project name, case-insensitive
+    # by project name, case-insensitive — the list is a rich surface
     script = run_bot_until_stop(
         Script([[message_update(183, "/backlog ALPHA")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert script.sent[0]["text"] == (
-        "Backlog:\n"
-        f"{alpha}. alpha\n"
-        f"    #1 alpha backlog"
+    assert len(script.sent_rich) == 1
+    assert script.sent == []
+    assert script.sent_rich[0]["rich_message"]["markdown"] == (
+        "# Backlog\n"
+        f"\n**{alpha}. alpha**\n"
+        "- #1 alpha backlog"
     )
-    assert script.sent[0]["reply_markup"] == {
+    assert script.sent_rich[0]["reply_markup"] == {
         "inline_keyboard": [
             [{"text": "#1 alpha backlog", "callback_data": f"t:{alpha}:1"}],
             [{"text": "Main menu", "callback_data": "h"}],
@@ -1741,12 +1919,14 @@ def test_backlog_filter_by_id_and_name(store):
         Script([[message_update(184, f"/backlog {zeta}")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert script.sent[0]["text"] == (
-        "Backlog:\n"
-        f"{zeta}. zeta\n"
-        f"    #1 zeta backlog"
+    assert len(script.sent_rich) == 1
+    assert script.sent == []
+    assert script.sent_rich[0]["rich_message"]["markdown"] == (
+        "# Backlog\n"
+        f"\n**{zeta}. zeta**\n"
+        "- #1 zeta backlog"
     )
-    assert script.sent[0]["reply_markup"] == {
+    assert script.sent_rich[0]["reply_markup"] == {
         "inline_keyboard": [
             [{"text": "#1 zeta backlog", "callback_data": f"t:{zeta}:1"}],
             [{"text": "Main menu", "callback_data": "h"}],
@@ -1761,12 +1941,14 @@ def test_backlog_filter_name_with_spaces(store):
         Script([[message_update(185, "/backlog my big project")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    assert script.sent[0]["text"] == (
-        "Backlog:\n"
-        f"{pid}. my big project\n"
-        f"    #1 backlog"
+    assert len(script.sent_rich) == 1
+    assert script.sent == []
+    assert script.sent_rich[0]["rich_message"]["markdown"] == (
+        "# Backlog\n"
+        f"\n**{pid}. my big project**\n"
+        "- #1 backlog"
     )
-    assert script.sent[0]["reply_markup"] == {
+    assert script.sent_rich[0]["reply_markup"] == {
         "inline_keyboard": [
             [{"text": "#1 backlog", "callback_data": f"t:{pid}:1"}],
             [{"text": "Main menu", "callback_data": "h"}],
@@ -1841,6 +2023,64 @@ def test_backlog_store_failure_replies_and_recovers(store, monkeypatch):
     assert script.sent[0]["text"] == telegram_bot.BACKLOG_ERROR_TEXT
     assert "reply_markup" not in script.sent[0]
     assert script.sent[1]["text"] == telegram_bot.START_TEXT
+
+
+def test_backlog_rich_fallback_to_html(store):
+    """A failing rich leg degrades through the shared funnel: the HTML leg
+    carries the markdown re-truncated to the regular budget, converted,
+    with the per-task keyboard threaded — no double-send."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "backlog item")
+    script = run_bot_until_stop(
+        Script(
+            [[message_update(193, "/backlog")]],
+            fail_rich_once=(400, "can't parse rich markdown"),
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    # the rich leg fired (and failed) exactly once, full payload
+    assert len(script.sent_rich) == 1
+    expected = telegram_bot.backlog_view(store, chat_id=7)
+    assert isinstance(expected, telegram_bot.RichReply)
+    assert script.sent_rich[0]["rich_message"]["markdown"] == expected.markdown
+    # the HTML leg replaced it — the markdown re-truncated to the regular
+    # budget, converted, keyboard threaded
+    assert len(script.sent) == 1
+    body = script.sent[0]
+    assert body["chat_id"] == 7
+    assert body["parse_mode"] == "HTML"
+    truncated = telegram_bot._truncate_inline(
+        expected.markdown, len(expected.markdown), telegram_bot.REGULAR_TEXT_MAX
+    )
+    assert body["text"] == telegram_bot.markdown_to_html(truncated)
+    assert body["reply_markup"] == expected.reply_markup
+
+
+def test_backlog_rich_kill_switch_off(store):
+    """With rich disabled the /backlog list takes the HTML leg first — no
+    sendRichMessage call."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "backlog item")
+    script = run_bot_until_stop(
+        Script(
+            [[message_update(194, "/backlog")]],
+            fail_rich_once=(400, "should never be called"),
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        rich=False,
+    )
+    assert script.sent_rich == []
+    assert len(script.sent) == 1
+    body = script.sent[0]
+    assert body["chat_id"] == 7
+    assert body["parse_mode"] == "HTML"
+    expected = telegram_bot.backlog_view(store, chat_id=7)
+    assert isinstance(expected, telegram_bot.RichReply)
+    truncated = telegram_bot._truncate_inline(
+        expected.markdown, len(expected.markdown), telegram_bot.REGULAR_TEXT_MAX
+    )
+    assert body["text"] == telegram_bot.markdown_to_html(truncated)
+    assert body["reply_markup"] == expected.reply_markup
 
 
 def test_help_mentions_backlog():
@@ -2178,7 +2418,11 @@ def test_tasks_drill_down_to_task_view(store):
         Script([[message_update(248, "/tasks")]]),
         dispatch=telegram_bot.make_dispatch(store),
     )
-    rows = first.sent[0]["reply_markup"]["inline_keyboard"]
+    # the /tasks list is a rich surface: the t: keyboard rides the rich
+    # body (the cross-task contract: label "#<n> <title>", payload
+    # "t:<pid>:<n>")
+    rows = first.sent_rich[0]["reply_markup"]["inline_keyboard"]
+    assert first.sent == []
     assert rows == [
         [
             {
