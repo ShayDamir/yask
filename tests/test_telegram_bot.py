@@ -176,13 +176,14 @@ class Script:
     records the file ids passed to getFile; ``file_downloads`` the URL paths
     requested from the file CDN (``/file/bot<token>/<path>``), served with
     the ``file_bytes`` argument (a 404 when it is None).
-    ``fail_rich_once`` / ``fail_send_once`` each take a ``(status,
-    description)`` pair: the first sendRichMessage / sendMessage is then
-    answered ``ok:false`` with that ``error_code`` (a simulated rich-leg or
-    HTML-leg failure), subsequent calls succeed.
+    ``fail_rich_once`` / ``fail_send_once`` / ``fail_edit_once`` each take
+    a ``(status, description)`` pair: the first sendRichMessage /
+    sendMessage / editMessageText is then answered ``ok:false`` with that
+    ``error_code`` (a simulated rich-leg, HTML-leg or in-place-edit
+    failure), subsequent calls succeed.
     """
 
-    def __init__(self, get_updates, get_me_ok=True, fail_once_with=None, fail_set_my_commands=False, file_bytes=None, fail_rich_once=None, fail_send_once=None):
+    def __init__(self, get_updates, get_me_ok=True, fail_once_with=None, fail_set_my_commands=False, file_bytes=None, fail_rich_once=None, fail_send_once=None, fail_edit_once=None):
         self.get_updates = list(get_updates)
         self.get_me_ok = get_me_ok
         self.fail_once_with = fail_once_with
@@ -193,6 +194,8 @@ class Script:
         self.failed_rich_once = False
         self.fail_send_once = fail_send_once
         self.failed_send_once = False
+        self.fail_edit_once = fail_edit_once
+        self.failed_edit_once = False
         self.file_bytes = file_bytes
         self.file_gets = []
         self.file_downloads = []
@@ -305,6 +308,17 @@ class Script:
             return httpx.Response(200, json={"ok": True, "result": True})
         if method == "editMessageText":
             self.edited.append(body)
+            if self.fail_edit_once is not None and not self.failed_edit_once:
+                self.failed_edit_once = True
+                status, description = self.fail_edit_once
+                return httpx.Response(
+                    status,
+                    json={
+                        "ok": False,
+                        "error_code": status,
+                        "description": description,
+                    },
+                )
             return httpx.Response(200, json={"ok": True, "result": True})
         if method in ("setMyCommands", "getMyCommands", "deleteMyCommands"):
             self.command_requests.append((method, body))
@@ -5813,9 +5827,24 @@ def test_callback_a_store_failure_replies_and_recovers(store, monkeypatch):
 
 
 def _detail_callback(update_id, data, chat_id, detail):
-    """A callback_update whose original message carries the /task detail
-    (the Rich Message's ``markdown`` + ``reply_markup``) — the shape
-    Telegram sends when a button on the detail message is pressed."""
+    """A callback_update whose original message is the /task detail Rich
+    Message — the shape Telegram sends when a button on the detail
+    message is pressed: the ``rich_message`` field (the received
+    RichMessage is a parsed block tree, not markdown) and no ``text``
+    (empty on rich messages)."""
+    update = callback_update(update_id, data, chat_id=chat_id)
+    message = update["callback_query"]["message"]
+    message["rich_message"] = {"blocks": []}
+    del message["text"]
+    message["reply_markup"] = detail["reply_markup"]
+    return update
+
+
+def _detail_plain_callback(update_id, data, chat_id, detail):
+    """A callback_update whose original message is the /task detail as a
+    *plain* message (the kill switch off, or the send chain degraded the
+    rich view to plain text): a ``text`` field plus the detail's
+    keyboard."""
     update = callback_update(update_id, data, chat_id=chat_id)
     update["callback_query"]["message"]["text"] = detail["rich_message"]["markdown"]
     update["callback_query"]["message"]["reply_markup"] = detail["reply_markup"]
@@ -5823,6 +5852,8 @@ def _detail_callback(update_id, data, chat_id, detail):
 
 
 def test_callback_dispatch_subscribe_toggle(store):
+    """An s: press on a *plain* original re-renders in place (the
+    toggle's in-place echo needs the original's ``text``)."""
     d = seed_task_view(store)
     pid, t = d["pid"], d["t"]
     chat_id = 21
@@ -5832,7 +5863,8 @@ def test_callback_dispatch_subscribe_toggle(store):
         dispatch=telegram_bot.make_dispatch(store),
     )
     detail = first.sent_rich[0]
-    update = _detail_callback(299, f"s:{pid}", chat_id, detail)
+    # a plain-shaped original (degraded view): text + the detail keyboard
+    update = _detail_plain_callback(299, f"s:{pid}", chat_id, detail)
     script = run_bot_until_stop(
         Script([[update]]),
         dispatch=telegram_bot.make_dispatch(store),
@@ -5850,7 +5882,8 @@ def test_callback_dispatch_subscribe_toggle(store):
     e = script.edited[0]
     assert e["chat_id"] == chat_id
     assert e["message_id"] == 1
-    # the edit leg stays plain text until #104: the markdown rides `text`
+    # a plain original keeps the plain text edit
+    assert "rich_message" not in e
     assert e["text"] == detail["rich_message"]["markdown"]
     rows = e["reply_markup"]["inline_keyboard"]
     assert rows[:2] == detail["reply_markup"]["inline_keyboard"][:2]
@@ -5859,7 +5892,44 @@ def test_callback_dispatch_subscribe_toggle(store):
     assert rows[-1] == [{"text": "Main menu", "callback_data": "h"}]
 
 
+def test_callback_dispatch_toggle_on_rich_view_toasts_only(store):
+    """An s:/u: press on a Rich Message view is toast-only until #106.
+
+    The toggle's in-place re-render echoes the original message's text
+    with a flipped keyboard; a rich message carries no ``text`` (its
+    content is a parsed block tree, Bot API 10.1), so the press bails to
+    the toast and the pressed button stays stale — the store change
+    still applies.
+    """
+    d = seed_task_view(store)
+    pid, t = d["pid"], d["t"]
+    chat_id = 27
+    first = run_bot_until_stop(
+        Script([[message_update(310, f"/task yask {t['number']}", chat_id=chat_id)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    detail = first.sent_rich[0]
+    # a rich-shaped original: rich_message field, no text
+    update = _detail_callback(311, f"s:{pid}", chat_id, detail)
+    script = run_bot_until_stop(
+        Script([[update]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    # the store row is created, the press is toasted, nothing is edited
+    # or sent — the rich view stays stale until #106
+    assert [s["project_id"] for s in store.list_subscriptions(chat_id)] == [pid]
+    assert script.answered == [
+        {"callback_query_id": "cbq-311", "text": "Subscribed to yask"}
+    ]
+    assert script.edited == []
+    assert script.sent == []
+    assert script.sent_rich == []
+
+
 def test_callback_dispatch_unsubscribe_toggle(store):
+    """A u: press on a *plain* original re-renders in place (the
+    toggle's in-place echo needs the original's ``text``)."""
     d = seed_task_view(store)
     pid, t = d["pid"], d["t"]
     chat_id = 22
@@ -5877,7 +5947,8 @@ def test_callback_dispatch_unsubscribe_toggle(store):
     assert detail["reply_markup"]["inline_keyboard"][-1] == [
         {"text": "Main menu", "callback_data": "h"}
     ]
-    update = _detail_callback(301, f"u:{pid}", chat_id, detail)
+    # a plain-shaped original (degraded view): text + the detail keyboard
+    update = _detail_plain_callback(301, f"u:{pid}", chat_id, detail)
     script = run_bot_until_stop(
         Script([[update]]),
         dispatch=telegram_bot.make_dispatch(store),
@@ -5890,6 +5961,9 @@ def test_callback_dispatch_unsubscribe_toggle(store):
     ]
     assert script.sent == []
     e = script.edited[0]
+    # a plain original keeps the plain text edit
+    assert "rich_message" not in e
+    assert e["text"] == detail["rich_message"]["markdown"]
     rows = e["reply_markup"]["inline_keyboard"]
     assert rows[:2] == detail["reply_markup"]["inline_keyboard"][:2]
     assert rows[-2] == [{"text": "Subscribe", "callback_data": f"s:{pid}"}]
@@ -6030,7 +6104,8 @@ DONE_IDX = 5  # 'Done''s index in db.WORKFLOW_STATES
 
 def test_callback_m_single_move_edits_detail_in_place(store):
     """An m: press on a prerequisite-free task moves it and re-renders the
-    detail in place (no message stacked)."""
+    rich detail in place with the rich editMessageText payload (no
+    message stacked)."""
     d = seed_task_view(store)
     pid, n = d["pid"], d["p2"]["number"]  # 'prereq two': In progress, no prereqs
     chat_id = 31
@@ -6054,7 +6129,10 @@ def test_callback_m_single_move_edits_detail_in_place(store):
     e = script.edited[0]
     assert e["chat_id"] == chat_id
     assert e["message_id"] == 1
-    assert "**State:** Done" in e["text"]
+    # a rich original gets the rich edit payload (a text edit of a rich
+    # message 400s server-side)
+    assert "text" not in e
+    assert "**State:** Done" in e["rich_message"]["markdown"]
     # the fresh keyboard: the new current state (Done) is excluded
     labels = [
         b["text"]
@@ -6066,8 +6144,8 @@ def test_callback_m_single_move_edits_detail_in_place(store):
 
 
 def test_callback_m_cascade_shows_confirm_keyboard(store):
-    """An m: press that would pull prerequisites edits the message to the
-    confirm keyboard and writes nothing."""
+    """An m: press that would pull prerequisites edits the rich message to
+    the confirm keyboard (rich payload) and writes nothing."""
     d = seed_task_view(store)
     pid, t = d["pid"], d["t"]  # 'working' — has two prerequisites
     n = t["number"]
@@ -6089,7 +6167,10 @@ def test_callback_m_cascade_shows_confirm_keyboard(store):
     assert script.sent == []
     assert len(script.edited) == 1
     e = script.edited[0]
-    assert e["text"] == (
+    # the confirm prompt is plain text, but a rich original needs the
+    # rich payload (a text edit of a rich message 400s server-side)
+    assert "text" not in e
+    assert e["rich_message"]["markdown"] == (
         f"Move #{n} to Done?\n"
         "This also moves its prerequisites that have not reached this stage:\n"
         f"  #{d['p1']['number']} prereq one — Review\n"
@@ -6145,10 +6226,16 @@ def test_callback_c_confirms_cascade_and_renders_detail(store):
     ]
     assert script.sent == []
     assert len(script.edited) == 2
+    # both edits ride the rich payload (the original is a rich view)
+    assert "text" not in script.edited[0]
+    assert script.edited[0]["rich_message"]["markdown"].startswith(
+        f"Move #{n} to Done?"
+    )
     # the second edit is the fresh detail view of the moved task
     e = script.edited[1]
     assert e["chat_id"] == chat_id
-    assert "**State:** Done" in e["text"]
+    assert "text" not in e
+    assert "**State:** Done" in e["rich_message"]["markdown"]
     labels = [
         b["text"]
         for row in e["reply_markup"]["inline_keyboard"]
@@ -6174,21 +6261,154 @@ def test_callback_x_cancels_and_renders_detail(store):
         dispatch=telegram_bot.make_dispatch(store),
         callback_dispatch=telegram_bot.make_callback_dispatch(store),
     )
-    # nothing moved; the message is re-rendered to the plain detail view
+    # nothing moved; the rich message is re-rendered to the plain detail
+    # view with the rich payload
     assert store.get_task(pid, n)["state"] == "In progress"
     assert script.answered == [
         {"callback_query_id": "cbq-729", "text": "Cancelled."}
     ]
     assert script.sent == []
     e = script.edited[0]
-    assert e["text"].startswith(f"# {n} working — Story")
-    assert "**State:** In progress" in e["text"]
+    assert "text" not in e
+    assert e["rich_message"]["markdown"].startswith(f"# {n} working — Story")
+    assert "**State:** In progress" in e["rich_message"]["markdown"]
     labels = [
         b["text"]
         for row in e["reply_markup"]["inline_keyboard"]
         for b in row
     ]
     assert "Done" in labels  # the state buttons are back
+
+
+def test_callback_m_rich_edit_400_degrades_to_fresh_message(store):
+    """A 400 on the rich edit skips the in-place edit and re-sends the
+    re-rendered view as a fresh rich message; the loop survives."""
+    d = seed_task_view(store)
+    pid, n = d["pid"], d["p2"]["number"]  # 'prereq two': In progress, no prereqs
+    chat_id = 36
+    first = run_bot_until_stop(
+        Script([[message_update(740, f"/task yask {n}", chat_id=chat_id)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    detail = first.sent_rich[0]
+    update = _detail_callback(741, f"m:{pid}:{n}:{DONE_IDX}", chat_id, detail)
+    script = run_bot_until_stop(
+        Script(
+            [[update, message_update(742, "/start")]],
+            fail_edit_once=(400, "can't parse rich message"),
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert store.get_task(pid, n)["state"] == "Done"
+    # the move was applied and toasted (the toast is unaffected by the
+    # rich-edit failure)
+    assert script.answered == [
+        {"callback_query_id": "cbq-741", "text": f"Moved #{n} to Done."}
+    ]
+    # the rich edit was attempted with the rich payload ...
+    assert len(script.edited) == 1
+    e = script.edited[0]
+    assert e["chat_id"] == chat_id
+    assert e["message_id"] == 1
+    assert "text" not in e
+    assert "**State:** Done" in e["rich_message"]["markdown"]
+    # ... failed, and the re-render went out as a fresh rich message
+    # (the user sees the updated view instead of the stale original)
+    assert len(script.sent_rich) == 1
+    sent = script.sent_rich[0]
+    assert sent["chat_id"] == chat_id
+    assert sent["rich_message"]["markdown"] == e["rich_message"]["markdown"]
+    assert sent["reply_markup"] == e["reply_markup"]
+    # the rich leg of the fresh send succeeded: no plain fallback, and the
+    # only plain send is the /start reply (to its own chat) proving the
+    # loop survived
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 7
+    assert script.sent[0]["text"] == telegram_bot.START_TEXT
+    assert script.offsets == [None, 743]
+
+
+def test_callback_m_rich_edit_404_degrades_through_chain(store):
+    """A 404 on the rich edit degrades the fresh send through the
+    rich → HTML chain (old local Bot API server); the loop survives."""
+    d = seed_task_view(store)
+    pid, n = d["pid"], d["p2"]["number"]
+    chat_id = 37
+    first = run_bot_until_stop(
+        Script([[message_update(743, f"/task yask {n}", chat_id=chat_id)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    detail = first.sent_rich[0]
+    update = _detail_callback(744, f"m:{pid}:{n}:{DONE_IDX}", chat_id, detail)
+    script = run_bot_until_stop(
+        Script(
+            [[update, message_update(745, "/start")]],
+            fail_edit_once=(404, "Not Found"),
+            fail_rich_once=(404, "Not Found"),
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert store.get_task(pid, n)["state"] == "Done"
+    assert script.answered == [
+        {"callback_query_id": "cbq-744", "text": f"Moved #{n} to Done."}
+    ]
+    # the rich edit was attempted (and 404'd) ...
+    assert len(script.edited) == 1
+    assert "text" not in script.edited[0]
+    assert "**State:** Done" in script.edited[0]["rich_message"]["markdown"]
+    # ... the fresh send's rich leg also failed and the HTML leg landed
+    assert len(script.sent_rich) == 1  # the failed rich attempt
+    assert len(script.sent) == 2
+    html_leg, start_leg = script.sent
+    assert html_leg["chat_id"] == chat_id
+    assert html_leg["parse_mode"] == "HTML"
+    # the detail view is far under REGULAR_TEXT_MAX: no re-truncation
+    assert html_leg["text"] == telegram_bot.markdown_to_html(
+        script.edited[0]["rich_message"]["markdown"]
+    )
+    assert html_leg["reply_markup"] == script.edited[0]["reply_markup"]
+    # the /start reply (to its own chat) proves the loop survived
+    assert start_leg["chat_id"] == 7
+    assert start_leg["text"] == telegram_bot.START_TEXT
+    assert script.offsets == [None, 746]
+
+
+def test_callback_m_plain_view_edit_unchanged(store):
+    """An m: press on a *plain* original keeps the plain text edit —
+    the pre-rich behavior, byte-identical."""
+    d = seed_task_view(store)
+    pid, n = d["pid"], d["p2"]["number"]
+    chat_id = 38
+    first = run_bot_until_stop(
+        Script([[message_update(746, f"/task yask {n}", chat_id=chat_id)]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    detail = first.sent_rich[0]
+    # a plain-shaped original: has text, no rich_message
+    update = _detail_plain_callback(747, f"m:{pid}:{n}:{DONE_IDX}", chat_id, detail)
+    script = run_bot_until_stop(
+        Script([[update]]),
+        dispatch=telegram_bot.make_dispatch(store),
+        callback_dispatch=telegram_bot.make_callback_dispatch(store),
+    )
+    assert store.get_task(pid, n)["state"] == "Done"
+    assert script.answered == [
+        {"callback_query_id": "cbq-747", "text": f"Moved #{n} to Done."}
+    ]
+    assert script.sent == []
+    assert len(script.edited) == 1
+    e = script.edited[0]
+    assert "rich_message" not in e
+    assert "**State:** Done" in e["text"]
+    labels = [
+        b["text"]
+        for row in e["reply_markup"]["inline_keyboard"]
+        for b in row
+    ]
+    assert "Done" not in labels
+    assert "Backlog" in labels and "Subscribe" in labels
 
 
 def test_callback_m_already_in_state_toasts_only(store):
