@@ -1,6 +1,7 @@
 // Modals: task editor, new task, confirmation, attachment viewer.
 
 import api from "./api.js";
+import { DEFAULT_STATE } from "./constants.js";
 import { h, clear, fmtEstimate, fmtBytes, fmtTime, typeClass } from "./util.js";
 import { renderMarkdown } from "./markdown.js";
 import { toast, toastError } from "./toast.js";
@@ -677,7 +678,7 @@ export function openEditorModal(project, task, actions) {
               modal.close();
               actions.onRestore(task);
             },
-          }, "Restore to Backlog")
+          }, `Restore to ${DEFAULT_STATE}`)
         : h("button", {
             class: "btn ghost",
             type: "button",

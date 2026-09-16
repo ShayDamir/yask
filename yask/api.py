@@ -189,7 +189,7 @@ class MoveIn(BaseModel):
 
 
 class RestoreIn(BaseModel):
-    to_state: str = "Backlog"
+    to_state: str = db.DEFAULT_STATE
     confirm: bool = False
 
 

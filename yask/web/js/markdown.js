@@ -1,6 +1,20 @@
 // Minimal, safe markdown renderer for attachment previews.
 // Supports: headings, bold/italic/strike, inline code, fenced code blocks,
 // links, unordered/ordered lists, blockquotes, paragraphs.
+//
+// The inline subset is single-sourced with the Telegram converter's
+// counterpart: yask/spec.py emits it into constants.js (codegen), so the
+// two languages cannot drift (pinned by tests/test_codegen.py). The
+// block-level regexes stay local — Telegram's HTML parse mode has no
+// h1-h6/ul/ol/li/p tags, so only the inline subset is shared.
+
+import { MARKDOWN_REGEXES } from "./constants.js";
+
+const CODE_SPAN_RE = new RegExp(MARKDOWN_REGEXES.code_span, "g");
+const STRONG_STAR_RE = new RegExp(MARKDOWN_REGEXES.strong_star, "g");
+const EM_STAR_RE = new RegExp(MARKDOWN_REGEXES.em_star, "g");
+const STRIKE_RE = new RegExp(MARKDOWN_REGEXES.strike, "g");
+const LINK_RE = new RegExp(MARKDOWN_REGEXES.link, "g");
 
 function escapeHtml(s) {
   return s
@@ -12,12 +26,12 @@ function escapeHtml(s) {
 
 function inline(s) {
   let out = escapeHtml(s);
-  out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
-  out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-  out = out.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+  out = out.replace(CODE_SPAN_RE, "<code>$1</code>");
+  out = out.replace(STRONG_STAR_RE, "<strong>$1</strong>");
+  out = out.replace(EM_STAR_RE, "$1<em>$2</em>");
+  out = out.replace(STRIKE_RE, "<del>$1</del>");
   out = out.replace(
-    /\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+    LINK_RE,
     '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
   );
   return out;

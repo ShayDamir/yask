@@ -31,11 +31,12 @@ import secrets
 import sqlite3
 from typing import Any
 
-from . import db
+from . import db, spec
 
 _UNSET = object()
 
-_HEX_RE = re.compile(r"^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")
+# Single-sourced in spec.COLOR_HEX_RE (shared with the web UI via codegen).
+_HEX_RE = re.compile(spec.COLOR_HEX_RE)
 
 
 # -- password hashing (the Telegram bot's user allowlist) ----------------------
@@ -319,8 +320,8 @@ class Store:
         self._get_project(project_id)
         rows = self.conn.execute(
             "SELECT number, title, state, sort_order, id FROM tasks "
-            "WHERE project_id = ? AND state = 'Backlog'",
-            (project_id,),
+            "WHERE project_id = ? AND state = ?",
+            (project_id, db.DEFAULT_STATE),
         ).fetchall()
         rows = sorted(rows, key=lambda r: (r["sort_order"], r["id"]))
         return [
@@ -498,9 +499,9 @@ class Store:
         before_number: int | None = None,
         after_number: int | None = None,
     ) -> dict:
-        # New tasks always start in the Backlog; moving them forward is a
-        # separate, tracked action (see #1).
-        state = "Backlog"
+        # New tasks always start in the default state (Backlog); moving
+        # them forward is a separate, tracked action (see #1).
+        state = db.DEFAULT_STATE
         self._get_project(project_id)
         title = (title or "").strip()
         if not title:
@@ -1141,7 +1142,7 @@ class Store:
         self,
         project_id: int,
         number: int,
-        to_state: str = "Backlog",
+        to_state: str = db.DEFAULT_STATE,
         confirm: bool = False,
     ) -> dict:
         """Un-archive a single task. Children of an epic stay where they are."""

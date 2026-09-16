@@ -1,5 +1,7 @@
 // REST client for the yask backend.
 
+import { DEFAULT_STATE } from "./constants.js";
+
 export class ApiError extends Error {
   constructor(status, detail) {
     super(typeof detail === "string" ? detail : JSON.stringify(detail));
@@ -67,7 +69,7 @@ const api = {
     }),
   archiveTask: (pid, num, confirm = false) =>
     req("POST", `/api/projects/${pid}/tasks/${num}/archive`, { confirm }),
-  restoreTask: (pid, num, toState = "Backlog", confirm = false) =>
+  restoreTask: (pid, num, toState = DEFAULT_STATE, confirm = false) =>
     req("POST", `/api/projects/${pid}/tasks/${num}/restore`, { to_state: toState, confirm }),
   deleteTask: (pid, num, confirm = false) =>
     req("DELETE", `/api/projects/${pid}/tasks/${num}${confirm ? "?confirm=true" : ""}`),

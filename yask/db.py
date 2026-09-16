@@ -153,6 +153,11 @@ STATE_RANK = {s: i for i, s in enumerate(WORKFLOW_STATES)}
 # bot's in-progress task view (/tasks) — the store query and the reply
 # grouping both read from this, so the four states are never duplicated.
 IN_PROGRESS_STATES = ["Todo", "Planning", "In progress", "Review"]
+# The state new tasks are created in (Store.create_task) and the state a
+# restore returns to by default (Store.restore_task, api RestoreIn).
+# Single-sourced here so Python and the generated JS constants (codegen)
+# agree on one value.
+DEFAULT_STATE = "Backlog"
 
 
 def utcnow() -> str:

@@ -131,7 +131,7 @@ from typing import Any, Awaitable, Callable, Optional, Union
 
 import httpx
 
-from . import db
+from . import db, spec
 from .store import NotFound, Store, ValidationError
 
 # Bot API base URL. Overridable for tests/future (no env override needed now).
@@ -1204,19 +1204,25 @@ def _state_button_rows(project_id: int, number: int, current_state: str) -> list
 # 400 that would kill the whole HTML leg and drop to plain — and it
 # composes only what the Bot API's entity-nesting rules allow (code spans
 # are strict leaves; blockquote content carries no code or links).
+#
+# The shared *inline* subset is single-sourced in ``spec.MARKDOWN``
+# (codegen emits it to the web UI via ``constants.js``; the mirror tests
+# in ``tests/test_codegen.py`` pin both sides). The block regexes and the
+# ``__``/``_`` (underscore) emphasis variants are Telegram-only and stay
+# local.
 
 _FENCE_RE = re.compile(r"^```")
 _QUOTE_RE = re.compile(r"^>\s?(.*)$")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _UL_RE = re.compile(r"^([-*+])\s+(.*)$")
 _OL_RE = re.compile(r"^(\d+[.)])\s+(.*)$")
-_CODE_SPAN_RE = re.compile(r"`([^`]+)`")
-_STRONG_STAR_RE = re.compile(r"\*\*([^*]+)\*\*")
-_EM_STAR_RE = re.compile(r"(^|[^*])\*([^*\n]+)\*")
+_CODE_SPAN_RE = re.compile(spec.MARKDOWN["code_span"])
+_STRONG_STAR_RE = re.compile(spec.MARKDOWN["strong_star"])
+_EM_STAR_RE = re.compile(spec.MARKDOWN["em_star"])
 _STRONG_UNDER_RE = re.compile(r"__([^_]+)__")
 _EM_UNDER_RE = re.compile(r"(?<!\w)_([^_\n]+)_(?!\w)")
-_STRIKE_RE = re.compile(r"~~([^~]+)~~")
-_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?:[^)\s]+)\)")
+_STRIKE_RE = re.compile(spec.MARKDOWN["strike"])
+_LINK_RE = re.compile(spec.MARKDOWN["link"])
 _CODE_SPAN_PLACEHOLDER_RE = re.compile("\x00(\d+)\x00")
 
 

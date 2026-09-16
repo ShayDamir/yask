@@ -1,6 +1,7 @@
 // yask web UI — bootstrap, app state, and user actions.
 
 import api from "./api.js";
+import { DEFAULT_STATE } from "./constants.js";
 import { renderBoard, renderEpicBoard, renderSearchResults, renderSidebar, ARCHIVED } from "./render.js";
 import { initDnd } from "./dnd.js";
 import { openEditorModal, openNewTaskModal, confirmDialog, openTelegramUsersModal } from "./dialogs.js";
@@ -336,10 +337,10 @@ async function doRestore(task) {
     message: "This also moves its prerequisites that are behind the target stage.",
     confirmLabel: "Restore all",
     run: (confirm) =>
-      api.restoreTask(state.project.id, task.number, "Backlog", confirm),
+      api.restoreTask(state.project.id, task.number, DEFAULT_STATE, confirm),
     done: (res, count) =>
       count === null
-        ? `Restored #${task.number} to ${res.affected[0]?.to ?? "Backlog"}`
+        ? `Restored #${task.number} to ${res.affected[0]?.to ?? DEFAULT_STATE}`
         : `Restored ${count} tasks`,
   });
 }

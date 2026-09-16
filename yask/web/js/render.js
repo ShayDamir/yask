@@ -1,10 +1,23 @@
 // Board rendering: columns of cards, epics with nested children.
 
 import { h, clear, fmtEstimate, typeClass } from "./util.js";
+import {
+  WORKFLOW_STATES,
+  BLOCKED_STATE,
+  ARCHIVED_STATE,
+  DEFAULT_STATE,
+  COLOR_HEX_RE,
+} from "./constants.js";
 
-export const STATES = ["Backlog", "Todo", "Planning", "In progress", "Review", "Done", "Blocked"];
-export const ARCHIVED = "Archived";
+// Board columns: the forward workflow states plus the active holding
+// state. Single-sourced from yask/db.py via constants.js (codegen) — the
+// JS side never re-lists state names by hand, so a new workflow state
+// added in Python reaches the UI by regeneration, not by lockstep edits.
+export const STATES = [...WORKFLOW_STATES, BLOCKED_STATE];
+export const ARCHIVED = ARCHIVED_STATE;
 export const ALL_STATES = [...STATES, ARCHIVED];
+
+const HEX_RE = new RegExp(COLOR_HEX_RE);
 
 const PREREQ_ICON = `<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M6 2h2v6h6v2H8v6H6V2z" transform="rotate(-90 8 8)"/></svg>`;
 const ATTACH_ICON = `<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M11.5 7 7 11.5a2.4 2.4 0 0 1-3.4-3.4l5-5a4 4 0 0 1 5.6 5.6l-5.5 5.5a5.7 5.7 0 0 1-8-8L7 1.6"/></svg>`;
@@ -77,7 +90,7 @@ function labelChips(task) {
 // strict style-src 'self' (#98). A non-hex/empty color yields undefined so
 // the default class styling is used.
 function labelChipStyle(color) {
-  const m = /^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.exec(color);
+  const m = HEX_RE.exec(color);
   if (!m) return undefined;
   let hex = m[1];
   if (hex.length === 3) {
@@ -212,7 +225,7 @@ export function renderCard(task, actions, { expanded, filterLabel, isArchived } 
   const card = h(
     "div",
     {
-      class: `card${task.state === "Done" ? " done" : ""}${task.state === "Blocked" ? " blocked" : ""}${task.is_epic ? " epic" : ""}`,
+      class: `card${task.state === "Done" ? " done" : ""}${task.state === BLOCKED_STATE ? " blocked" : ""}${task.is_epic ? " epic" : ""}`,
       draggable: "true",
       dataset: { number: task.number },
       title: task.description || undefined,
@@ -268,7 +281,7 @@ function renderColumn(colState, roots, actions, filterLabel, opts = {}) {
   }
   for (const t of roots) body.append(renderCard(t, actions, { filterLabel, isArchived: colState === ARCHIVED }));
   const addBtn =
-    colState === "Backlog" && opts.showAdd !== false
+    colState === DEFAULT_STATE && opts.showAdd !== false
       ? h("button", {
           class: "add-btn",
           title: `Add task to ${colState}`,
