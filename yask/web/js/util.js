@@ -54,3 +54,17 @@ export function debounce(fn, ms) {
     t = setTimeout(() => fn(...args), ms);
   };
 }
+
+// Pre-order walk of the tasks forest: each task followed by its children,
+// then the next root. Tolerates undefined roots and missing `children`.
+export function walkTasks(nodes = []) {
+  const out = [];
+  const go = (list) => {
+    for (const t of list || []) {
+      out.push(t);
+      go(t.children || []);
+    }
+  };
+  go(nodes);
+  return out;
+}

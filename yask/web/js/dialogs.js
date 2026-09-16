@@ -2,7 +2,7 @@
 
 import api from "./api.js";
 import { DEFAULT_STATE } from "./constants.js";
-import { h, clear, fmtEstimate, fmtBytes, fmtTime, typeClass } from "./util.js";
+import { h, clear, fmtEstimate, fmtBytes, fmtTime, typeClass, walkTasks } from "./util.js";
 import { renderMarkdown } from "./markdown.js";
 import { toast, toastError } from "./toast.js";
 
@@ -123,35 +123,6 @@ export function confirmDialog({
   });
 }
 
-// -- helpers over the project tree ---------------------------------------------
-
-export function flattenTasks(tasks, out = []) {
-  for (const t of tasks) {
-    out.push(t);
-    if (t.children && t.children.length) flattenTasks(t.children, out);
-  }
-  return out;
-}
-
-function epicsOf(project, excludeIds) {
-  return flattenTasks(project.tasks).filter(
-    (t) => t.is_epic && !excludeIds.has(t.id)
-  );
-}
-
-// descendants of a task (to exclude from parent selection)
-function descendantIds(task) {
-  const ids = new Set();
-  const walk = (t) => {
-    for (const c of t.children || []) {
-      ids.add(c.id);
-      walk(c);
-    }
-  };
-  walk(task);
-  return ids;
-}
-
 // -- attachment viewer -----------------------------------------------------------
 
 export async function openAttachmentViewer(task, att) {
@@ -185,7 +156,7 @@ export function openNewTaskModal(project, state, onCreated, epicNumber = null) {
   // Epic context (#35): resolve the epic so the modal heading + parent field
   // can reference it. Falls back to null for the normal (project-scope) flow.
   const epic = epicNumber
-    ? flattenTasks(project.tasks).find((t) => t.number === Number(epicNumber))
+    ? walkTasks(project.tasks).find((t) => t.number === Number(epicNumber))
     : null;
   const heading = epic
     ? `New task in epic #${epic.number}`
@@ -307,14 +278,11 @@ export function openNewTaskModal(project, state, onCreated, epicNumber = null) {
 }
 
 // -- task editor -------------------------------------------------------------------
+//
+// openEditorModal is a thin composer: each section is built by a dedicated
+// builder that owns its own DOM nodes, state, and event handlers.
 
-export function openEditorModal(project, task, actions) {
-  const pid = project.id;
-
-  const titleInput = h("input", { type: "text", id: "ed-title", value: task.title });
-  const descInput = h("textarea", { id: "ed-desc" }, task.description || "");
-
-  const allTypes = project.task_types || [];
+function buildTypeEstimateRow(task, allTypes) {
   const typeSelect = h(
     "select",
     { id: "ed-type" },
@@ -335,10 +303,14 @@ export function openEditorModal(project, task, actions) {
   };
   typeSelect.addEventListener("change", syncEstimate);
   syncEstimate();
+  return { typeSelect, estInput };
+}
 
-  // parent epic (only epics may contain tasks)
-  const excluded = new Set([task.id, ...descendantIds(task)]);
-  const epics = epicsOf(project, excluded);
+function buildParentRow(project, task) {
+  // Parent epic (only epics may contain tasks). Excludes the task itself and
+  // its descendants so a task can never be parented under itself.
+  const excluded = new Set([task.id, ...walkTasks(task.children).map((t) => t.id)]);
+  const epics = walkTasks(project.tasks).filter((t) => t.is_epic && !excluded.has(t.id));
   const parentSelect = h(
     "select",
     { id: "ed-parent" },
@@ -348,9 +320,11 @@ export function openEditorModal(project, task, actions) {
         `#${e.number} ${e.title}`)
     )
   );
+  return parentSelect;
+}
 
-  // prerequisites
-  const others = flattenTasks(project.tasks).filter(
+function buildPrereqSection(project, task) {
+  const others = walkTasks(project.tasks).filter(
     (t) => t.id !== task.id && t.state !== "Done" && t.state !== "Archived"
   );
   const chosen = new Set(task.prerequisites.map((p) => p.number));
@@ -370,8 +344,10 @@ export function openEditorModal(project, task, actions) {
     })
   );
   if (!others.length) checkList.append(h("span", { class: "dim-sm" }, "No other tasks in this project."));
+  return { checkList, others, chosen };
+}
 
-  // attachments
+function buildAttachmentsSection(pid, task) {
   const attList = h("div", { class: "attachment-list" });
   const fileInput = h("input", { type: "file", id: "ed-file", accept: ".md,.markdown,.txt,image/*" });
   const renderAttachments = (list) => {
@@ -418,8 +394,10 @@ export function openEditorModal(project, task, actions) {
     }
     fileInput.value = "";
   });
+  return { fileInput, attList };
+}
 
-  // labels
+function buildLabelsSection(pid, task, actions) {
   const labelList = h("div", { class: "check-list" });
   const newLabelInput = h("input", { type: "text", id: "ed-new-label", placeholder: "New label…" });
   // Seed from the task's own labels (already serialized on the task) so the
@@ -559,8 +537,10 @@ export function openEditorModal(project, task, actions) {
     }
   });
   addLabelBtn.addEventListener("click", createLabel);
+  return { labelList, newLabelInput, newLabelColorInput, addLabelBtn, initialLabelIds };
+}
 
-  // history
+function buildHistorySection(pid, task) {
   const historyList = h("ul", { class: "history-list" });
   (async () => {
     try {
@@ -581,6 +561,27 @@ export function openEditorModal(project, task, actions) {
       /* non-fatal */
     }
   })();
+  return { historyList };
+}
+
+export function openEditorModal(project, task, actions) {
+  const pid = project.id;
+
+  const titleInput = h("input", { type: "text", id: "ed-title", value: task.title });
+  const descInput = h("textarea", { id: "ed-desc" }, task.description || "");
+
+  const allTypes = project.task_types || [];
+  const { typeSelect, estInput } = buildTypeEstimateRow(task, allTypes);
+  const parentSelect = buildParentRow(project, task);
+
+  const { checkList, others, chosen } = buildPrereqSection(project, task);
+
+  const { fileInput, attList } = buildAttachmentsSection(pid, task);
+
+  const { labelList, newLabelInput, newLabelColorInput, addLabelBtn, initialLabelIds } =
+    buildLabelsSection(pid, task, actions);
+
+  const { historyList } = buildHistorySection(pid, task);
 
   const isArchived = task.state === "Archived";
 

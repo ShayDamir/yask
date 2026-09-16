@@ -8,7 +8,7 @@ import { openEditorModal, openNewTaskModal, confirmDialog, openTelegramUsersModa
 import { initTheme } from "./theme.js";
 import { initFontSize } from "./fontsize.js";
 import { toast, toastError } from "./toast.js";
-import { debounce, h, clear } from "./util.js";
+import { debounce, h, clear, walkTasks } from "./util.js";
 
 const state = {
   projects: [],
@@ -94,20 +94,12 @@ async function populateLabelFilter() {
 
 // Fill the Epic selector (#30), mirroring populateLabelFilter. Epics may be
 // nested, so walk the tree and collect every epic.
-function collectEpics(tasks, out = []) {
-  for (const t of tasks) {
-    if (t.is_epic) out.push(t);
-    if (t.children) collectEpics(t.children, out);
-  }
-  return out;
-}
-
 function populateEpicFilter() {
   const select = $("epic-filter");
   const current = state.selectedEpicNumber;
   clear(select);
   select.append(h("option", { value: "" }, "No epic"));
-  const epics = collectEpics(state.project.tasks || []);
+  const epics = walkTasks(state.project.tasks || []).filter((t) => t.is_epic);
   for (const e of epics) {
     select.append(h("option", { value: String(e.number) }, `#${e.number} ${e.title}`));
   }
@@ -203,17 +195,6 @@ function render() {
 }
 
 // -- task lookup --------------------------------------------------------------------
-
-function findTask(tasks, number) {
-  for (const t of tasks) {
-    if (t.number === number) return t;
-    if (t.children) {
-      const hit = findTask(t.children, number);
-      if (hit) return hit;
-    }
-  }
-  return null;
-}
 
 function columnOrder(stateName) {
   return state.project.tasks
@@ -366,7 +347,7 @@ async function doDelete(task) {
 }
 
 async function handleDrop(number, intent) {
-  const task = findTask(state.project.tasks, number);
+  const task = walkTasks(state.project.tasks).find((t) => t.number === number);
   if (!task) return;
   const pid = state.project.id;
 

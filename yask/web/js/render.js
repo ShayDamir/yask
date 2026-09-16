@@ -1,6 +1,6 @@
 // Board rendering: columns of cards, epics with nested children.
 
-import { h, clear, fmtEstimate, typeClass } from "./util.js";
+import { h, clear, fmtEstimate, typeClass, walkTasks } from "./util.js";
 import {
   WORKFLOW_STATES,
   BLOCKED_STATE,
@@ -308,28 +308,16 @@ function addToEpicBtn(epic, actions) {
   }, `Add task to epic #${epic.number}`);
 }
 
-// Locate an Epic (by its task number) anywhere in the nested tree; epics may
-// be nested, so recurse (#30).
-export function findEpic(tasks, number) {
-  const n = Number(number); // option values are strings; task numbers are ints (#31)
-  for (const t of tasks) {
-    if (t.number === n) return t;
-    if (t.children) {
-      const hit = findEpic(t.children, number); // keep recursing with the raw value
-      if (hit) return hit;
-    }
-  }
-  return null;
-}
-
 // Board view of a single Epic's direct subtasks as full kanban cards, instead
 // of the cramped inline rows inside the epic card (#30). When an epic is
 // selected the selector in main.js routes render() here; when not, renderBoard
-// renders the normal project board with nested epics.
+// renders the normal project board with nested epics. Epics may be nested, so
+// look the epic up anywhere in the tree (#30).
 export function renderEpicBoard(project, epicNumber, actions, { showArchived, filterLabel } = {}) {
   const board = document.getElementById("board");
   clear(board);
-  const epic = findEpic(project.tasks, epicNumber);
+  // Option values are strings; task numbers are ints (#31).
+  const epic = walkTasks(project.tasks).find((t) => t.number === Number(epicNumber));
   if (!epic) {
     board.append(h("div", { class: "empty-column fill" }, "Epic not found."));
     return;
@@ -389,14 +377,7 @@ export function renderSearchResults(project, query, actions, filterLabel) {
   const el = document.getElementById("search-results");
   clear(el);
   const q = query.trim().toLowerCase();
-  const flat = [];
-  const walk = (tasks) => {
-    for (const t of tasks) {
-      flat.push(t);
-      if (t.children) walk(t.children);
-    }
-  };
-  walk(project.tasks);
+  const flat = walkTasks(project.tasks);
   let matches = flat.filter(
     (t) =>
       t.title.toLowerCase().includes(q) ||
