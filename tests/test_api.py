@@ -1,11 +1,15 @@
 """REST API tests via FastAPI TestClient."""
 
 import base64
+import concurrent.futures
+import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
-from yask.api import ATTACHMENT_CSP, CSP, create_app
+from yask.api import ATTACHMENT_CSP, ATTACHMENT_DOWNLOAD_CONCURRENCY, CSP, create_app
+from yask.store import Store
 
 
 @pytest.fixture()
@@ -384,6 +388,117 @@ def test_attachment_upload_rejects_oversized_payload(client, pid):
         len(client.get(f"/api/projects/{pid}/tasks/1").json()["attachments"])
         == stored_after_ok
     )
+
+
+def test_attachment_streamed_in_chunks(client, pid, tmp_path):
+    """#96 (decision B): a multi-MB attachment is served through a
+    StreamingResponse, so its body reaches the ASGI send in multiple
+    ``more_body`` chunks (one per generator yield), not one buffer — while
+    the observable behavior (bytes, content-type, disposition, inert CSP)
+    is unchanged."""
+    payload = b"z" * (3 * 1024 * 1024)
+    client.post(f"/api/projects/{pid}/tasks", json={"title": "t"})
+    r = client.post(
+        f"/api/projects/{pid}/tasks/1/attachments",
+        files={"file": ("big.md", payload, "text/markdown")},
+    )
+    assert r.status_code == 201
+    att_id = r.json()["id"]
+
+    # Plain round-trip: byte-identical, headers intact.
+    got = client.get(f"/api/attachments/{att_id}")
+    assert got.status_code == 200
+    assert got.content == payload
+    assert got.headers["content-type"].startswith("text/markdown")
+    assert got.headers["content-disposition"].startswith("inline")
+    assert got.headers["content-security-policy"] == ATTACHMENT_CSP
+
+    # Chunked delivery: a pass-through ASGI wrapper counts
+    # ``http.response.body`` messages with ``more_body=True``. A fresh app
+    # is used (a semaphore is bound to the loop that first used it, so the
+    # wrapper must not share the fixture app's loop).
+    inner = create_app(tmp_path / "chunks.db")
+    chunks = {"n": 0}
+
+    async def counting(scope, receive, send):
+        async def counting_send(message):
+            if (
+                message["type"] == "http.response.body"
+                and message.get("more_body", False)
+            ):
+                chunks["n"] += 1
+            await send(message)
+
+        await inner(scope, receive, counting_send)
+
+    with TestClient(counting, base_url="http://127.0.0.1:4304") as c2:
+        p2 = c2.post("/api/projects", json={"name": "Chunked"}).json()["id"]
+        c2.post(f"/api/projects/{p2}/tasks", json={"title": "t"})
+        r2 = c2.post(
+            f"/api/projects/{p2}/tasks/1/attachments",
+            files={"file": ("big.md", payload, "text/markdown")},
+        )
+        assert r2.status_code == 201
+        got2 = c2.get(f"/api/attachments/{r2.json()['id']}")
+        assert got2.status_code == 200
+        assert got2.content == payload
+
+    # 3 MiB payload with the 1 MiB chunk constant: the body is genuinely
+    # streamed in several chunks, not one.
+    assert chunks["n"] >= 2
+
+
+def test_attachment_download_concurrency_capped(client, pid, monkeypatch):
+    """#96 (decision B): the per-app semaphore caps concurrent in-flight
+    attachment downloads. ``2 * cap`` concurrent GETs of one ~2 MiB
+    attachment, with a 50 ms overlap window inside the read (which runs
+    while the slot is held), must never exceed ``cap`` concurrent
+    ``get_attachment`` calls — while every response stays byte-identical."""
+    payload = b"y" * (2 * 1024 * 1024)
+    client.post(f"/api/projects/{pid}/tasks", json={"title": "t"})
+    r = client.post(
+        f"/api/projects/{pid}/tasks/1/attachments",
+        files={"file": ("big.md", payload, "text/markdown")},
+    )
+    assert r.status_code == 201
+    att_id = r.json()["id"]
+
+    lock = threading.Lock()
+    in_flight = 0
+    peak = 0
+    original = Store.get_attachment
+
+    def spy(self, attachment_id):
+        nonlocal in_flight, peak
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        try:
+            # Widen the overlap window; the sleep runs while the slot is
+            # held (the slot is held across read + stream).
+            time.sleep(0.05)
+            return original(self, attachment_id)
+        finally:
+            with lock:
+                in_flight -= 1
+
+    monkeypatch.setattr(Store, "get_attachment", spy)
+
+    n = 2 * ATTACHMENT_DOWNLOAD_CONCURRENCY
+    # One TestClient (one portal loop, the semaphore's loop) driven from a
+    # thread pool: all GETs run as concurrent tasks on the same loop.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
+        responses = list(
+            pool.map(lambda _: client.get(f"/api/attachments/{att_id}"), range(n))
+        )
+
+    assert all(resp.status_code == 200 for resp in responses)
+    assert all(resp.content == payload for resp in responses)
+    # The hard guarantee: reads are capped at the concurrency limit.
+    assert peak <= ATTACHMENT_DOWNLOAD_CONCURRENCY
+    # Sanity: overlap actually happened (without the cap the 50 ms sleeps
+    # would overlap well beyond 2).
+    assert peak >= 2
 
 
 def test_task_types_over_api(client):

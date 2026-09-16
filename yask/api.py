@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import ipaddress
 import re
@@ -9,8 +10,9 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import anyio
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -44,6 +46,19 @@ CSP = (
 # <script> even if Content-Disposition were lost or a consumer
 # rendered the response directly.
 ATTACHMENT_CSP = "sandbox; default-src 'none'"
+
+# Bounded attachment downloads (task #96, decision B): GET
+# /api/attachments/{id} streams the stored bytes through a
+# StreamingResponse instead of building one in-memory Response, and a
+# per-app semaphore caps how many downloads read their blob at once.
+# Worst-case in-flight memory is then K blobs (each <= 10 MB) instead
+# of one per concurrent request; waiting requests park as coroutines
+# holding no bytes.
+ATTACHMENT_DOWNLOAD_CONCURRENCY = 4
+# Stream slice size: a 10 MB attachment streams as 10 chunks, keeping
+# time-to-first-byte low without a per-request copy beyond one blob +
+# one transient chunk.
+ATTACHMENT_STREAM_CHUNK = 1024 * 1024
 
 
 # -- Host/Origin checks (task #85: CSRF / DNS rebinding) --------------------
@@ -227,6 +242,16 @@ class TelegramUserPasswordIn(BaseModel):
 def create_app(db_path: str | Path, allow_remote: bool = False) -> FastAPI:
     db_ = Db(db_path)
     app = FastAPI(title="yask", version="0.1.0")
+
+    # Per-app download slots (task #96): caps concurrent in-flight
+    # attachment downloads so N concurrent GETs never hold N full blobs.
+    # Per-app on purpose — each test fixture and the server get their own
+    # semaphore. NOTE: an asyncio.Semaphore binds to the first event loop
+    # that uses it, so one app instance must be driven from a single loop
+    # (true in production — one uvicorn loop per app — and in tests, where
+    # each app is used by exactly one TestClient). Cross-loop misuse fails
+    # loudly rather than silently.
+    download_slots = asyncio.Semaphore(ATTACHMENT_DOWNLOAD_CONCURRENCY)
 
     # NOTE (task #85): middleware order matters. Starlette stacks these
     # decorators in reverse code order, so ``origin_host_check`` must be
@@ -482,33 +507,60 @@ def create_app(db_path: str | Path, allow_remote: bool = False) -> FastAPI:
         )
 
     @app.get("/api/attachments/{attachment_id}")
-    def api_get_attachment(attachment_id: int):
-        def run():
-            meta, data = store().get_attachment(attachment_id)
-            # SVG is the only executable type in the attachment allowlist:
-            # force a download so direct navigation cannot render (and
-            # script) it, and give every attachment the inert CSP so the
-            # bytes are never an executable document this app serves
-            # (task #84 owns the download disposition and the CSP; the
-            # global security headers are task #86's). The web UI viewer
-            # fetches the blob and renders it, so it is unaffected by the
-            # disposition.
-            disposition = (
-                "attachment" if meta["content_type"] == "image/svg+xml"
-                else "inline"
+    async def api_get_attachment(attachment_id: int):
+        # (task #96, decision B) The blob is read once off the event loop
+        # and streamed back in ATTACHMENT_STREAM_CHUNK slices, so each
+        # in-flight download holds one full blob (<= 10 MB) plus one
+        # transient chunk, and the semaphore above bounds how many blobs
+        # exist at once. The full-bytes store methods stay as-is: the MCP
+        # server and the Telegram bot need the complete content and are
+        # single-reader paths.
+        #
+        # The read happens in the handler body, not the generator, so a
+        # missing attachment still raises HTTPException(404) before
+        # response headers are sent; anyio.to_thread.run_sync preserves
+        # the threading semantics the sync endpoint had (FastAPI ran it in
+        # its thread pool; an async handler must not block the loop).
+        await download_slots.acquire()
+        try:
+            meta, data = await anyio.to_thread.run_sync(
+                lambda: handle(lambda: store().get_attachment(attachment_id))
             )
-            return Response(
-                content=data,
-                media_type=meta["content_type"],
-                headers={
-                    "Content-Disposition": (
-                        f'{disposition}; filename="{meta["filename"]}"'
-                    ),
-                    "Content-Security-Policy": ATTACHMENT_CSP,
-                },
-            )
+        except BaseException:
+            # The read failed (404, …): the slot is not handed to the
+            # generator below, so release it before re-raising.
+            download_slots.release()
+            raise
+        # SVG is the only executable type in the attachment allowlist:
+        # force a download so direct navigation cannot render (and
+        # script) it, and give every attachment the inert CSP so the
+        # bytes are never an executable document this app serves
+        # (task #84 owns the download disposition and the CSP; the
+        # global security headers are task #86's). The web UI viewer
+        # fetches the blob and renders it, so it is unaffected by the
+        # disposition.
+        disposition = (
+            "attachment" if meta["content_type"] == "image/svg+xml" else "inline"
+        )
 
-        return handle(run)
+        def stream():
+            try:
+                for offset in range(0, len(data), ATTACHMENT_STREAM_CHUNK):
+                    yield data[offset:offset + ATTACHMENT_STREAM_CHUNK]
+            finally:
+                # The generator owns the slot from here on: release it on
+                # normal completion and when Starlette closes the generator
+                # on client disconnect.
+                download_slots.release()
+
+        return StreamingResponse(
+            stream(),
+            media_type=meta["content_type"],
+            headers={
+                "Content-Disposition": f'{disposition}; filename="{meta["filename"]}"',
+                "Content-Security-Policy": ATTACHMENT_CSP,
+            },
+        )
 
     _route("DELETE", "/api/attachments/{attachment_id}", "delete_attachment",
            name="api_delete_attachment")
