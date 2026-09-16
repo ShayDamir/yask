@@ -5,6 +5,7 @@ never called.
 """
 
 import asyncio
+import html
 import json
 import re
 import sqlite3
@@ -2267,6 +2268,171 @@ def test_task_store_failure_replies_and_recovers(store, monkeypatch):
 def test_help_mentions_task_and_attachment():
     assert "/task" in telegram_bot.HELP_TEXT
     assert "/attachment" in telegram_bot.HELP_TEXT
+
+
+# --- rich rendering over corpus-shaped markdown ------------------------------
+# A representative slice of the real documents the bot renders as rich
+# messages (the plan.md / session-summary.md / review.md / investigation.md
+# attachments on epic #97 and its subtasks #99–#105): H1/H2 headings, a
+# table with a |---| separator, - and 1. list items, a fenced code block
+# with a language tag, inline #123-style task references, a line-leading
+# #102 reference (a #tag heading-promotion candidate), a blockquote, a
+# link, bold/italic/strike, and snake_case identifiers.
+CORPUS_SHAPE_MD = """\
+# Session summary — #103 Render small markdown attachments
+
+**State:** In progress — *styling can shift* but ~~no~~ no content loss.
+
+## What changed
+
+- `attachment_reply`: now returns `Union[str, FileReply, RichReply]`
+- The `_message_is_rich` presence check is shared with the re-render path
+1. **Verify `Message.rich_message` is delivered in callback updates**
+2. The flip is #106
+
+| Component | Change |
+|---|---|
+| `RichMessageEdit` frozen dataclass (markdown + reply_markup) | L3166 |
+
+#102 (rich `format_task_view`) are Done.
+
+```python
+def attachment_reply(meta, data, task):
+    # The reply for one attachment.
+    return RichReply(...)
+```
+
+> "Evidence (as of 2026-09-16): Telegram Web still cannot render rich
+> messages and the failure is client-side."
+
+See [the macOS forward/group bug](https://bugs.telegram.org/c/62896) for
+details; inline refs like #123 and #93794 stay literal.
+"""
+
+
+def _structure_counts(md):
+    """(headings, ul items, ol items, table rows, fence lines) in ``md``."""
+    lines = md.split("\n")
+    return (
+        sum(1 for l in lines if re.match(r"^#{1,6} ", l)),
+        sum(1 for l in lines if re.match(r"^[-*+]\s", l)),
+        sum(1 for l in lines if re.match(r"^\d+[.)]\s", l)),
+        sum(1 for l in lines if "|" in l),
+        sum(1 for l in lines if l.startswith("```")),
+    )
+
+
+def test_rich_corpus_shape_attachment_surface():
+    """Small markdown attachment → RichReply with the raw body intact."""
+    meta = {
+        "filename": "session-summary.md",
+        "content_type": "text/markdown",
+        "size": len(CORPUS_SHAPE_MD.encode("utf-8")),
+    }
+    task = {
+        "number": 103,
+        "title": "Render small markdown attachments as rich messages",
+    }
+    reply = telegram_bot.attachment_reply(
+        meta, CORPUS_SHAPE_MD.encode("utf-8"), task
+    )
+    assert isinstance(reply, telegram_bot.RichReply)
+    # no content loss: the raw body rides the payload untruncated
+    assert CORPUS_SHAPE_MD in reply.markdown
+    assert "… (truncated" not in reply.markdown
+    # no dropped structure: the payload's counts are the body's plus the
+    # #103 context line's (which carries no structural markers)
+    context = f"#103 {task['title']} — session-summary.md"
+    assert _structure_counts(reply.markdown) == tuple(
+        a + b for a, b in zip(_structure_counts(CORPUS_SHAPE_MD),
+                              _structure_counts(context))
+    )
+
+
+def test_rich_corpus_shape_task_view_surface():
+    """The /task detail view with a corpus-shaped description → RichReply
+    with the description intact (no truncation, no dropped structure)."""
+    task = {
+        "number": 103,
+        "title": "Render small markdown attachments as rich messages",
+        "type": "Task",
+        "state": "In progress",
+        "estimate": 2.0,
+        "parent_number": 97,
+        "description": CORPUS_SHAPE_MD,
+        "prerequisites": [],
+        "attachments": [],
+    }
+    project = {"name": "yask", "id": 1}
+    reply = telegram_bot.format_task_view(task, project, [], chat_id=1)
+    assert isinstance(reply, telegram_bot.RichReply)
+    assert CORPUS_SHAPE_MD in reply.markdown
+    assert "… (truncated" not in reply.markdown
+    # the payload's structure counts are the body's plus the header block's
+    # (one H1; the State/Estimate/Parent lines carry no structural markers)
+    header = (
+        f"# {task['number']} {task['title']} — {task['type']}\n"
+        f"**State:** {task['state']}\n"
+        f"**Estimate:** {task['estimate']:g}\n"
+        f"**Parent:** #{task['parent_number']}"
+    )
+    assert _structure_counts(reply.markdown) == tuple(
+        a + b for a, b in zip(_structure_counts(CORPUS_SHAPE_MD),
+                              _structure_counts(header))
+    )
+
+
+def test_rich_corpus_shape_html_leg():
+    """The HTML fallback leg of a corpus-shaped payload: no content lost,
+    markers literal, only the supported tag set."""
+    out = telegram_bot.markdown_to_html(CORPUS_SHAPE_MD)
+    flat = html.unescape(re.sub(r"<[^>]+>", "", out))
+    # the converter contract: only the supported tag set — never
+    # h1–h6/ul/ol/li/p/br, which would 400 the whole leg
+    tags = set(re.findall(r"</?([a-zA-Z][a-zA-Z0-9]*)", out))
+    assert tags <= {
+        "strong", "em", "del", "code", "pre", "a", "blockquote",
+    }
+    # the fence body lands in <pre><code> (the language tag is consumed)
+    assert "<pre><code>def attachment_reply(meta, data, task):" in out
+    # heading/list/table markers stay literal (the degraded leg carries
+    # the structure in the markers, not in tags)
+    assert "## What changed" in out
+    assert "\n- attachment_reply" in flat
+    assert "\n1. Verify Message.rich_message" in flat
+    assert "| Component | Change |" in out
+    assert "|---|---|" in out
+    # the line-leading #102 reference and the inline refs stay literal
+    assert "#102 (rich format_task_view) are Done." in flat
+    assert "#123 and #93794 stay literal." in flat
+    # snake_case identifiers are never emphasis (word-boundary guarded)
+    assert "<code>_message_is_rich</code>" in out
+    # the inline mappings
+    assert "<strong>State:</strong>" in out
+    assert "<em>styling can shift</em>" in out
+    assert "<del>no</del>" in out
+    assert '<a href="https://bugs.telegram.org/c/62896">' in out
+    assert '<blockquote>&quot;Evidence (as of 2026-09-16):' in out
+    # no non-blank line is dropped: every word of every line (fence
+    # bodies checked against the <pre><code> blocks) survives in the
+    # tag-stripped output
+    pre_flat = html.unescape("\n".join(
+        re.findall(r"<pre><code>(.*?)</code></pre>", out, re.S)
+    ))
+    in_code = False
+    for line in CORPUS_SHAPE_MD.split("\n"):
+        if line.startswith("```"):
+            in_code = not in_code
+            continue
+        if not line.strip():
+            continue
+        target = pre_flat if in_code else flat
+        for word in re.findall(
+            r"[A-Za-z0-9_]{3,}", re.sub(r"https?://\S+", "", line)
+        ):
+            assert word in target, (
+                f"word {word!r} from line {line[:60]!r} lost in the HTML leg"
+            )
 
 
 # --- markdown_to_html (HTML fallback converter) ------------------------------

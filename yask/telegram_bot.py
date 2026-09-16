@@ -21,13 +21,16 @@ active states — Todo, Planning, In progress and Review — grouped by
 project and state, with one inline button per task),
 ``/task <project> <number|title>`` (one task's details — state, estimate,
 description, prerequisites, attachments and recent history — the task
-found by number or by case-insensitive title),
+found by number or by case-insensitive title; the detail view is sent
+as a rich message),
 ``/backlog [project]`` (the tasks in the Backlog state, grouped by
 project, with one inline button per task), ``/attachment
- <project> <task> <id>`` (shows one of the task's attachments — small
+<project> <task> <id>`` (shows one of the task's attachments — small
 markdown (<16 KB) inline as a Rich Message, small plain text inline as a
 plain message, images as a photo, larger content as a file, via
-``sendRichMessage``/``sendDocument``/``sendPhoto``),
+``sendRichMessage``/``sendDocument``/``sendPhoto`` — a failed rich send
+degrades to HTML, then plain text, and ``YASK_TELEGRAM_RICH=0``
+disables rich messages — plain text only; rich is on by default),
 ``/move <project> <task> <state>`` (moves a task to another workflow
 state — a move that would pull prerequisites along is confirmed with
 inline buttons first, nothing is applied before the confirmation) and
@@ -68,11 +71,14 @@ progress bar hangs until it is answered) and an unrecognized payload gets
 a toast instead of a crash; the ``p:`` payload (the per-project buttons of
 ``/projects``) opens the project's task list view as a new message, the
 ``t:`` payload (the per-task buttons of ``/tasks``) opens the task's detail
-view as a new message (the detail's keyboard also carries one state
-button per other workflow state), the ``a:`` payload (the per-attachment
+view as a new message — the detail view is sent as a rich message (the
+detail's keyboard also carries one state button per other workflow
+state), the ``a:`` payload (the per-attachment
 buttons of the ``/task`` view) shows the attachment in the chat — small
 markdown (<16 KB) inline as a Rich Message, small plain text inline as a
-plain message, images as a photo, larger content as a file — the
+plain message, images as a photo, larger content as a file — a failed
+rich send degrades to HTML, then plain text, and ``YASK_TELEGRAM_RICH=0``
+disables rich messages — plain text only; rich is on by default — the
 ``s:``/``u:`` payload (the
 subscribe/unsubscribe toggle of the ``/task`` view) toggles the chat's
 subscription and flips the button in place, and the ``m:``/``c:``/``x:``
@@ -2497,7 +2503,9 @@ def _message_is_rich(callback_query: dict) -> bool:
     Presence check only — the ``m:``/``c:``/``x:`` handlers re-render the
     view from the store and never need the received content (which is a
     parsed block tree, not markdown — the reason the ``s:``/``u:``
-    toggle's in-place echo is #106).
+    toggle's in-place echo is #106). Note for future readers of a
+    message's content: the ``rich_message`` field is the one to use —
+    a text-based read-back of a rich message sees nothing.
     """
     return isinstance(
         (callback_query.get("message") or {}).get("rich_message"), dict
@@ -2790,9 +2798,10 @@ def make_callback_dispatch(
         # and only flips the pressed toggle button; an inaccessible
         # message (no text) gets the toast only. A Rich Message original
         # also carries no ``text`` (its content is a parsed block tree,
-        # Bot API 10.1), so on a rich view the press bails to the toast
-        # only and the pressed button stays stale — echoing the rich
-        # content with the flipped keyboard is #106.
+        # Bot API 10.1 — the ``rich_message`` field is the one to read,
+        # and the flip is #106), so on a rich view the press bails to
+        # the toast only and the pressed button stays stale — echoing
+        # the rich content with the flipped keyboard is #106.
         message = callback_query.get("message") or {}
         text = message.get("text")
         if text is None:

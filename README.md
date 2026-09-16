@@ -111,10 +111,12 @@ from `TELEGRAM_BOT_TOKEN` (get one from @BotFather) and answers `/start`,
 In progress and Review — grouped by project and state), `/task
 <project> <number|title>` (one task's details — state, estimate,
 description, prerequisites, attachments and recent history — the task
-found by number or by title), `/backlog [project]` (the tasks in the
-Backlog state, grouped by project), `/attachment <project> <task> <id>`
-(shows a task's attachment — small markdown/plain text (<16 KB) inline as
-a message, images as a photo, larger content as a file) and `/move
+found by number or by title, sent as a rich message), `/backlog
+[project]` (the tasks in the Backlog state, grouped by project),
+`/attachment <project> <task> <id>` (shows a task's attachment — small
+markdown (<16 KB) inline as a rich message (Bot API 10.1
+`sendRichMessage`), small plain text inline as a plain message, images
+as a photo, larger content as a file) and `/move
 <project> <task> <state>` (moves a task to another state; a move that
 would pull prerequisites along asks for confirmation via inline buttons
  first), `/describe <project> <number|title> <description>` (sets —
@@ -128,7 +130,11 @@ remaining words name the type) and `/attach <project>
 <number|title>` (attach a file to a task: send a document or a photo to
 the bot captioned `/attach <project> <number|title>` — the bot downloads
 the file and attaches it; allowed types are markdown/plain text and
-png/jpeg/gif/webp/svg images, 10 MB max). A chat can
+png/jpeg/gif/webp/svg images, 10 MB max). The rich surfaces (the
+`/task` detail view and small markdown attachments) degrade to HTML,
+then plain text, if the rich send fails (or the Bot API server has no
+`sendRichMessage`); set `YASK_TELEGRAM_RICH=0` to send plain text only
+— rich is on by default. A chat can
 `/subscribe [project]` to receive
 notifications about
 every task state change in that project, and `/unsubscribe [project]` to
