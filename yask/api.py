@@ -446,10 +446,7 @@ def create_app(db_path: str | Path, allow_remote: bool = False) -> FastAPI:
         data = body.model_dump(exclude_unset=True)
 
         def run():
-            kwargs = {k: v for k, v in data.items() if k != "parent_number"}
-            if "parent_number" in data:
-                kwargs["parent_number"] = data["parent_number"]
-            return store().update_task(project_id, number, **kwargs)
+            return store().update_task(project_id, number, **data)
 
         return handle(run)
 
