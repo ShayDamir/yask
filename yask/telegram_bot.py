@@ -639,7 +639,7 @@ def _split_project(
     """Split argument words into a project reference and the rest.
 
     Walks the words longest-prefix first and resolves each prefix as a
-    project (case-insensitive name, then integer id — the same rules as
+    project (numeric id, then case-insensitive name — the same rules as
     ``/tasks``); the longest prefix that resolves wins, and everything after
     it is the remaining argument words. When no prefix resolves, the first
     word is kept as the failed reference so the not-found reply can quote
@@ -662,16 +662,16 @@ def _human_size(n: int) -> str:
 
 
 def _resolve_project(store: Store, arg: str) -> Optional[dict]:
-    """Resolve a project reference: case-insensitive name match, then id."""
-    arg = arg.strip()
-    projects = store.list_projects()
-    for p in projects:
-        if p["name"].lower() == arg.lower():
-            return p
-    for p in projects:
-        if str(p["id"]) == arg:
-            return p
-    return None
+    """Resolve a project reference to its project dict, or None.
+
+    One canonical resolver — :meth:`Store.resolve_project` (numeric id,
+    then case-insensitive name) — with the store's ``NotFound`` mapped to
+    None so command views can answer with their own not-found text.
+    """
+    try:
+        return store.resolve_project(arg)
+    except NotFound:
+        return None
 
 
 def _task_sections(tasks: list[dict]) -> list[tuple[str, list[dict]]]:

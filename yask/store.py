@@ -252,6 +252,33 @@ class Store:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def resolve_project(self, name_or_id) -> dict:
+        """Resolve a project by name (case-insensitive) or numeric id.
+
+        Accepts a project name (case-insensitive), a numeric id, or a numeric
+        string; a numeric value is tried as an id first and falls back to a
+        case-insensitive name match, so a project named "123" still resolves
+        when no id 123 exists. Raises NotFound when the reference does not
+        resolve, ValidationError for a boolean.
+        """
+        if isinstance(name_or_id, bool):
+            raise ValidationError(
+                f"invalid project '{name_or_id}': expected a name or id"
+            )
+        if isinstance(name_or_id, int):
+            return dict(self._get_project(name_or_id))
+        text = str(name_or_id).strip()
+        if text.isdigit():
+            try:
+                return dict(self._get_project(int(text)))
+            except NotFound:
+                pass  # not a numeric id; fall through to case-insensitive name match
+        key = text.lower()
+        for p in self.list_projects():
+            if p["name"].lower() == key:
+                return p
+        raise NotFound(f"project '{name_or_id}' not found")
+
     def list_project_overviews(self) -> list[dict]:
         """Per-project task-count overview (the bot's ``/projects`` view).
 

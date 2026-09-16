@@ -41,29 +41,6 @@ def _wrap(fn):
     return runner
 
 
-def _resolve_project(store: Store, project) -> int:
-    """Resolve a project identity (name or numeric id) to its project id.
-
-    Accepts a project name (case-insensitive) or a numeric id; a numeric
-    string is also accepted. Raises a domain error when it cannot resolve.
-    """
-    if isinstance(project, bool):
-        raise ValidationError(f"invalid project '{project}': expected a name or id")
-    if isinstance(project, int):
-        return store._get_project(project)["id"]
-    text = str(project).strip()
-    if text.isdigit():
-        try:
-            return store._get_project(int(text))["id"]
-        except NotFound:
-            pass  # not a numeric id; fall through to case-insensitive name match
-    key = text.lower()
-    for p in store.list_projects():
-        if p["name"].lower() == key:
-            return p["id"]
-    raise NotFound(f"project '{project}' not found")
-
-
 def _project_arg(store: Store):
     """Let a project-scoped tool identify its project by name or id.
 
@@ -85,7 +62,7 @@ def _project_arg(store: Store):
                 args = args[1:]
             if "project" not in kwargs:
                 raise TypeError("missing required argument 'project'")
-            kwargs["project_id"] = _resolve_project(store, kwargs.pop("project"))
+            kwargs["project_id"] = store.resolve_project(kwargs.pop("project"))["id"]
             return fn(*args, **kwargs)
 
         runner.__signature__ = new_sig
@@ -127,6 +104,19 @@ def _read_attachment_file(file_path: str) -> tuple[str, bytes, str]:
             f"cannot infer content type from extension '{path.suffix}'; pass content_type explicitly"
         )
     return path.name, path.read_bytes(), content_type
+
+
+def _attachment_response(meta: dict, data: bytes):
+    """One MCP content reply for a (meta, data) attachment pair.
+
+    Markdown/text attachments come back as a JSON object with the decoded
+    text in the "text" field. Images come back as metadata plus a native
+    MCP image block so the agent can view them.
+    """
+    if meta["content_type"].startswith("text/"):
+        return {**meta, "text": data.decode("utf-8", errors="replace")}
+    fmt = meta["content_type"].split("/", 1)[1]
+    return [TextContent(type="text", text=json.dumps(meta)), Image(data=data, format=fmt)]
 
 
 # Data-driven registration for the mechanical pass-through tools: one line
@@ -431,11 +421,7 @@ def build_server(store: Store) -> FastMCP:
         text in the "text" field. Images come back as metadata plus a native
         MCP image block so the agent can view them.
         """
-        meta, data = store.get_attachment(attachment_id)
-        if meta["content_type"].startswith("text/"):
-            return {**meta, "text": data.decode("utf-8", errors="replace")}
-        fmt = meta["content_type"].split("/", 1)[1]
-        return [TextContent(type="text", text=json.dumps(meta)), Image(data=data, format=fmt)]
+        return _attachment_response(*store.get_attachment(attachment_id))
 
     @mcp.tool()
     @_wrap
@@ -448,11 +434,7 @@ def build_server(store: Store) -> FastMCP:
         MCP image block. "Last" is the most recently created attachment; if it
         is not useful, request a specific one by id with get_attachment.
         """
-        meta, data = store.last_attachment(project_id, number)
-        if meta["content_type"].startswith("text/"):
-            return {**meta, "text": data.decode("utf-8", errors="replace")}
-        fmt = meta["content_type"].split("/", 1)[1]
-        return [TextContent(type="text", text=json.dumps(meta)), Image(data=data, format=fmt)]
+        return _attachment_response(*store.last_attachment(project_id, number))
 
     @mcp.tool()
     @_wrap

@@ -26,6 +26,34 @@ def test_task_numbers_are_per_project(store):
     assert store.list_tasks(p2)[0]["title"] == "b1"
 
 
+def test_resolve_project_by_name_case_insensitive(store, project):
+    assert store.resolve_project("demo")["id"] == project["id"]
+    assert store.resolve_project("DEMO")["id"] == project["id"]
+    assert store.resolve_project("  Demo  ")["id"] == project["id"]
+
+
+def test_resolve_project_by_id(store, project):
+    assert store.resolve_project(project["id"])["name"] == project["name"]
+    assert store.resolve_project(str(project["id"]))["name"] == project["name"]
+
+
+def test_resolve_project_numeric_name_when_no_matching_id(store):
+    p = store.create_project("123")
+    resolved = store.resolve_project("123")
+    assert resolved["id"] == p["id"]
+    assert resolved["name"] == "123"
+
+
+def test_resolve_project_unknown_raises_not_found(store, project):
+    with pytest.raises(NotFound):
+        store.resolve_project("no-such-project")
+
+
+def test_resolve_project_boolean_rejected(store, project):
+    with pytest.raises(ValidationError):
+        store.resolve_project(True)
+
+
 def test_numbers_never_reused_after_delete(store, project):
     pid = project["id"]
     a = store.create_task(pid, "a")
