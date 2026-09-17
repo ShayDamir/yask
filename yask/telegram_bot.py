@@ -701,6 +701,91 @@ def _task_sections(tasks: list[dict]) -> list[tuple[str, list[dict]]]:
     return sections
 
 
+def _single_section(tasks: list[dict]) -> list[tuple[Optional[str], list[dict]]]:
+    """One unlabelled section covering all of a project's tasks.
+
+    The :func:`_task_sections` counterpart for views that list a project's
+    tasks flat (no state grouping): the whole list as a single section with
+    a ``None`` label, so the shared board builder emits the tasks directly
+    without a state header.
+    """
+    return [(None, tasks)]
+
+
+def _build_board_view(
+    store: Store,
+    project_arg: Optional[str],
+    chat_id: Optional[int],
+    *,
+    header: str,
+    fetch_fn: Callable[[int], list[dict]],
+    group_fn: Callable[
+        [list[dict]], list[tuple[Optional[str], list[dict]]]
+    ],
+) -> Reply:
+    """Shared skeleton for the per-task board list views.
+
+    The ``/tasks`` (active states, grouped), ``/backlog``, and ``/blocked``
+    views all resolve-or-list projects, then render one ``t:<project-id>:
+    <number>`` keyboard row per task in reading order plus the final
+    Main-menu row, replying with :class:`KeyboardReply` (no chat) or
+    :class:`RichReply` (chat_id present). This builder owns that skeleton;
+    the views differ only in their ``header`` (the ``# <header>`` markdown
+    block, the ``<header>:`` plain line, and the ``<header>:\\n(none)``
+    empty reply), the store's ``fetch_fn`` (bound ``list_in_progress`` /
+    ``list_backlog`` / ``list_blocked``), and the ``group_fn`` that cuts a
+    project's tasks into sections. A section whose label is not ``None``
+    first emits ``**<label>:**`` in the markdown block and ``  <label>:``
+    in the plain lines; a ``None`` label emits its tasks directly. An
+    unresolvable ``project_arg`` yields :func:`_project_not_found` with the
+    argument quoted verbatim.
+    """
+    if project_arg is None:
+        projects = []
+        for p in store.list_projects():
+            tasks = fetch_fn(p["id"])
+            if tasks:
+                projects.append((p, tasks))
+        if not projects:
+            return f"{header}:\n(none)"
+    else:
+        project = _resolve_project(store, project_arg)
+        if project is None:
+            return _project_not_found(project_arg)
+        tasks = fetch_fn(project["id"])
+        if not tasks:
+            return f"{header}:\n(none)"
+        projects = [(project, tasks)]
+
+    blocks = [f"# {header}"]
+    lines = [f"{header}:"]
+    rows = []
+    for p, tasks in projects:
+        block = f"**{p['id']}. {p['name']}**"
+        lines.append(f"{p['id']}. {p['name']}")
+        for label, section_tasks in group_fn(tasks):
+            if label is not None:
+                block += f"\n**{label}:**"
+                lines.append(f"  {label}:")
+            for t in section_tasks:
+                block += f"\n- #{t['number']} {t['title']}"
+                lines.append(f"    #{t['number']} {t['title']}")
+                rows.append(
+                    [
+                        {
+                            "text": f"#{t['number']} {t['title']}",
+                            "callback_data": f"t:{p['id']}:{t['number']}",
+                        }
+                    ]
+                )
+        blocks.append(block)
+    rows.append([_main_menu_button()])
+    keyboard = {"inline_keyboard": rows}
+    if chat_id is None:
+        return KeyboardReply("\n".join(lines), keyboard)
+    return RichReply("\n\n".join(blocks), keyboard)
+
+
 def tasks_view(
     store: Store,
     project_arg: Optional[str] = None,
@@ -744,49 +829,14 @@ def tasks_view(
     HTML/plain legs re-truncate at send time (the same documented
     philosophy as :func:`format_task_view`).
     """
-    if project_arg is None:
-        projects = []
-        for p in store.list_projects():
-            tasks = store.list_in_progress(p["id"])
-            if tasks:
-                projects.append((p, tasks))
-        if not projects:
-            return "Tasks in progress:\n(none)"
-    else:
-        project = _resolve_project(store, project_arg)
-        if project is None:
-            return _project_not_found(project_arg)
-        tasks = store.list_in_progress(project["id"])
-        if not tasks:
-            return "Tasks in progress:\n(none)"
-        projects = [(project, tasks)]
-
-    blocks = ["# Tasks in progress"]
-    lines = ["Tasks in progress:"]
-    rows = []
-    for p, tasks in projects:
-        block = f"**{p['id']}. {p['name']}**"
-        lines.append(f"{p['id']}. {p['name']}")
-        for state, in_state in _task_sections(tasks):
-            block += f"\n**{state}:**"
-            lines.append(f"  {state}:")
-            for t in in_state:
-                block += f"\n- #{t['number']} {t['title']}"
-                lines.append(f"    #{t['number']} {t['title']}")
-                rows.append(
-                    [
-                        {
-                            "text": f"#{t['number']} {t['title']}",
-                            "callback_data": f"t:{p['id']}:{t['number']}",
-                        }
-                    ]
-                )
-        blocks.append(block)
-    rows.append([_main_menu_button()])
-    keyboard = {"inline_keyboard": rows}
-    if chat_id is None:
-        return KeyboardReply("\n".join(lines), keyboard)
-    return RichReply("\n\n".join(blocks), keyboard)
+    return _build_board_view(
+        store,
+        project_arg,
+        chat_id,
+        header="Tasks in progress",
+        fetch_fn=store.list_in_progress,
+        group_fn=_task_sections,
+    )
 
 
 def backlog_view(
@@ -829,46 +879,14 @@ def backlog_view(
     HTML/plain legs re-truncate at send time (the same documented
     philosophy as :func:`format_task_view`).
     """
-    if project_arg is None:
-        projects = []
-        for p in store.list_projects():
-            tasks = store.list_backlog(p["id"])
-            if tasks:
-                projects.append((p, tasks))
-        if not projects:
-            return "Backlog:\n(none)"
-    else:
-        project = _resolve_project(store, project_arg)
-        if project is None:
-            return _project_not_found(project_arg)
-        tasks = store.list_backlog(project["id"])
-        if not tasks:
-            return "Backlog:\n(none)"
-        projects = [(project, tasks)]
-
-    blocks = ["# Backlog"]
-    lines = ["Backlog:"]
-    rows = []
-    for p, tasks in projects:
-        block = f"**{p['id']}. {p['name']}**"
-        lines.append(f"{p['id']}. {p['name']}")
-        for t in tasks:
-            block += f"\n- #{t['number']} {t['title']}"
-            lines.append(f"    #{t['number']} {t['title']}")
-            rows.append(
-                [
-                    {
-                        "text": f"#{t['number']} {t['title']}",
-                        "callback_data": f"t:{p['id']}:{t['number']}",
-                    }
-                ]
-            )
-        blocks.append(block)
-    rows.append([_main_menu_button()])
-    keyboard = {"inline_keyboard": rows}
-    if chat_id is None:
-        return KeyboardReply("\n".join(lines), keyboard)
-    return RichReply("\n\n".join(blocks), keyboard)
+    return _build_board_view(
+        store,
+        project_arg,
+        chat_id,
+        header="Backlog",
+        fetch_fn=store.list_backlog,
+        group_fn=_single_section,
+    )
 
 
 def blocked_view(
@@ -911,46 +929,14 @@ def blocked_view(
     HTML/plain legs re-truncate at send time (the same documented
     philosophy as :func:`format_task_view`).
     """
-    if project_arg is None:
-        projects = []
-        for p in store.list_projects():
-            tasks = store.list_blocked(p["id"])
-            if tasks:
-                projects.append((p, tasks))
-        if not projects:
-            return "Blocked:\n(none)"
-    else:
-        project = _resolve_project(store, project_arg)
-        if project is None:
-            return _project_not_found(project_arg)
-        tasks = store.list_blocked(project["id"])
-        if not tasks:
-            return "Blocked:\n(none)"
-        projects = [(project, tasks)]
-
-    blocks = ["# Blocked"]
-    lines = ["Blocked:"]
-    rows = []
-    for p, tasks in projects:
-        block = f"**{p['id']}. {p['name']}**"
-        lines.append(f"{p['id']}. {p['name']}")
-        for t in tasks:
-            block += f"\n- #{t['number']} {t['title']}"
-            lines.append(f"    #{t['number']} {t['title']}")
-            rows.append(
-                [
-                    {
-                        "text": f"#{t['number']} {t['title']}",
-                        "callback_data": f"t:{p['id']}:{t['number']}",
-                    }
-                ]
-            )
-        blocks.append(block)
-    rows.append([_main_menu_button()])
-    keyboard = {"inline_keyboard": rows}
-    if chat_id is None:
-        return KeyboardReply("\n".join(lines), keyboard)
-    return RichReply("\n\n".join(blocks), keyboard)
+    return _build_board_view(
+        store,
+        project_arg,
+        chat_id,
+        header="Blocked",
+        fetch_fn=store.list_blocked,
+        group_fn=_single_section,
+    )
 
 
 def menu_view() -> KeyboardReply:
