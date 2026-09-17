@@ -795,13 +795,7 @@ class Store:
             params,
         ).fetchall():
             attachment_map.setdefault(a["task_id"], []).append(
-                {
-                    "id": a["id"],
-                    "filename": a["filename"],
-                    "content_type": a["content_type"],
-                    "size": a["size"],
-                    "created_at": a["created_at"],
-                }
+                {"id": a["id"], **self._attachment_meta(a)}
             )
         label_map: dict[int, list[dict]] = {}
         for l in self.conn.execute(
@@ -1670,6 +1664,34 @@ class Store:
         )
         return cleaned or "attachment"
 
+    @staticmethod
+    def _attachment_meta(row) -> dict:
+        """Canonical attachment metadata shape shared by every read path.
+
+        Takes any row-like mapping with filename/content_type/size/created_at
+        keys (sqlite3.Row or dict) and returns
+        ``{filename, content_type, size, created_at}``. Callers add ``id``
+        themselves, preserving each call site's existing key order.
+        """
+        return {
+            "filename": row["filename"],
+            "content_type": row["content_type"],
+            "size": row["size"],
+            "created_at": row["created_at"],
+        }
+
+    def _fetch_attachment(
+        self, where_clause: str, args: tuple, not_found: str
+    ) -> tuple[dict, bytes]:
+        a = self.conn.execute(
+            f"SELECT filename, content_type, length(data) AS size, created_at, data "
+            f"FROM attachments WHERE {where_clause}",
+            args,
+        ).fetchone()
+        if a is None:
+            raise NotFound(not_found)
+        return self._attachment_meta(a), bytes(a["data"])
+
     def add_attachment(
         self, project_id: int, number: int, filename: str, content_type: str, data: bytes
     ) -> dict:
@@ -1691,24 +1713,20 @@ class Store:
         # Build the response from the in-memory values just inserted — the
         # INSERT stores exactly these (no DB-side transforms), so no
         # post-INSERT SELECT * is needed and the BLOB is never re-read.
-        return {
-            "id": cur.lastrowid,
-            "filename": filename,
-            "content_type": content_type,
-            "size": len(data),
-            "created_at": now,
-        }
+        meta = self._attachment_meta(
+            {
+                "filename": filename,
+                "content_type": content_type,
+                "size": len(data),
+                "created_at": now,
+            }
+        )
+        return {"id": cur.lastrowid, **meta}
 
     def list_attachments(self, project_id: int, number: int) -> list[dict]:
         row = self._get_task(project_id, number)
         return [
-            {
-                "id": a["id"],
-                "filename": a["filename"],
-                "content_type": a["content_type"],
-                "size": a["size"],
-                "created_at": a["created_at"],
-            }
+            {"id": a["id"], **self._attachment_meta(a)}
             for a in self.conn.execute(
                 "SELECT id, filename, content_type, length(data) AS size, "
                 "created_at FROM attachments WHERE task_id = ? ORDER BY id",
@@ -1717,21 +1735,8 @@ class Store:
         ]
 
     def get_attachment(self, attachment_id: int) -> tuple[dict, bytes]:
-        a = self.conn.execute(
-            "SELECT filename, content_type, length(data) AS size, created_at, data "
-            "FROM attachments WHERE id = ?",
-            (attachment_id,),
-        ).fetchone()
-        if a is None:
-            raise NotFound(f"attachment {attachment_id} not found")
-        return (
-            {
-                "filename": a["filename"],
-                "content_type": a["content_type"],
-                "size": a["size"],
-                "created_at": a["created_at"],
-            },
-            bytes(a["data"]),
+        return self._fetch_attachment(
+            "id = ?", (attachment_id,), f"attachment {attachment_id} not found"
         )
 
     def get_task_attachment(
@@ -1746,21 +1751,10 @@ class Store:
         copied or typo'd id can never leak a foreign attachment.
         """
         row = self._get_task(project_id, number)
-        a = self.conn.execute(
-            "SELECT filename, content_type, length(data) AS size, created_at, data "
-            "FROM attachments WHERE id = ? AND task_id = ?",
+        return self._fetch_attachment(
+            "id = ? AND task_id = ?",
             (attachment_id, row["id"]),
-        ).fetchone()
-        if a is None:
-            raise NotFound(f"attachment {attachment_id} not found on task #{number}")
-        return (
-            {
-                "filename": a["filename"],
-                "content_type": a["content_type"],
-                "size": a["size"],
-                "created_at": a["created_at"],
-            },
-            bytes(a["data"]),
+            f"attachment {attachment_id} not found on task #{number}",
         )
 
     def last_attachment(self, project_id: int, number: int) -> tuple[dict, bytes]:
