@@ -756,9 +756,7 @@ def tasks_view(
     else:
         project = _resolve_project(store, project_arg)
         if project is None:
-            return (
-                f"Project '{project_arg}' not found. Use /projects to list projects."
-            )
+            return _project_not_found(project_arg)
         tasks = store.list_in_progress(project["id"])
         if not tasks:
             return "Tasks in progress:\n(none)"
@@ -843,9 +841,7 @@ def backlog_view(
     else:
         project = _resolve_project(store, project_arg)
         if project is None:
-            return (
-                f"Project '{project_arg}' not found. Use /projects to list projects."
-            )
+            return _project_not_found(project_arg)
         tasks = store.list_backlog(project["id"])
         if not tasks:
             return "Backlog:\n(none)"
@@ -927,9 +923,7 @@ def blocked_view(
     else:
         project = _resolve_project(store, project_arg)
         if project is None:
-            return (
-                f"Project '{project_arg}' not found. Use /projects to list projects."
-            )
+            return _project_not_found(project_arg)
         tasks = store.list_blocked(project["id"])
         if not tasks:
             return "Blocked:\n(none)"
@@ -1616,8 +1610,8 @@ def _resolve_task(store: Store, project: dict, ref: str) -> Union[str, dict]:
     matches = store.find_tasks_by_title(project["id"], ref)
     if not matches:
         if ref.isdigit():
-            return f"Task #{ref} not found in {project['name']}."
-        return f"Task '{ref}' not found in {project['name']}."
+            return _task_not_found(project["name"], ref)
+        return _task_title_not_found(project["name"], ref)
     if len(matches) > 1:
         lines = [f"Several tasks in {project['name']} match '{ref}':"]
         lines.extend(f"  #{m['number']} {m['title']} — {m['state']}" for m in matches)
@@ -1650,9 +1644,7 @@ def task_view(
     words = arg.split()
     project, rest = _split_project(store, words)
     if project is None:
-        return (
-            f"Project '{words[0]}' not found. Use /projects to list projects."
-        )
+        return _project_not_found(words[0])
     if not rest:
         return TASK_USAGE_TEXT
     task = _resolve_task(store, project, " ".join(rest))
@@ -1746,9 +1738,7 @@ def attachment_view(
     words = arg.split()
     project, rest = _split_project(store, words)
     if project is None:
-        return (
-            f"Project '{words[0]}' not found. Use /projects to list projects."
-        )
+        return _project_not_found(words[0])
     if len(rest) < 2:
         return ATTACHMENT_USAGE_TEXT
     id_ref, task_ref = rest[-1], " ".join(rest[:-1])
@@ -1756,21 +1746,15 @@ def attachment_view(
     if not isinstance(task, dict):
         return task
     if not id_ref.isdigit():
-        return (
-            f"Attachment '{id_ref}' not found on task #{task['number']} "
-            f"({project['name']}). Use /task {project['name']} {task['number']} "
-            "to list the task's attachments."
+        return _attachment_not_found(
+            project["name"], task["number"], f"'{id_ref}'"
         )
     try:
         meta, data = store.get_task_attachment(
             project["id"], task["number"], int(id_ref)
         )
     except NotFound:
-        return (
-            f"Attachment {id_ref} not found on task #{task['number']} "
-            f"({project['name']}). Use /task {project['name']} {task['number']} "
-            "to list the task's attachments."
-        )
+        return _attachment_not_found(project["name"], task["number"], id_ref)
     return attachment_reply(meta, data, task)
 
 
@@ -1890,9 +1874,7 @@ def move_view(store: Store, arg: Optional[str]) -> Reply:
     words = arg.split()
     project, rest = _split_project(store, words)
     if project is None:
-        return (
-            f"Project '{words[0]}' not found. Use /projects to list projects."
-        )
+        return _project_not_found(words[0])
     if not rest:
         return MOVE_USAGE_TEXT
     matched = _match_state_suffix(rest)
@@ -1944,9 +1926,7 @@ def add_view(store: Store, arg: Optional[str]) -> Reply:
     words = arg.split()
     project, rest = _split_project(store, words)
     if project is None:
-        return (
-            f"Project '{words[0]}' not found. Use /projects to list projects."
-        )
+        return _project_not_found(words[0])
     type_names = [t["name"] for t in store.list_task_types()]
     title_words, type_name = _match_type_suffix(rest, type_names)
     if not title_words:
@@ -2005,9 +1985,7 @@ def describe_view(store: Store, arg: Optional[str]) -> Reply:
     words = arg.split()
     project, rest = _split_project(store, words)
     if project is None:
-        return (
-            f"Project '{words[0]}' not found. Use /projects to list projects."
-        )
+        return _project_not_found(words[0])
     if not rest:
         return DESCRIBE_USAGE_TEXT
     if rest[0].isdigit():
@@ -2015,7 +1993,7 @@ def describe_view(store: Store, arg: Optional[str]) -> Reply:
         try:
             task = store.get_task(project["id"], int(rest[0]))
         except NotFound:
-            return f"Task #{rest[0]} not found in {project['name']}."
+            return _task_not_found(project["name"], rest[0])
         description = " ".join(rest[1:])
         if not description:
             return DESCRIBE_USAGE_TEXT
@@ -2040,7 +2018,7 @@ def describe_view(store: Store, arg: Optional[str]) -> Reply:
                 break
             return _resolve_task(store, project, ref)  # ambiguous
         if found is None:
-            return f"Task '{rest[0]}' not found in {project['name']}."
+            return _task_title_not_found(project["name"], rest[0])
         task, description = found
     task = store.update_task(
         project["id"], task["number"], description=description
@@ -2109,9 +2087,7 @@ def type_view(store: Store, arg: Optional[str]) -> Reply:
     words = arg.split()
     project, rest = _split_project(store, words)
     if project is None:
-        return (
-            f"Project '{words[0]}' not found. Use /projects to list projects."
-        )
+        return _project_not_found(words[0])
     if not rest:
         return type_usage_text(store)
     if rest[0].isdigit():
@@ -2119,7 +2095,7 @@ def type_view(store: Store, arg: Optional[str]) -> Reply:
         try:
             task = store.get_task(project["id"], int(rest[0]))
         except NotFound:
-            return f"Task #{rest[0]} not found in {project['name']}."
+            return _task_not_found(project["name"], rest[0])
         type_words = rest[1:]
     else:
         # Title form: the longest prefix of the remaining words that
@@ -2142,7 +2118,7 @@ def type_view(store: Store, arg: Optional[str]) -> Reply:
                 break
             return _resolve_task(store, project, ref)  # ambiguous
         if found is None:
-            return f"Task '{rest[0]}' not found in {project['name']}."
+            return _task_title_not_found(project["name"], rest[0])
         task, type_words = found
     if not type_words:
         return type_usage_text(store)
@@ -2192,7 +2168,7 @@ def subscribe_view(store: Store, chat_id: int, arg: Optional[str] = None) -> str
 
     project = _resolve_project(store, arg)
     if project is None:
-        return f"Project '{arg}' not found. Use /projects to list projects."
+        return _project_not_found(arg)
     sub = store.subscribe_project(chat_id, project["id"])
     return (
         f"Subscribed to {sub['project_name']} ({sub['project_id']}) — "
@@ -2210,7 +2186,7 @@ def unsubscribe_view(store: Store, chat_id: int, arg: str) -> str:
     """
     project = _resolve_project(store, arg)
     if project is None:
-        return f"Project '{arg}' not found. Use /projects to list projects."
+        return _project_not_found(arg)
     result = store.unsubscribe_project(chat_id, project["id"])
     if result["removed"]:
         return f"Unsubscribed from {project['name']} ({project['id']})."
@@ -2532,10 +2508,7 @@ def make_dispatch(
             return ATTACH_USAGE_TEXT
         project, rest = _split_project(store, words)
         if project is None:
-            return (
-                f"Project '{words[0]}' not found. "
-                "Use /projects to list projects."
-            )
+            return _project_not_found(words[0])
         if not rest:
             return ATTACH_USAGE_TEXT
         task = _resolve_task(store, project, " ".join(rest))
@@ -2624,25 +2597,52 @@ def make_dispatch(
     return dispatch
 
 
-def _project_not_found(project_id: int) -> str:
-    """The not-found reply for an unknown project id (all families)."""
+def _project_not_found(project_ref: Union[int, str]) -> str:
+    """The not-found reply for an unknown project reference.
+
+    The single wording definition for the project not-found reply across
+    all command families (text and callback). ``project_ref`` is the
+    user's reference — a name or id string on the text paths, the
+    callback's integer id — quoted verbatim.
+    """
     return (
-        f"Project '{project_id}' not found. "
+        f"Project '{project_ref}' not found. "
         "Use /projects to list projects."
     )
 
 
-def _task_not_found(project_name: str, number: int) -> str:
-    """The not-found reply for an unknown task number in ``project_name``."""
-    return f"Task #{number} not found in {project_name}."
+def _task_not_found(project_name: str, task_ref: Union[int, str]) -> str:
+    """The not-found reply for an unknown task number in
+    ``project_name``.
+
+    The single wording definition for the number-form task not-found
+    reply across all command families (text and callback). ``task_ref``
+    is the user's number reference (a digit string on the text paths,
+    the callback's integer) — never ``int()``-converted, so a reference
+    like ``"007"`` keeps its leading zeros.
+    """
+    return f"Task #{task_ref} not found in {project_name}."
+
+
+def _task_title_not_found(project_name: str, ref: str) -> str:
+    """The not-found reply for an unknown task title in
+    ``project_name`` (text paths)."""
+    return f"Task '{ref}' not found in {project_name}."
 
 
 def _attachment_not_found(
-    project_name: str, number: int, attachment_id: int
+    project_name: str, number: int, attachment_ref: Union[int, str]
 ) -> str:
-    """The not-found reply for an unknown attachment on a task."""
+    """The not-found reply for an unknown attachment on a task.
+
+    The single wording definition for the attachment not-found reply
+    across all command families (text and callback). ``attachment_ref``
+    is the user's attachment reference — a digit string or the
+    callback's integer; non-numeric references are passed pre-quoted
+    (e.g. ``"'abc'"``).
+    """
     return (
-        f"Attachment {attachment_id} not found on task "
+        f"Attachment {attachment_ref} not found on task "
         f"#{number} ({project_name}). Use /task "
         f"{project_name} {number} to list the task's "
         "attachments."
