@@ -202,6 +202,24 @@ def test_add_attachment_data_base64_under_limit_ok(store, project):
     assert data == content
 
 
+def test_add_attachment_oversized_filename_rejected(store, project):
+    # #126: a >255-char filename is rejected at ingest (the name would
+    # otherwise re-emit into the download header of every fetch).
+    t = store.create_task(project["id"], "T")
+    res = call(
+        store,
+        "add_attachment",
+        project=project["name"],
+        number=t["number"],
+        filename="a" * 2048 + ".md",
+        data_base64=base64.b64encode(b"# hi").decode(),
+    )
+    data = json.loads(texts(res)[0].text)
+    assert data["ok"] is False
+    assert "255" in data["error"]
+    assert "filename" in data["error"]
+
+
 def test_get_attachment_image(store, project):
     t = store.create_task(project["id"], "T")
     att = store.add_attachment(project["id"], t["number"], "px.png", "image/png", PNG_1X1)

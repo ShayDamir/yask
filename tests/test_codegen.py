@@ -2,8 +2,8 @@
 
 Python is the single source of truth for the cross-language constants
 (workflow states + ``DEFAULT_STATE`` from ``yask.db``, the label-color
-hex regex and the shared inline-markdown regex subset from
-``yask.spec``). ``yask.codegen`` emits ``yask/web/js/constants.js`` from
+hex regex, the shared inline-markdown regex subset, and the free-text
+field length limits from ``yask.spec``). ``yask.codegen`` emits ``yask/web/js/constants.js`` from
 them; these tests pin the generated file to the Python constants so that
 editing one side without regenerating (or letting a regex drift between
 the two languages) fails here. There is no JS runtime in the dev
@@ -49,6 +49,16 @@ def test_states_constants():
     assert exp["ARCHIVED_STATE"] == db.ARCHIVED_STATE
     assert exp["ALL_STATES"] == db.ALL_STATES
     assert exp["IN_PROGRESS_STATES"] == db.IN_PROGRESS_STATES
+
+
+def test_field_limits_constants():
+    """The generated FIELD_LIMITS export must equal the spec source (task
+    #126): the web maxlength mirrors and the store's enforcement point
+    cannot drift apart."""
+    exp = _exports()
+    assert exp["FIELD_LIMITS"] == spec.FIELD_LIMITS
+    # every limit is a positive character count
+    assert all(isinstance(v, int) and v > 0 for v in exp["FIELD_LIMITS"].values())
 
 
 def test_color_hex_regex_constant():

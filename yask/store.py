@@ -38,6 +38,19 @@ _UNSET = object()
 # Single-sourced in spec.COLOR_HEX_RE (shared with the web UI via codegen).
 _HEX_RE = re.compile(spec.COLOR_HEX_RE)
 
+# Free-text field length limits, single-sourced in spec.FIELD_LIMITS (shared
+# with the web UI via codegen, where the forms mirror them as maxlength).
+# The store is the enforcement point: a value beyond its limit raises
+# ValidationError, which every entry point already surfaces (REST 400, MCP
+# error object, bot domain message).
+TITLE_MAX = spec.FIELD_LIMITS["title"]
+DESCRIPTION_MAX = spec.FIELD_LIMITS["description"]
+PROJECT_NAME_MAX = spec.FIELD_LIMITS["projectName"]
+TYPE_NAME_MAX = spec.FIELD_LIMITS["taskTypeName"]
+LABEL_NAME_MAX = spec.FIELD_LIMITS["labelName"]
+ROLE_NAME_MAX = spec.FIELD_LIMITS["roleName"]
+FILENAME_MAX = spec.FIELD_LIMITS["attachmentFilename"]
+
 
 # -- password hashing (the Telegram bot's user allowlist) ----------------------
 #
@@ -495,6 +508,10 @@ class Store:
         name = (name or "").strip()
         if not name:
             raise ValidationError("project name must not be empty")
+        if len(name) > PROJECT_NAME_MAX:
+            raise ValidationError(
+                f"project name exceeds {PROJECT_NAME_MAX} characters"
+            )
         if self.conn.execute(
             "SELECT 1 FROM projects WHERE name = ? COLLATE NOCASE", (name,)
         ).fetchone():
@@ -524,6 +541,8 @@ class Store:
         name = (name or "").strip()
         if not name:
             raise ValidationError("type name must not be empty")
+        if len(name) > TYPE_NAME_MAX:
+            raise ValidationError(f"type name exceeds {TYPE_NAME_MAX} characters")
         if self._type_by_name(name):
             raise Conflict(f"task type '{name}' already exists")
         with self.conn:
@@ -539,6 +558,8 @@ class Store:
         name = (name or "").strip()
         if not name:
             raise ValidationError("type name must not be empty")
+        if len(name) > TYPE_NAME_MAX:
+            raise ValidationError(f"type name exceeds {TYPE_NAME_MAX} characters")
         t = self._get_type(type_id)
         other = self._type_by_name(name)
         if other and other["id"] != type_id:
@@ -647,6 +668,12 @@ class Store:
         title = (title or "").strip()
         if not title:
             raise ValidationError("task title must not be empty")
+        if len(title) > TITLE_MAX:
+            raise ValidationError(f"task title exceeds {TITLE_MAX} characters")
+        if len(description or "") > DESCRIPTION_MAX:
+            raise ValidationError(
+                f"task description exceeds {DESCRIPTION_MAX} characters"
+            )
         ttype = self._type_by_name(type)
         if ttype is None:
             raise ValidationError(f"unknown task type '{type}'")
@@ -959,6 +986,13 @@ class Store:
             title = title.strip()
             if not title:
                 raise ValidationError("task title must not be empty")
+            if len(title) > TITLE_MAX:
+                raise ValidationError(f"task title exceeds {TITLE_MAX} characters")
+        # ``None`` means "unchanged" and stays free of the check.
+        if description is not None and len(description) > DESCRIPTION_MAX:
+            raise ValidationError(
+                f"task description exceeds {DESCRIPTION_MAX} characters"
+            )
         if type is not None:
             new_type = self._type_by_name(type)
             if new_type is None:
@@ -1672,9 +1706,15 @@ class Store:
         keys (sqlite3.Row or dict) and returns
         ``{filename, content_type, size, created_at}``. Callers add ``id``
         themselves, preserving each call site's existing key order.
+
+        The filename is capped to :data:`FILENAME_MAX` here: rows stored
+        before the ingest-time limit existed (legacy multi-KB filenames)
+        must never re-emit an oversized name into the
+        ``Content-Disposition`` header of ``GET /api/attachments/{id}``,
+        the MCP JSON payloads, or the bot's messages.
         """
         return {
-            "filename": row["filename"],
+            "filename": row["filename"][:FILENAME_MAX],
             "content_type": row["content_type"],
             "size": row["size"],
             "created_at": row["created_at"],
@@ -1696,6 +1736,13 @@ class Store:
         self, project_id: int, number: int, filename: str, content_type: str, data: bytes
     ) -> dict:
         row = self._get_task(project_id, number)
+        # Reject before sanitizing: a multi-KB filename is a header-size DoS
+        # (it is re-emitted verbatim into the Content-Disposition header of
+        # every download), so oversized names never reach the DB.
+        if len(filename or "") > FILENAME_MAX:
+            raise ValidationError(
+                f"attachment filename exceeds {FILENAME_MAX} characters"
+            )
         filename = self._sanitize_filename(filename)
         if content_type not in self.ALLOWED_ATTACHMENT_TYPES:
             raise ValidationError(
@@ -1784,6 +1831,8 @@ class Store:
         name = (name or "").strip()
         if not name:
             raise ValidationError("label name must not be empty")
+        if len(name) > LABEL_NAME_MAX:
+            raise ValidationError(f"label name exceeds {LABEL_NAME_MAX} characters")
         norm_color = _normalize_color(color)
         try:
             with self.conn:
@@ -1884,6 +1933,12 @@ class Store:
             if "/" in name:
                 # '/' cannot be addressed by DELETE .../roles/{name}
                 raise ValidationError("role name must not contain '/'")
+            if len(name) > ROLE_NAME_MAX:
+                # Raised before _replace_links, so nothing is persisted on
+                # failure.
+                raise ValidationError(
+                    f"role name exceeds {ROLE_NAME_MAX} characters"
+                )
             key = name.upper()
             if key in seen:
                 continue

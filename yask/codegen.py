@@ -2,7 +2,8 @@
 
 Python is the single source of truth for the cross-language constants:
 the workflow states and ``DEFAULT_STATE`` (``yask.db``), the label-color
-hex regex and the shared inline-markdown regex subset (``yask.spec``).
+hex regex, the shared inline-markdown regex subset, and the free-text
+field length limits (``yask.spec``).
 This script aggregates them and emits ``yask/web/js/constants.js`` as an
 ES module whose every export is a JSON literal, so
 ``tests/test_codegen.py`` can parse the file back and assert
@@ -51,6 +52,7 @@ def generate() -> str:
         "IN_PROGRESS_STATES": db.IN_PROGRESS_STATES,
         "COLOR_HEX_RE": spec.COLOR_HEX_RE,
         "MARKDOWN_REGEXES": spec.MARKDOWN,
+        "FIELD_LIMITS": spec.FIELD_LIMITS,
     }
     lines = [HEADER.rstrip("\n"), ""]
     for name, value in exports.items():

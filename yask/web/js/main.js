@@ -1,7 +1,7 @@
 // yask web UI — bootstrap, app state, and user actions.
 
 import api from "./api.js";
-import { DEFAULT_STATE } from "./constants.js";
+import { DEFAULT_STATE, FIELD_LIMITS } from "./constants.js";
 import { renderBoard, renderEpicBoard, renderSearchResults, renderSidebar, ARCHIVED } from "./render.js";
 import { initDnd } from "./dnd.js";
 import { openEditorModal, openNewTaskModal, confirmDialog, openTelegramUsersModal } from "./dialogs.js";
@@ -404,6 +404,13 @@ function init() {
   initTheme();
   initFontSize();
   initSidebar();
+
+  // The store rejects free-text fields beyond these limits (task #126);
+  // mirror them on the static inputs so the browser clips input before
+  // submit. Set at runtime from the generated constants instead of
+  // duplicating the values in the HTML.
+  $("new-project-name").maxLength = FIELD_LIMITS.projectName;
+  $("new-role-name").maxLength = FIELD_LIMITS.roleName;
 
   $("search").addEventListener(
     "input",

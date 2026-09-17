@@ -390,6 +390,92 @@ def test_attachment_upload_rejects_oversized_payload(client, pid):
     )
 
 
+# -- free-text length limits (#126) -------------------------------------------
+
+
+def test_text_field_length_limits_over_api(client, pid):
+    # The store is the enforcement point for spec.FIELD_LIMITS; the REST
+    # surface surfaces a limit violation as a 400 validation error.
+    r = client.post(f"/api/projects/{pid}/tasks", json={"title": "x" * 300})
+    assert r.status_code == 400
+    assert "exceeds" in r.json()["detail"]
+
+    r = client.post(
+        f"/api/projects/{pid}/tasks",
+        json={"title": "t", "description": "x" * 65537},
+    )
+    assert r.status_code == 400
+    assert "exceeds" in r.json()["detail"]
+
+    r = client.post("/api/projects", json={"name": "x" * 300})
+    assert r.status_code == 400
+    assert "exceeds" in r.json()["detail"]
+
+
+def test_attachment_oversized_filename_rejected_over_api(client, pid):
+    # A multi-KB upload filename is rejected at ingest: the name is never
+    # persisted, so it can never re-appear in a download header.
+    client.post(f"/api/projects/{pid}/tasks", json={"title": "t"})
+    boundary = "----yasklongnameboundary"
+    body = _multipart_body(boundary, "a" * 2048, b"# hi", "text/markdown")
+    r = client.post(
+        f"/api/projects/{pid}/tasks/1/attachments",
+        content=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    assert r.status_code == 400
+    assert "exceeds" in r.json()["detail"]
+    assert client.get(f"/api/projects/{pid}/tasks/1").json()["attachments"] == []
+
+    # positive control: a filename at exactly the 255-char limit is
+    # accepted, and its download header stays small.
+    name = "b" * 252 + ".md"  # 255 chars
+    body_ok = _multipart_body(boundary, name, b"# hi", "text/markdown")
+    r_ok = client.post(
+        f"/api/projects/{pid}/tasks/1/attachments",
+        content=body_ok,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    assert r_ok.status_code == 201
+    got = client.get(f"/api/attachments/{r_ok.json()['id']}")
+    assert got.status_code == 200
+    disp = got.headers["content-disposition"]
+    assert disp == f'inline; filename="{name}"'
+    assert len(disp) < 300  # disposition + filename only, nothing inflated
+
+
+def test_attachment_legacy_oversized_filename_header_bounded(client, pid, tmp_path):
+    # A legacy row (stored before #126's ingest-time limit) with a multi-KB
+    # filename is capped to its first 255 chars on read: the download
+    # header stays bounded and never contains the full stored name.
+    from yask import db
+
+    client.post(f"/api/projects/{pid}/tasks", json={"title": "t"})
+    task = client.get(f"/api/projects/{pid}/tasks/1").json()
+    legacy_name = "b" * 10240
+
+    # Seed the row through a second connection on the same DB file.
+    conn = db.connect(tmp_path / "api.db")
+    try:
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO attachments(task_id, filename, content_type, data,"
+                " created_at) VALUES (?, ?, ?, ?, ?)",
+                (task["id"], legacy_name, "text/markdown", b"legacy",
+                 "2026-01-01T00:00:00Z"),
+            )
+        att_id = cur.lastrowid
+    finally:
+        conn.close()
+
+    got = client.get(f"/api/attachments/{att_id}")
+    assert got.status_code == 200
+    disp = got.headers["content-disposition"]
+    assert disp == f'inline; filename="{"b" * 255}"'
+    assert len(disp) < 300
+    assert legacy_name not in disp
+
+
 def test_attachment_streamed_in_chunks(client, pid, tmp_path):
     """#96 (decision B): a multi-MB attachment is served through a
     StreamingResponse, so its body reaches the ASGI send in multiple

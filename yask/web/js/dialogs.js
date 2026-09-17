@@ -1,7 +1,7 @@
 // Modals: task editor, new task, confirmation, attachment viewer.
 
 import api from "./api.js";
-import { DEFAULT_STATE } from "./constants.js";
+import { DEFAULT_STATE, FIELD_LIMITS } from "./constants.js";
 import { h, clear, fmtEstimate, fmtBytes, fmtTime, typeClass, walkTasks } from "./util.js";
 import { renderMarkdown } from "./markdown.js";
 import { toast, toastError } from "./toast.js";
@@ -161,7 +161,10 @@ export function openNewTaskModal(project, state, onCreated, epicNumber = null) {
   const heading = epic
     ? `New task in epic #${epic.number}`
     : `New task in ${state}`;
-  const titleInput = h("input", { type: "text", id: "nt-title", placeholder: "Task title" });
+  const titleInput = h("input", {
+    type: "text", id: "nt-title", placeholder: "Task title",
+    maxlength: FIELD_LIMITS.title,
+  });
   const types = project.task_types || [];
   // Default to the last type created in this project (see #6), else Task, else the first type.
   const lastType = getLastType(pid);
@@ -197,9 +200,12 @@ export function openNewTaskModal(project, state, onCreated, epicNumber = null) {
         { id: "nt-us-as" },
         projectRoles.map((r) => h("option", { value: r.name }, r.name))
       )
-    : h("input", { type: "text", id: "nt-us-as", placeholder: "a role or user" });
-  const usWant = h("input", { type: "text", id: "nt-us-want", placeholder: "an action or capability" });
-  const usSo = h("input", { type: "text", id: "nt-us-so", placeholder: "a benefit or reason" });
+    : h("input", { type: "text", id: "nt-us-as", placeholder: "a role or user",
+                   maxlength: FIELD_LIMITS.title });
+  const usWant = h("input", { type: "text", id: "nt-us-want", placeholder: "an action or capability",
+                              maxlength: FIELD_LIMITS.title });
+  const usSo = h("input", { type: "text", id: "nt-us-so", placeholder: "a benefit or reason",
+                            maxlength: FIELD_LIMITS.title });
   const usFields = h(
     "div",
     { class: "us-fields", hidden: "" },
@@ -399,7 +405,10 @@ function buildAttachmentsSection(pid, task) {
 
 function buildLabelsSection(pid, task, actions) {
   const labelList = h("div", { class: "check-list" });
-  const newLabelInput = h("input", { type: "text", id: "ed-new-label", placeholder: "New label…" });
+  const newLabelInput = h("input", {
+    type: "text", id: "ed-new-label", placeholder: "New label…",
+    maxlength: FIELD_LIMITS.labelName,
+  });
   // Seed from the task's own labels (already serialized on the task) so the
   // save below never clears labels even if the project label fetch fails.
   let projectLabels = (task.labels || []).map((l) => ({ id: l.id, name: l.name, color: l.color || "" }));
@@ -567,8 +576,10 @@ function buildHistorySection(pid, task) {
 export function openEditorModal(project, task, actions) {
   const pid = project.id;
 
-  const titleInput = h("input", { type: "text", id: "ed-title", value: task.title });
-  const descInput = h("textarea", { id: "ed-desc" }, task.description || "");
+  const titleInput = h("input", {
+    type: "text", id: "ed-title", value: task.title, maxlength: FIELD_LIMITS.title,
+  });
+  const descInput = h("textarea", { id: "ed-desc", maxlength: FIELD_LIMITS.description }, task.description || "");
 
   const allTypes = project.task_types || [];
   const { typeSelect, estInput } = buildTypeEstimateRow(task, allTypes);
