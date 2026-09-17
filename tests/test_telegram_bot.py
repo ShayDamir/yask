@@ -7435,6 +7435,165 @@ def test_callback_m_plain_view_edit_unchanged(store):
     assert "Backlog" in labels and "Subscribe" in labels
 
 
+# --- callback edit helper (_handle_callback_edit, isolated) ---------------
+
+
+def test_callback_edit_helper_rich_success():
+    """A RichMessageEdit goes out as exactly one rich editMessageText —
+    no fresh send, no plain leg (the e2e degrade tests minus the loop)."""
+    markup = {"inline_keyboard": [[{"text": "go", "callback_data": "p:1"}]]}
+    edit = telegram_bot.RichMessageEdit("# Rich view", markup)
+    script = Script([])
+    bot_api_call(
+        script,
+        lambda api: telegram_bot._handle_callback_edit(api, 7, 99, edit, True),
+    )
+    assert script.edited == [
+        {
+            "chat_id": 7,
+            "message_id": 99,
+            "rich_message": {"markdown": "# Rich view"},
+            "reply_markup": markup,
+        }
+    ]
+    assert script.sent_rich == []
+    assert script.sent == []
+
+
+def test_callback_edit_helper_rich_400_resends_fresh_rich():
+    """A 400 on the rich edit is answered by a fresh sendRichMessage with
+    the same markdown and markup — no plain fallback (the rich leg of the
+    fresh send succeeded)."""
+    markup = {"inline_keyboard": [[{"text": "go", "callback_data": "p:1"}]]}
+    markdown = "# Rich view"
+    edit = telegram_bot.RichMessageEdit(markdown, markup)
+    script = Script([], fail_edit_once=(400, "can't parse rich message"))
+    bot_api_call(
+        script,
+        lambda api: telegram_bot._handle_callback_edit(api, 7, 99, edit, True),
+    )
+    # the rich edit was attempted exactly once ...
+    assert len(script.edited) == 1
+    e = script.edited[0]
+    assert e["chat_id"] == 7
+    assert e["message_id"] == 99
+    assert "text" not in e
+    assert e["rich_message"] == {"markdown": markdown}
+    # ... and the content went out as a fresh rich message: same payload
+    # as the failed edit, keyboard threaded, no plain leg
+    assert script.sent_rich == [
+        {
+            "chat_id": 7,
+            "rich_message": {"markdown": markdown},
+            "reply_markup": markup,
+        }
+    ]
+    assert script.sent == []
+
+
+def test_callback_edit_helper_rich_404_degrades_to_html():
+    """A 404 on the rich edit degrades the fresh send through the
+    rich → HTML chain (old local Bot API server)."""
+    markup = {"inline_keyboard": [[{"text": "go", "callback_data": "p:1"}]]}
+    markdown = "# Rich view **bold**"
+    edit = telegram_bot.RichMessageEdit(markdown, markup)
+    script = Script(
+        [],
+        fail_edit_once=(404, "Not Found"),
+        fail_rich_once=(404, "Not Found"),
+    )
+    bot_api_call(
+        script,
+        lambda api: telegram_bot._handle_callback_edit(api, 7, 99, edit, True),
+    )
+    # the rich edit was attempted (and 404'd) ...
+    assert len(script.edited) == 1
+    assert "text" not in script.edited[0]
+    # ... the fresh send's rich leg also failed and the HTML leg landed
+    assert len(script.sent_rich) == 1  # the failed rich attempt
+    assert len(script.sent) == 1
+    html_leg = script.sent[0]
+    assert html_leg["chat_id"] == 7
+    assert html_leg["parse_mode"] == "HTML"
+    assert html_leg["text"] == telegram_bot.markdown_to_html(markdown)
+    assert html_leg["reply_markup"] == markup
+
+
+def test_callback_edit_helper_blocks_success():
+    """A RichBlocksEdit echoes the received block tree back through the
+    rich payload's blocks input — no fresh send, no plain leg."""
+    markup = {"inline_keyboard": [[{"text": "go", "callback_data": "p:1"}]]}
+    tree = [
+        {"type": "heading", "level": 1, "text": "# view"},
+        {"type": "paragraph", "text": [{"type": "bold", "text": "State:"}]},
+    ]
+    edit = telegram_bot.RichBlocksEdit(tree, False, markup)
+    script = Script([])
+    bot_api_call(
+        script,
+        lambda api: telegram_bot._handle_callback_edit(api, 7, 99, edit, True),
+    )
+    # no ``text`` key (a text edit of a rich message fails server-side),
+    # no is_rtl key (left-to-right)
+    assert script.edited == [
+        {
+            "chat_id": 7,
+            "message_id": 99,
+            "rich_message": {"blocks": tree},
+            "reply_markup": markup,
+        }
+    ]
+    assert script.sent_rich == []
+    assert script.sent == []
+
+
+def test_callback_edit_helper_blocks_404_toasts_only():
+    """A 404 on the blocks edit degrades to the toast only — no fresh
+    send at all: the toggle's in-place update carries no new content
+    worth re-sending (the #106 invariant)."""
+    markup = {"inline_keyboard": [[{"text": "go", "callback_data": "p:1"}]]}
+    tree = [{"type": "paragraph", "text": "unchanged content"}]
+    edit = telegram_bot.RichBlocksEdit(tree, False, markup)
+    script = Script([], fail_edit_once=(404, "Not Found"))
+    bot_api_call(
+        script,
+        lambda api: telegram_bot._handle_callback_edit(api, 7, 99, edit, True),
+    )
+    # the blocks edit was attempted with the echo payload ...
+    assert len(script.edited) == 1
+    e = script.edited[0]
+    assert e["chat_id"] == 7
+    assert e["message_id"] == 99
+    assert "text" not in e
+    assert e["rich_message"] == {"blocks": tree}
+    # ... failed, and nothing was re-sent — no rich, no plain
+    assert script.sent_rich == []
+    assert script.sent == []
+
+
+def test_callback_edit_helper_plain_success():
+    """A plain MessageEdit goes out as a plain text edit — no rich
+    payload keys, no fresh send."""
+    markup = {"inline_keyboard": [[{"text": "go", "callback_data": "p:1"}]]}
+    edit = telegram_bot.MessageEdit("plain text", markup)
+    script = Script([])
+    bot_api_call(
+        script,
+        lambda api: telegram_bot._handle_callback_edit(api, 7, 99, edit, True),
+    )
+    assert script.edited == [
+        {
+            "chat_id": 7,
+            "message_id": 99,
+            "text": "plain text",
+            "reply_markup": markup,
+        }
+    ]
+    assert "rich_message" not in script.edited[0]
+    assert script.sent_rich == []
+    assert script.sent == []
+
+
 def test_callback_m_already_in_state_toasts_only(store):
     d = seed_task_view(store)
     pid, t = d["pid"], d["t"]

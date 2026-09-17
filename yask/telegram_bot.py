@@ -3710,6 +3710,141 @@ async def _send_reply(
         await api.send_message(chat_id, reply)
 
 
+async def _handle_callback_edit(
+    api: BotAPI,
+    chat_id: int,
+    message_id: int,
+    edit: Union[MessageEdit, RichMessageEdit, RichBlocksEdit],
+    rich: bool,
+) -> None:
+    """Apply a callback action's in-place edit (``editMessageText``).
+
+    A :class:`RichMessageEdit` rides the rich ``rich_markdown`` payload
+    (a text edit of a rich message 400s server-side, so there is no
+    plain edit leg below rich): when the rich edit fails (400 parse,
+    404 on an old local Bot API server, message gone, transport), the
+    in-place edit is skipped and the content is re-sent as a fresh
+    message through the regular send chain — the answer toast has
+    already gone out, so the user is confirmed either way. The fresh
+    send inherits the rich → HTML → plain degradation, and a failure of
+    it propagates to the per-update catch in :func:`_handle_update`. A
+    :class:`RichBlocksEdit` echoes the received block tree back through
+    the rich payload's ``blocks`` input (Bot API 10.2+); a failure there
+    degrades to the toast only — no fresh send: the toggle's in-place
+    update carries no new content worth re-sending, the stale original
+    stays in the chat, and the worst case equals the pre-#106 behavior
+    (see :class:`RichBlocksEdit`). A plain :class:`MessageEdit` goes
+    out as-is — no local catch; a failure propagates to the per-update
+    catch exactly as today.
+    """
+    if isinstance(edit, RichMessageEdit):
+        try:
+            await api.edit_message_text(
+                chat_id,
+                message_id,
+                rich_markdown=edit.markdown,
+                reply_markup=edit.reply_markup,
+            )
+        except BotAPIError as exc:
+            print(
+                f"yask: telegram rich edit failed: {exc}",
+                file=sys.stderr,
+            )
+            await _send_reply(
+                api,
+                chat_id,
+                RichReply(edit.markdown, edit.reply_markup),
+                rich,
+            )
+    elif isinstance(edit, RichBlocksEdit):
+        try:
+            await api.edit_message_text(
+                chat_id,
+                message_id,
+                rich_message={
+                    "blocks": edit.blocks,
+                    **({"is_rtl": True} if edit.is_rtl else {}),
+                },
+                reply_markup=edit.reply_markup,
+            )
+        except BotAPIError as exc:
+            print(
+                f"yask: telegram rich blocks edit failed: {exc}",
+                file=sys.stderr,
+            )
+    else:
+        await api.edit_message_text(chat_id, message_id, edit.text, edit.reply_markup)
+
+
+async def _handle_update(
+    api: BotAPI,
+    update: dict,
+    dispatch: Callable[..., Optional[Union[Reply, Awaitable[Reply]]]],
+    callback_dispatch: Optional[Callable[[dict], Optional[CallbackAction]]],
+    rich: bool,
+    error_delay: float,
+) -> None:
+    """Process one raw ``getUpdates`` entry: a message or a callback.
+
+    A message update dispatches through ``dispatch`` (a coroutine result
+    is awaited — the dispatch contract's only async convention — and the
+    reply, if any, goes out through :func:`_send_reply`); a callback
+    update routes through ``callback_dispatch`` (a missing or ``None``
+    action answers with :data:`UNKNOWN_CALLBACK_TEXT`), answers the
+    callback first, then applies the in-place edit (
+    :func:`_handle_callback_edit`) and/or the reply through the same
+    send paths. A :class:`BotAPIError` from either branch — including a
+    failed fresh send after a rich-edit failure — is logged and slept
+    through (``error_delay``); it never stops the poll loop.
+    """
+    message = update.get("message")
+    callback = update.get("callback_query")
+    try:
+        if message is not None:
+            chat = message.get("chat") or {}
+            text = message.get("text")
+            # A document/photo message (no text) rides the
+            # dispatch layer's file parameter (the /attach flow);
+            # text messages and other media pass file=None.
+            incoming = _extract_incoming_file(message) if text is None else None
+            reply = dispatch(text, chat.get("id"), file=incoming)
+            if inspect.iscoroutine(reply):
+                reply = await reply
+            if reply is not None and "id" in chat:
+                await _send_reply(api, chat["id"], reply, rich)
+        elif callback is not None:
+            action = (
+                callback_dispatch(callback)
+                if callback_dispatch is not None
+                else None
+            )
+            if action is None:
+                action = CallbackAction(answer_text=UNKNOWN_CALLBACK_TEXT)
+            # Answer first: the client's progress bar hangs until
+            # the callback is answered.
+            await api.answer_callback_query(
+                callback.get("id"),
+                text=action.answer_text,
+                show_alert=action.show_alert,
+                cache_time=action.cache_time,
+            )
+            cb_message = callback.get("message") or {}
+            cb_chat = cb_message.get("chat") or {}
+            if action.edit is not None:
+                # Old messages arrive without a message_id (or
+                # chat): the edit is skipped, the answer is not.
+                message_id = cb_message.get("message_id")
+                if message_id is not None and "id" in cb_chat:
+                    await _handle_callback_edit(
+                        api, cb_chat["id"], message_id, action.edit, rich
+                    )
+            if action.reply is not None and "id" in cb_chat:
+                await _send_reply(api, cb_chat["id"], action.reply, rich)
+    except BotAPIError as exc:
+        print(f"yask: telegram dispatch failed: {exc}", file=sys.stderr)
+        await asyncio.sleep(error_delay)
+
+
 async def run_bot(
     api: BotAPI,
     dispatch: Callable[..., Optional[Union[Reply, Awaitable[Reply]]]],
@@ -3801,121 +3936,10 @@ async def run_bot(
             await asyncio.sleep(error_delay)
             continue
         for update in updates:
+            await _handle_update(
+                api, update, dispatch, callback_dispatch, rich, error_delay
+            )
             update_id = update.get("update_id")
-            message = update.get("message")
-            callback = update.get("callback_query")
-            try:
-                if message is not None:
-                    chat = message.get("chat") or {}
-                    text = message.get("text")
-                    # A document/photo message (no text) rides the
-                    # dispatch layer's file parameter (the /attach flow);
-                    # text messages and other media pass file=None.
-                    incoming = (
-                        _extract_incoming_file(message) if text is None else None
-                    )
-                    reply = dispatch(text, chat.get("id"), file=incoming)
-                    if inspect.iscoroutine(reply):
-                        reply = await reply
-                    if reply is not None and "id" in chat:
-                        await _send_reply(api, chat["id"], reply, rich)
-                elif callback is not None:
-                    action = (
-                        callback_dispatch(callback)
-                        if callback_dispatch is not None
-                        else None
-                    )
-                    if action is None:
-                        action = CallbackAction(answer_text=UNKNOWN_CALLBACK_TEXT)
-                    # Answer first: the client's progress bar hangs until
-                    # the callback is answered.
-                    await api.answer_callback_query(
-                        callback.get("id"),
-                        text=action.answer_text,
-                        show_alert=action.show_alert,
-                        cache_time=action.cache_time,
-                    )
-                    cb_message = callback.get("message") or {}
-                    cb_chat = cb_message.get("chat") or {}
-                    if action.edit is not None:
-                        # Old messages arrive without a message_id (or
-                        # chat): the edit is skipped, the answer is not.
-                        message_id = cb_message.get("message_id")
-                        if message_id is not None and "id" in cb_chat:
-                            if isinstance(action.edit, RichMessageEdit):
-                                # A rich original: the edit rides the
-                                # rich payload (Bot API 10.1) — a text
-                                # edit of a rich message 400s
-                                # server-side, so there is no plain edit
-                                # leg below. A rich-edit failure (400
-                                # parse, 404 on an old local Bot API
-                                # server, message gone, transport) skips
-                                # the in-place edit and re-sends the
-                                # content as a fresh message through the
-                                # regular send chain — the answer toast
-                                # has already gone out, so the user is
-                                # confirmed either way. A failure of the
-                                # fresh send propagates to the per-update
-                                # catch below (loop survives).
-                                try:
-                                    await api.edit_message_text(
-                                        cb_chat["id"],
-                                        message_id,
-                                        rich_markdown=action.edit.markdown,
-                                        reply_markup=action.edit.reply_markup,
-                                    )
-                                except BotAPIError as exc:
-                                    print(
-                                        f"yask: telegram rich edit failed: {exc}",
-                                        file=sys.stderr,
-                                    )
-                                    await _send_reply(
-                                        api,
-                                        cb_chat["id"],
-                                        RichReply(
-                                            action.edit.markdown,
-                                            action.edit.reply_markup,
-                                        ),
-                                        rich,
-                                    )
-                            elif isinstance(action.edit, RichBlocksEdit):
-                                # A rich original with a block tree: the
-                                # edit echoes the tree back (Bot API 10.2+
-                                # blocks input). A failure (404 on a 10.1
-                                # local server without the blocks input,
-                                # 400 rejection, message gone, transport)
-                                # skips the in-place edit — toast only, no
-                                # fresh message: the toggle's in-place
-                                # update carries no new content, the stale
-                                # original stays in the chat, and nothing
-                                # worse than the pre-#106 behavior happens.
-                                try:
-                                    await api.edit_message_text(
-                                        cb_chat["id"],
-                                        message_id,
-                                        rich_message={
-                                            "blocks": action.edit.blocks,
-                                            **({"is_rtl": True} if action.edit.is_rtl else {}),
-                                        },
-                                        reply_markup=action.edit.reply_markup,
-                                    )
-                                except BotAPIError as exc:
-                                    print(
-                                        f"yask: telegram rich blocks edit failed: {exc}",
-                                        file=sys.stderr,
-                                    )
-                            else:
-                                await api.edit_message_text(
-                                    cb_chat["id"],
-                                    message_id,
-                                    action.edit.text,
-                                    action.edit.reply_markup,
-                                )
-                    if action.reply is not None and "id" in cb_chat:
-                        await _send_reply(api, cb_chat["id"], action.reply, rich)
-            except BotAPIError as exc:
-                print(f"yask: telegram dispatch failed: {exc}", file=sys.stderr)
-                await asyncio.sleep(error_delay)
             if update_id is not None:
                 offset = update_id + 1
         if on_cycle is not None:
