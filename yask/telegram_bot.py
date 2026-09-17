@@ -1959,13 +1959,7 @@ def add_view(store: Store, arg: Optional[str]) -> Reply:
         f"in {project['name']} — Backlog. "
         f"Use /task {project['name']} {task['number']} to view it."
     )
-    button = {
-        "text": _truncate_button_label(f"#{task['number']} {task['title']}"),
-        "callback_data": f"t:{project['id']}:{task['number']}",
-    }
-    return KeyboardReply(
-        text, {"inline_keyboard": [[button], [_main_menu_button()]]}
-    )
+    return _task_button_reply(text, project["id"], task["number"], task["title"])
 
 
 def describe_view(store: Store, arg: Optional[str]) -> Reply:
@@ -2056,13 +2050,7 @@ def describe_view(store: Store, arg: Optional[str]) -> Reply:
         f"({len(description)} chars). "
         f"Use /task {project['name']} {task['number']} to view it."
     )
-    button = {
-        "text": _truncate_button_label(f"#{task['number']} {task['title']}"),
-        "callback_data": f"t:{project['id']}:{task['number']}",
-    }
-    return KeyboardReply(
-        text, {"inline_keyboard": [[button], [_main_menu_button()]]}
-    )
+    return _task_button_reply(text, project["id"], task["number"], task["title"])
 
 
 def type_view(store: Store, arg: Optional[str]) -> Reply:
@@ -2181,13 +2169,7 @@ def type_view(store: Store, arg: Optional[str]) -> Reply:
         f"to {task['type']}. "
         f"Use /task {project['name']} {task['number']} to view it."
     )
-    button = {
-        "text": _truncate_button_label(f"#{task['number']} {task['title']}"),
-        "callback_data": f"t:{project['id']}:{task['number']}",
-    }
-    return KeyboardReply(
-        text, {"inline_keyboard": [[button], [_main_menu_button()]]}
-    )
+    return _task_button_reply(text, project["id"], task["number"], task["title"])
 
 
 def subscribe_view(store: Store, chat_id: int, arg: Optional[str] = None) -> str:
@@ -2249,6 +2231,32 @@ def _truncate_button_label(
     return f"{label[:max_len - 1]}…"
 
 
+def _task_button_reply(
+    text: str, project_id: int, number: int, title: str
+) -> KeyboardReply:
+    """The two-row confirmation keyboard the task-mutating views and the
+    state-change notifications share (#116).
+
+    Row 1: the task's detail button (label ``#<number> <title>``,
+    truncated by :func:`_truncate_button_label` to
+    :data:`NOTIFICATION_BUTTON_TEXT_MAX` chars, payload
+    ``t:<project_id>:<number>`` — answered by :func:`make_callback_dispatch`
+    (the ``t:`` handler), which opens the task's detail view). Row 2: the
+    Main-menu row (:func:`_main_menu_button`, payload ``h``), so the menu
+    hub is reachable from the reply. Carriers: :func:`add_view`,
+    :func:`describe_view`, :func:`type_view`, :func:`format_notification`
+    and the ``/attach`` file handler (``_dispatch_file``, nested in
+    :func:`make_dispatch`).
+    """
+    button = {
+        "text": _truncate_button_label(f"#{number} {title}"),
+        "callback_data": f"t:{project_id}:{number}",
+    }
+    return KeyboardReply(
+        text, {"inline_keyboard": [[button], [_main_menu_button()]]}
+    )
+
+
 def format_notification(change: dict) -> KeyboardReply:
     """One notification message for a state-history change.
 
@@ -2270,12 +2278,8 @@ def format_notification(change: dict) -> KeyboardReply:
         f"{change['from_state']} → {change['to_state']} "
         f"(/task {change['project_id']} {change['number']})"
     )
-    button = {
-        "text": _truncate_button_label(f"#{change['number']} {change['title']}"),
-        "callback_data": f"t:{change['project_id']}:{change['number']}",
-    }
-    return KeyboardReply(
-        text, {"inline_keyboard": [[button], [_main_menu_button()]]}
+    return _task_button_reply(
+        text, change["project_id"], change["number"], change["title"]
     )
 
 
@@ -2568,12 +2572,8 @@ def make_dispatch(
             f"Attached '{meta['filename']}' to #{task['number']} "
             f"'{task['title']}' ({_human_size(meta['size'])})."
         )
-        button = {
-            "text": _truncate_button_label(f"#{task['number']} {task['title']}"),
-            "callback_data": f"t:{project['id']}:{task['number']}",
-        }
-        return KeyboardReply(
-            text, {"inline_keyboard": [[button], [_main_menu_button()]]}
+        return _task_button_reply(
+            text, project["id"], task["number"], task["title"]
         )
 
     def dispatch(
