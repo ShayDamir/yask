@@ -8,13 +8,13 @@ The project name is **`yask`**. All `yask_*` tools and agent dispatches use this
 
 The **MVP is implemented**: `yask/` (Python package: `store.py` domain logic,
 `api.py` REST + static hosting, `web/` vanilla-JS UI, `mcp_server.py`,
-`cli.py`), `tests/` (pytest), flake packaging. `README.md` remains the
-authoritative product spec; if a behavior is unspecified there, treat the
-README as truth and flag gaps with the user rather than inventing rules.
+`cli.py`), `tests/` (pytest), flake packaging. `README.md` is the
+authoritative product spec; treat it as truth and flag gaps with the user
+rather than inventing rules.
 
 ## Commands
 
-No system Python deps — always work inside the nix dev environment:
+Always work inside the nix dev environment (no system Python deps):
 
 ```
 nix develop                                # shell with Python + deps + pytest
@@ -26,46 +26,36 @@ nix develop -c yask mcp                    # MCP server on stdio
 nix develop -c yask telegram               # Telegram bot (needs $TELEGRAM_BOT_TOKEN)
 ```
 
-The yask MCP server (`yask_*` tools) is how every agent in the workflow talks
-to yask. Subagents that implement/verify code also use the commands above.
+The yask MCP server (`yask_*` tools) is how every agent talks to yask.
 
 Environment quirks:
 
-- The dev environment has **no node**; syntax-check JS with
+- No **node**; syntax-check JS with
   `nix shell nixpkgs#nodejs -c node --check <file>`.
-- New untracked files are **silently excluded from nix builds**
-  (`src = lib.cleanSource ./.` reads the git tree). After creating files, run
+- New untracked files are **silently excluded from nix builds** (`src =
+  lib.cleanSource ./.` reads the git tree). After creating files, run
   `git add -N <files>` so `nix build` / `nix flake check` include them.
 - `.opencode/` and `opencode.json` are local tool state, not part of the
-  project: `.opencode/` is gitignored, and the agents live there.
-
-## Tech stack
-
-- **Python 3** backend with a **SQLite** database.
-- Two interfaces: a **web UI** (run locally) and an **MCP interface** for agents.
-- Web UI default port is **4304 (0x10D0)** and is configurable.
+  project.
 
 ## Domain rules (the subtle part — get these right)
-
-These are not obvious from file names and are easy to implement incorrectly:
 
 - **Projects** have completely separate state from each other.
 - Every **task has a number**, starting at 1 and increasing per project.
 - Regular task types: **Story, Task, Bug** (readily extensible).
 - **Epic** is a compound type:
-  - Epics nest inside other epics as a cycle-free **tree**; an Epic may also
-    contain Stories, Tasks, and Bugs.
-  - Epics are **not** estimated; an Epic's estimate is the **sum** of the
-    estimates of all tasks it (transitively) contains.
+  - Epics nest as a cycle-free **tree**; an Epic may also contain Stories,
+    Tasks, and Bugs.
+  - Epics are **not** estimated; an Epic's estimate is the **sum** of all
+    tasks it (transitively) contains.
 - Task lifecycle states: `Backlog`, `Todo`, `Planning`, `In progress`,
   `Review`, `Done`, `Archived` — plus the holding state `Blocked`.
-- `Blocked` is a **holding state**: any agent may move a task there, but the
-  move must be accompanied by an `unblock.md` attachment explaining what is
-  needed to unblock (questions for the user, decisions, inputs) and the
-  resume state. Blocked tasks wait for the user, never for agents.
-- Any task can be **archived** at any time; archived tasks are hidden by default.
-   **Only archived tasks may be permanently deleted** — a task must be archived
-   first, then deleted.
+- `Blocked` is a **holding state**: moving a task there must be accompanied
+  by an `unblock.md` attachment (what is needed to unblock — questions for
+  the user, decisions, inputs — and the resume state). Blocked tasks wait for
+  the user, never for agents.
+- Any task can be **archived** at any time; archived tasks are hidden by
+  default. **Only archived tasks may be permanently deleted.**
 - Tasks are **sorted**; sorting and order-of-execution (top-down) must be
   preserved across changes.
 - **Prerequisites**: moving a task pulls its prerequisites along **unless a
@@ -80,17 +70,15 @@ These are not obvious from file names and are easy to implement incorrectly:
 
 ## Multi-agent workflow
 
-Development dogfoods yask through the MCP interface. The repo's sessions run
-on an **Orchestrator** agent that drives a loop — pick the next task that
-needs work, hand it off to the matching subagent by **project + task
-number**, repeat until nothing is actionable, then stop and report. Everyone
-else is a subagent it spawns. Role-specific instructions live in
-`.opencode/agent/{orchestrator,planner,epic-planner,investigator,executor,reviewer,judge}.md`;
-this file documents only what every agent must agree on.
+Development dogfoods yask through the MCP interface. An **Orchestrator** runs
+a loop: pick the next task with `yask_get_next_task(project)`, hand it to the
+matching subagent by **project + task number** (`Task #<n> in project
+<name>`, nothing more), repeat until nothing is actionable. Role-specific
+instructions live in `.opencode/agent/{orchestrator,planner,epic-planner,
+investigator,executor,reviewer,judge}.md`; this file documents only what every
+agent must agree on.
 
 ### Dispatch (state → agent)
-
-Subagents handle the states the Orchestrator dispatches:
 
 | Task state                          | Handled by          | Ends with                         |
 | ----------------------------------- | ------------------- | --------------------------------- |
@@ -99,76 +87,58 @@ Subagents handle the states the Orchestrator dispatches:
 | `Todo` / `Planning`                 | Planner             | `In progress` (plan attached)     |
 | `In progress` (Investigation)       | Investigator (re-work) | `Review` (session summary attached) |
 | `In progress`                       | Executor            | `Review` (session summary attached) |
-| `Review` (no review yet)  | Reviewer              | stays `Review` (review attached)  |
-| `Review` (review attached)| Judge                 | `Done` (commit) or `In progress` (verdict) |
+| `Review` (no review yet)            | Reviewer            | stays `Review` (review attached)  |
+| `Review` (review attached)          | Judge               | `Done` (commit) or `In progress` (verdict) |
 | `Todo`/`Planning` blocked on unmet prereqs | (skip until prereqs advance) | — |
-| `Blocked` / `Backlog`     | nobody — waiting on user / unscheduled | — |
-| `Done` / `Archived`       | nobody — finished     | —                                   |
+| `Blocked` / `Backlog`               | nobody — waiting on user / unscheduled | — |
+| `Done` / `Archived`                 | nobody — finished    | —                                   |
 
-The Dispatch rule details are the Orchestrator's job (see its role file).
+The dispatch mechanics are the Orchestrator's job (see its role file).
 
 ### Epic workflow
 
-Epics are containers, not work items. Their planning is about **organizing
-subtasks**, not creating an implementation plan. The flow:
+Epics are containers, not work items; planning is about organizing subtasks,
+not producing an implementation plan. The flow:
 
-1. An Epic in `Todo` is dispatched to the **Epic Planner** (not the regular
-   Planner).
-2. The Epic Planner reviews the full tree (`yask_get_project`), identifies
-   missing tasks, creates them, sets prerequisites between subtasks, and
-   defines execution order.
-3. The Epic Planner sets all direct child tasks as **prerequisites of the
-   Epic itself** (`yask_set_prerequisites`).
-4. Once the Epic has prerequisites, `get_next_task` skips it (unmet prereqs)
-   and picks up the subtasks individually. Subtasks flow through the normal
-   pipeline.
-5. When all subtasks are `Done`, `get_next_task` returns the Epic again — the
-   Orchestrator dispatches the Judge to move it to `Done`.
+1. An Epic in `Todo` is dispatched to the **Epic Planner**.
+2. It reviews the tree (`yask_get_project`), creates missing tasks, sets
+   prerequisites between subtasks, and defines execution order.
+3. It sets **all direct child tasks as prerequisites of the Epic itself**
+   (`yask_set_prerequisites`). That is the gate: `get_next_task` skips the
+   Epic until all subtasks are done.
+4. Subtasks flow through the normal pipeline.
+5. When all subtasks are `Done`, `get_next_task` returns the Epic again and
+   the Orchestrator dispatches the Judge to move it to `Done`.
 
-This means an Epic **never enters `In progress`** — it stays in `Todo` until
-all its subtasks complete, then jumps to `Done`. The prerequisite mechanism
-is the gate.
-
-If the Epic Planner discovers that subtasks already exist and are properly
-ordered, it may skip creating new tasks and just attach an `epic-plan.md`
-summary of the current structure. The key output is the prerequisite links,
-not the attachment.
+An Epic **never enters `In progress`** — it stays in `Todo` until all its
+subtasks complete, then jumps to `Done`. If subtasks already exist and are
+properly ordered, the planner may skip creating new tasks and just attach an
+`epic-plan.md` summary; the key output is the prerequisite links.
 
 ### Investigation workflow
 
-Investigation tasks produce **no code** — they produce **Epics**. The
-Investigator researches the task's topic (repository docs/code plus internet
-sources) and turns the findings into work items:
+Investigation tasks produce **no code** — they produce **Epics**:
 
 1. An Investigation task in `Todo` (or re-dispatched from `In progress`
-   after a verdict) goes to the **Investigator** (not the regular Planner).
-2. The Investigator researches the topic, then creates **one or several
-   Epics** with self-contained descriptions (scope, why, what the
-   investigation found). The epics get **no subtasks and no
-   prerequisites** — that is the Epic Planner's job.
-3. The Investigator attaches the result of the investigation to every
-   created epic as `investigation.md`, attaches a `session-summary.md` to
-   the Investigation task itself, and moves it to `Review`.
-4. The Investigation task flows through the normal review pipeline
-   (Reviewer, then Judge). The Judge moves it to `Done` **without a
-   commit** — no code was produced.
-5. The created Epics stay in `Backlog` until the **user** moves them to
-   `Todo`. There the Epic Planner splits them into subtasks, using the
-   epic's `investigation.md` as the primary scope/rationale context.
-
-So an Investigation task is a one-shot research→epics step, and the epics
-it creates drive all subsequent work through the regular pipeline.
+   after a verdict) goes to the **Investigator**.
+2. It researches the topic (repo docs/code plus internet sources), then
+   creates **one or several Epics** in `Backlog` with self-contained
+   descriptions. The epics get **no subtasks and no prerequisites** — that is
+   the Epic Planner's job.
+3. It attaches `investigation.md` to every created epic, attaches a
+   `session-summary.md` to the task, and moves the task to `Review`.
+4. The task flows through the normal review pipeline; the Judge moves it to
+   `Done` **without a commit**.
+5. The epics stay in `Backlog` until the **user** moves them to `Todo`, where
+   the Epic Planner splits them using the epic's `investigation.md` as scope.
 
 ### Handoff contract
 
-- The Orchestrator hands a task to a subagent by **project + task number** —
-  `Task #<n> in project <name>` and nothing more. Including the project
-  removes any ambiguity, since numbers start at 1 in every project.
-- Each subagent resolves the task itself with `yask_get_task(project, task
-  number)` — one call returning only that task's full data — and reads the
-  attachments relevant to its role (role files say how; subagents fetch
-  attachments selectively with `yask_last_attachment` and only pull older
-  ones when needed).
+- The Orchestrator hands a subagent a task by **project + task number** —
+  `Task #<n> in project <name>` and nothing more.
+- Each subagent resolves the task itself with `yask_get_task(project, number)`
+  and reads only the attachments relevant to its role (`yask_last_attachment`,
+  pulling older ones only when needed).
 - Subagents never touch anything outside their own task except when creating
   a new task for out-of-scope work (below).
 
@@ -176,15 +146,15 @@ it creates drive all subsequent work through the regular pipeline.
 
 Filenames are the contract; content is markdown unless noted:
 
-| filename             | writer       | content                                        |
-| -------------------- | ------------ | ---------------------------------------------- |
-| `plan.md`            | Planner      | implementation plan                            |
-| `epic-plan.md`       | Epic Planner | task breakdown, prerequisites, execution order  |
-| `investigation.md`   | Investigator | result of investigation, attached to the created epics |
-| `session-summary.md` | Executor     | what changed, verification results, deviations |
-| `review.md`          | Reviewer     | plan→code verification, findings, verdict      |
-| `verdict.md`         | Judge        | what must be fixed (re-work round)             |
-| `unblock.md`         | any agent    | why a task is `Blocked` and what unblocks it   |
+| filename           | writer       | content                                      |
+| ------------------ | ------------ | -------------------------------------------- |
+| `plan.md`          | Planner      | implementation plan                          |
+| `epic-plan.md`     | Epic Planner | task breakdown, prerequisites, execution order |
+| `investigation.md` | Investigator | result of investigation, attached to created epics |
+| `session-summary.md` | Executor   | what changed, verification results, deviations |
+| `review.md`        | Reviewer     | plan→code verification, findings, verdict    |
+| `verdict.md`       | Judge        | what must be fixed (re-work round)           |
+| `unblock.md`       | any agent    | why a task is `Blocked` and what unblocks it |
 
 Attach markdown by writing a temp file under `/tmp` and calling
 `yask_add_attachment` with `file_path`, `content_type: text/markdown`, and
@@ -195,47 +165,39 @@ the canonical `filename`.
 Any move/archive/restore/delete that would change the state of multiple tasks
 returns `requires_confirmation` plus the affected list and applies nothing.
 The cascade is the domain's intended behavior (prerequisite pull-along), so
-inspect the affected list, then re-issue with `confirm: true`. It must
-contain only the task plus its dragged prerequisites.
+inspect the affected list (it must contain only the task plus its dragged
+prerequisites), then re-issue with `confirm: true`.
 
 ### Blocking
 
 Any agent may move its task to `Blocked` when it cannot proceed without
-external input (ambiguous requirements, answers needed from the user, missing
-information, a human decision). Rules:
-
-- Attach `unblock.md` **before** moving: why blocked, exactly what is needed
-  (a concrete list of questions for the user or other inputs), and the state
-  to resume in.
-- Never dispatch or advance a `Blocked` task. When nothing else is actionable
-  the Orchestrator reports blocked tasks so the user can answer.
-- Once the user answers and moves the task out of `Blocked` (web UI or
-  otherwise), it re-enters the pipeline at its resume state.
+external input (ambiguous requirements, missing information, a human
+decision). Attach `unblock.md` **before** moving: why blocked, a concrete
+list of what is needed (questions for the user, decisions, inputs), and the
+resume state. Never dispatch or advance a `Blocked` task; when nothing else
+is actionable the Orchestrator reports blocked tasks so the user can answer.
+Once the user moves the task out of `Blocked`, it re-enters the pipeline at
+its resume state.
 
 ### Commits
 
 Only the **Judge** commits, and only when moving a task to `Done`: stage and
-commit exactly that task's files with a concise conventional message. No other
-agent commits; the Executor's work sits uncommitted until then. Exception:
-**Investigation** tasks reach `Done` **without a commit** — they produce no
-code, only epics and documents inside yask.
+commit exactly that task's files with a concise conventional message.
+**Exception:** Investigation tasks reach `Done` **without a commit** — they
+produce no code, only epics and documents inside yask.
 
 ### When a new task arises during implementation
 
 If an agent (Planner, Executor, Reviewer) spots work outside the current
-task's scope:
-
-- Create it immediately as a task (`yask_create_task`) and move it to `Todo`
-  so it is scheduled and not lost.
-- If the current task depends on it, record that: `yask_set_prerequisites`
-  with the current task's number and the new task as a prerequisite.
-- Do **not** implement the new work inside the current task. Work in
-  dependency order — finish prerequisite tasks first (through `Done`), then
-  come back to the task that depended on them.
+task's scope: create it immediately with `yask_create_task`, move it to
+`Todo`, and — if the current task depends on it — record that with
+`yask_set_prerequisites`. Do **not** implement it inside the current task.
+Work in dependency order: finish prerequisite tasks first (through `Done`),
+then return to the task that depended on them.
 
 ## Scope note
 
-The README says development dogfoods yask on itself after MVP. Do not infer
-additional features beyond the spec above; ask before extending. The `Blocked`
-state is assumed by this workflow and is tracked as its own task in yask (in
-`Todo`), which implements it in the backend while keeping these docs in sync.
+Do not infer additional features beyond the spec above; ask before extending.
+The `Blocked` state is assumed by this workflow and is tracked as its own
+task in yask (in `Todo`), which implements it in the backend while keeping
+these docs in sync.
