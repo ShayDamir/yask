@@ -1619,6 +1619,53 @@ def _resolve_task(store: Store, project: dict, ref: str) -> Union[str, dict]:
     return store.get_task(project["id"], matches[0]["number"])
 
 
+def _resolve_task_ref_words(
+    store: Store, project: dict, rest: list[str]
+) -> tuple[Optional[dict], Union[list[str], str]]:
+    """Split a write command's remaining argument words into a task
+    reference and its tail words.
+
+    Shared by :func:`describe_view` (tail = description words) and
+    :func:`type_view` (tail = type-name words). The reference splits from
+    the words by form:
+
+    - **Number form** — ``rest[0]`` is all digits: it is the task number,
+      resolved strictly with ``store.get_task`` (no title fallback — a
+      write command must not resolve a number to a differently-titled
+      task); everything after it is the tail.
+    - **Title form** — otherwise the words are split by longest-prefix
+      unique match (mirroring :func:`_split_project`'s convention): the
+      longest prefix that matches exactly one visible task
+      (case-insensitive title) is the reference, the remaining words the
+      tail. A prefix that matches several tasks gets the disambiguation
+      list; no prefix matching at all gets the not-found reply quoting
+      the first word.
+
+    Returns ``(task, tail_words)`` on success — ``tail_words`` is a list
+    that may be **empty** (the reference consumed the whole argument; the
+    caller answers its own usage text) — or ``(None, reply)`` for a
+    ready-to-send string. The failure strings pass through
+    :func:`_task_not_found`, :func:`_task_title_not_found` and
+    :func:`_resolve_task` unchanged.
+    """
+    if rest[0].isdigit():
+        try:
+            task = store.get_task(project["id"], int(rest[0]))
+        except NotFound:
+            return None, _task_not_found(project["name"], rest[0])
+        return task, rest[1:]
+    for i in range(len(rest), 0, -1):
+        ref = " ".join(rest[:i])
+        matches = store.find_tasks_by_title(project["id"], ref)
+        if not matches:
+            continue
+        if len(matches) == 1:
+            task = store.get_task(project["id"], matches[0]["number"])
+            return task, rest[i:]
+        return None, _resolve_task(store, project, ref)  # ambiguous
+    return None, _task_title_not_found(project["name"], rest[0])
+
+
 def task_view(
     store: Store, arg: Optional[str], chat_id: Optional[int] = None
 ) -> Reply:
@@ -1948,21 +1995,12 @@ def describe_view(store: Store, arg: Optional[str]) -> Reply:
     same write as the web UI / MCP ``update_task``; no state-history entry).
     The argument mixes a project reference and a task reference, either of
     which may contain spaces: :func:`_split_project` resolves the longest
-    project prefix. The task reference splits from the description words
-    by form:
-
-    - **Number form** — the first word after the project is all digits: it
-      is the task number, resolved strictly with ``store.get_task`` (no
-      title fallback — a write command must not resolve a number to a
-      differently-titled task), and everything after it is the
-      description.
-    - **Title form** — otherwise the words are split by longest-prefix
-      unique match (mirroring :func:`_split_project`'s longest-prefix
-      convention): the longest prefix of the remaining words that matches
-      exactly one visible task (case-insensitive title) is the reference,
-      the remaining words the description. A prefix that matches several
-      tasks gets the disambiguation list (nothing is written); no prefix
-      matching at all gets the not-found reply quoting the first word.
+    project prefix, and :func:`_resolve_task_ref_words` splits the
+    remaining words into the task reference (number form: the first word
+    is an all-digit number, resolved strictly by ``store.get_task``; title
+    form: the longest prefix matching exactly one visible task) and the
+    description — the failure strings (not-found, disambiguation) pass
+    through unchanged.
 
     No argument, a project with no task reference left, or a reference
     with no description words left, gets the usage text; an unresolvable
@@ -1987,38 +2025,12 @@ def describe_view(store: Store, arg: Optional[str]) -> Reply:
         return _project_not_found(words[0])
     if not rest:
         return DESCRIBE_USAGE_TEXT
-    if rest[0].isdigit():
-        # Number form: strict number lookup, the rest is the description.
-        try:
-            task = store.get_task(project["id"], int(rest[0]))
-        except NotFound:
-            return _task_not_found(project["name"], rest[0])
-        description = " ".join(rest[1:])
-        if not description:
-            return DESCRIBE_USAGE_TEXT
-    else:
-        # Title form: the longest prefix of the remaining words that
-        # matches exactly one task is the reference; the words after it
-        # are the description.
-        found = None
-        for i in range(len(rest), 0, -1):
-            ref = " ".join(rest[:i])
-            matches = store.find_tasks_by_title(project["id"], ref)
-            if not matches:
-                continue
-            desc_words = rest[i:]
-            if not desc_words:
-                if len(matches) == 1:
-                    return DESCRIBE_USAGE_TEXT  # resolved, nothing to write
-                return _resolve_task(store, project, ref)  # disambiguation
-            if len(matches) == 1:
-                task = store.get_task(project["id"], matches[0]["number"])
-                found = (task, " ".join(desc_words))
-                break
-            return _resolve_task(store, project, ref)  # ambiguous
-        if found is None:
-            return _task_title_not_found(project["name"], rest[0])
-        task, description = found
+    task, tail = _resolve_task_ref_words(store, project, rest)
+    if task is None:
+        return tail
+    if not tail:
+        return DESCRIBE_USAGE_TEXT  # resolved, nothing to write
+    description = " ".join(tail)
     task = store.update_task(
         project["id"], task["number"], description=description
     )
@@ -2036,23 +2048,14 @@ def type_view(store: Store, arg: Optional[str]) -> Reply:
     Changes the task's type (``store.update_task``, the same write as the
     web UI / MCP ``update_task``). The argument mixes a project reference
     and a task reference, either of which may contain spaces:
-    :func:`_split_project` resolves the longest project prefix. The task
-    reference splits from the type-name words by form:
-
-    - **Number form** — the first word after the project is all digits: it
-      is the task number, resolved strictly with ``store.get_task`` (no
-      title fallback — a write command must not resolve a number to a
-      differently-titled task), and the words after it are the type name.
-    - **Title form** — otherwise the words are split by longest-prefix
-      unique match (mirroring :func:`_split_project`'s and
-      :func:`describe_view`'s conventions): the longest prefix of the
-      remaining words that matches exactly one visible task
-      (case-insensitive title) is the reference, the remaining words the
-      type name. A prefix that matches several tasks gets the
-      disambiguation list (nothing is written); no prefix matching at all
-      gets the not-found reply quoting the first word. (A task whose title
-      ends in words that also read like a type keeps the longer reference
-      — the longest-prefix-first rule, as in ``/describe``.)
+    :func:`_split_project` resolves the longest project prefix, and
+    :func:`_resolve_task_ref_words` splits the remaining words into the
+    task reference (number form: the first word is an all-digit number,
+    resolved strictly by ``store.get_task``; title form: the longest
+    prefix matching exactly one visible task) and the type name — the
+    failure strings (not-found, disambiguation) pass through unchanged.
+    A task whose title ends in words that also read like a type keeps the
+    longer reference — the longest-prefix-first rule, as in ``/describe``.
 
     The type name is matched case-insensitively against the board's task
     types (``store.list_task_types`` — the store's own lookup is
@@ -2089,39 +2092,12 @@ def type_view(store: Store, arg: Optional[str]) -> Reply:
         return _project_not_found(words[0])
     if not rest:
         return type_usage_text(store)
-    if rest[0].isdigit():
-        # Number form: strict number lookup, the rest is the type name.
-        try:
-            task = store.get_task(project["id"], int(rest[0]))
-        except NotFound:
-            return _task_not_found(project["name"], rest[0])
-        type_words = rest[1:]
-    else:
-        # Title form: the longest prefix of the remaining words that
-        # matches exactly one task is the reference; the words after it
-        # are the type name.
-        found = None
-        for i in range(len(rest), 0, -1):
-            ref = " ".join(rest[:i])
-            matches = store.find_tasks_by_title(project["id"], ref)
-            if not matches:
-                continue
-            type_words = rest[i:]
-            if not type_words:
-                if len(matches) == 1:
-                    return type_usage_text(store)  # resolved, nothing to write
-                return _resolve_task(store, project, ref)  # disambiguation
-            if len(matches) == 1:
-                task = store.get_task(project["id"], matches[0]["number"])
-                found = (task, type_words)
-                break
-            return _resolve_task(store, project, ref)  # ambiguous
-        if found is None:
-            return _task_title_not_found(project["name"], rest[0])
-        task, type_words = found
-    if not type_words:
-        return type_usage_text(store)
-    type_ref = " ".join(type_words)
+    task, tail = _resolve_task_ref_words(store, project, rest)
+    if task is None:
+        return tail
+    if not tail:
+        return type_usage_text(store)  # resolved, nothing to write
+    type_ref = " ".join(tail)
     types = store.list_task_types()
     canonical = next(
         (t["name"] for t in types if t["name"].lower() == type_ref.lower()),

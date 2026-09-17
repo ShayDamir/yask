@@ -4072,6 +4072,76 @@ def test_match_type_suffix_edge_cases():
     assert telegram_bot._match_type_suffix(["as", "Bug"], types) == ([], "Bug")
 
 
+def test_resolve_task_ref_words_contract(store):
+    """Direct unit checks for :func:`telegram_bot._resolve_task_ref_words`
+    — the reference/tail split shared by ``/describe`` and ``/type``."""
+    project = store.create_project("yask")
+    store.create_task(project["id"], "the bug")  # #1
+    store.create_task(project["id"], "a b")  # #2
+    store.create_task(project["id"], "a b c")  # #3
+    store.create_task(project["id"], "dup")  # #4
+    store.create_task(project["id"], "dup")  # #5
+    # Number form: strict lookup, the rest is the tail.
+    task, tail = telegram_bot._resolve_task_ref_words(
+        store, project, ["1", "w"]
+    )
+    assert task["number"] == 1
+    assert tail == ["w"]
+    # Number form with an empty tail: the reference consumed the whole
+    # argument (the caller answers its own usage text).
+    task, tail = telegram_bot._resolve_task_ref_words(store, project, ["1"])
+    assert task["number"] == 1
+    assert tail == []
+    # Number not-found: the number-form reply, no title fallback.
+    assert telegram_bot._resolve_task_ref_words(
+        store, project, ["999", "w"]
+    ) == (None, "Task #999 not found in yask.")
+    # Title unique: the matched prefix is the reference, the rest the tail.
+    task, tail = telegram_bot._resolve_task_ref_words(
+        store, project, ["the", "bug", "w"]
+    )
+    assert task["number"] == 1
+    assert tail == ["w"]
+    # Title unique with an empty tail: resolved, nothing left.
+    task, tail = telegram_bot._resolve_task_ref_words(
+        store, project, ["the", "bug"]
+    )
+    assert task["number"] == 1
+    assert tail == []
+    # Longest prefix wins: 'a b c' (the longest prefix with a unique
+    # match) beats the shorter 'a b'.
+    task, tail = telegram_bot._resolve_task_ref_words(
+        store, project, ["a", "b", "c", "w"]
+    )
+    assert task["number"] == 3
+    assert tail == ["w"]
+    # ... and the shorter reference still wins when the longer prefix
+    # matches nothing.
+    task, tail = telegram_bot._resolve_task_ref_words(
+        store, project, ["a", "b", "w"]
+    )
+    assert task["number"] == 2
+    assert tail == ["w"]
+    # Ambiguous prefix: the disambiguation list, with or without a tail.
+    expected = (
+        "Several tasks in yask match 'dup':\n"
+        "  #4 dup — Backlog\n"
+        "  #5 dup — Backlog\n"
+        "Use /task yask <number>."
+    )
+    assert telegram_bot._resolve_task_ref_words(
+        store, project, ["dup", "w"]
+    ) == (None, expected)
+    assert telegram_bot._resolve_task_ref_words(
+        store, project, ["dup"]
+    ) == (None, expected)
+    # No prefix matches at all: the title not-found reply quoting the
+    # first word.
+    assert telegram_bot._resolve_task_ref_words(
+        store, project, ["no", "such", "w"]
+    ) == (None, "Task 'no' not found in yask.")
+
+
 def test_add_usage_and_not_found(store):
     pid = store.create_project("yask")["id"]
     script = run_bot_until_stop(
