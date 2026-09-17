@@ -27,6 +27,9 @@ found by number or by case-insensitive title; the detail view is sent
 as a rich message),
 ``/backlog [project]`` (the tasks in the Backlog state, grouped by
 project, with one inline button per task — the list is sent as a rich
+message),
+``/blocked [project]`` (the tasks in the Blocked state, grouped by
+project, with one inline button per task — the list is sent as a rich
 message), ``/attachment
 <project> <task> <id>`` (shows one of the task's attachments — small
 markdown (<16 KB) inline as a Rich Message, small plain text inline as a
@@ -94,8 +97,9 @@ payload (the main-menu hub's buttons) opens the menu view itself (``h``)
 or one of its routes — the project list (``h:p``), the all-projects task
 list (``h:t``), the chat's subscription list (``h:s``), the add-task usage
 (``h:a``) and the help text (``h:h``); every board view's keyboard
-(``/projects``, ``/tasks``, ``/task`` and the notifications) carries a
-trailing ``Main menu`` row with the bare ``h`` payload, so the hub is one
+(``/projects``, ``/tasks``, ``/task``, ``/backlog``, ``/blocked`` and the
+notifications) carries a trailing ``Main menu`` row with the bare ``h``
+payload, so the hub is one
 tap away from anywhere in the chat, and is the natural entry point:
 ``/start`` replies with the intro text (carrying the ``/login`` guidance)
 plus the hub's keyboard, and ``/help`` with the command reference plus a
@@ -213,6 +217,11 @@ COMMAND_REGISTRY: list[Command] = [
     Command(
         "/backlog",
         "tasks in Backlog (optionally [project])",
+        auth_gated=True,
+    ),
+    Command(
+        "/blocked",
+        "tasks in Blocked (optionally [project])",
         auth_gated=True,
     ),
     Command(
@@ -338,6 +347,7 @@ UNKNOWN_CALLBACK_TEXT = (
 PROJECTS_ERROR_TEXT = "I could not read the board right now. Please try again."
 TASKS_ERROR_TEXT = "I could not read the board right now. Please try again."
 BACKLOG_ERROR_TEXT = "I could not read the board right now. Please try again."
+BLOCKED_ERROR_TEXT = "I could not read the board right now. Please try again."
 TASK_ERROR_TEXT = "I could not read the board right now. Please try again."
 ATTACHMENT_ERROR_TEXT = "I could not read the board right now. Please try again."
 SUBSCRIBE_ERROR_TEXT = (
@@ -843,6 +853,90 @@ def backlog_view(
 
     blocks = ["# Backlog"]
     lines = ["Backlog:"]
+    rows = []
+    for p, tasks in projects:
+        block = f"**{p['id']}. {p['name']}**"
+        lines.append(f"{p['id']}. {p['name']}")
+        for t in tasks:
+            block += f"\n- #{t['number']} {t['title']}"
+            lines.append(f"    #{t['number']} {t['title']}")
+            rows.append(
+                [
+                    {
+                        "text": f"#{t['number']} {t['title']}",
+                        "callback_data": f"t:{p['id']}:{t['number']}",
+                    }
+                ]
+            )
+        blocks.append(block)
+    rows.append([_main_menu_button()])
+    keyboard = {"inline_keyboard": rows}
+    if chat_id is None:
+        return KeyboardReply("\n".join(lines), keyboard)
+    return RichReply("\n\n".join(blocks), keyboard)
+
+
+def blocked_view(
+    store: Store,
+    project_arg: Optional[str] = None,
+    chat_id: Optional[int] = None,
+) -> Reply:
+    """Format the ``/blocked [project]`` reply.
+
+    Without an argument, lists every project (in name order, the same order
+    as ``/projects``) that has at least one task in the Blocked state. With
+    an argument, resolves the project (case-insensitive name or integer id)
+    and lists only its Blocked tasks. An empty board — or a resolved project
+    with no Blocked tasks — shows ``(none)`` under the header; an
+    unresolvable argument yields a not-found reply pointing at ``/projects``.
+
+    When at least one task is listed the reply carries one inline-keyboard
+    row per task, in reading order (label ``#<n> <title>``, ``callback_data``
+    ``t:<project-id>:<number>`` — the task-detail button, answered by
+    :func:`make_callback_dispatch`), followed by a final row carrying the
+    Main-menu button (:func:`_main_menu_button`, payload ``h``); the
+    keyboard is the same in both reply forms. With a ``chat_id`` the reply
+    is a :class:`RichReply`: the board as markdown (blocks joined by one
+    blank line — an H1 ``# Blocked`` header, then one block per project
+    with ``**<id>. <name>**`` as the block's first line and one
+    ``- #<n> <title>`` item per task), sent through the rich → HTML → plain
+    fallback chain with the keyboard threaded. Without one the reply is the
+    plain :class:`KeyboardReply` — the ``Blocked:`` header, one
+    ``<id>. <name>`` line per project and indented ``#<n> <title>`` lines —
+    with the keyboard kept: the per-task buttons are the point of the view,
+    so a press on an inaccessible message (no chat on the original) must not
+    lose the tap targets (the deliberate divergence from
+    :func:`format_task_view`, which drops its keyboard). A reply with no
+    tasks is a plain ``str`` in either form — the Bot API rejects an empty
+    inline keyboard, and there are no tap targets anyway.
+
+    No new truncation cap is added: the task list is unbounded, and a
+    pathological board whose markdown exceeds :data:`RICH_MESSAGE_MAX` 400s
+    the rich leg and degrades through the shared fallback chain, whose
+    HTML/plain legs re-truncate at send time (the same documented
+    philosophy as :func:`format_task_view`).
+    """
+    if project_arg is None:
+        projects = []
+        for p in store.list_projects():
+            tasks = store.list_blocked(p["id"])
+            if tasks:
+                projects.append((p, tasks))
+        if not projects:
+            return "Blocked:\n(none)"
+    else:
+        project = _resolve_project(store, project_arg)
+        if project is None:
+            return (
+                f"Project '{project_arg}' not found. Use /projects to list projects."
+            )
+        tasks = store.list_blocked(project["id"])
+        if not tasks:
+            return "Blocked:\n(none)"
+        projects = [(project, tasks)]
+
+    blocks = ["# Blocked"]
+    lines = ["Blocked:"]
     rows = []
     for p, tasks in projects:
         block = f"**{p['id']}. {p['name']}**"
@@ -2220,6 +2314,13 @@ def _handle_backlog(
     return backlog_view(store, _tasks_arg(text), chat_id)
 
 
+def _handle_blocked(
+    store: Store, text: Optional[str], chat_id: Optional[int]
+) -> Reply:
+    """``/blocked``: the Blocked view for the (optional) project argument."""
+    return blocked_view(store, _tasks_arg(text), chat_id)
+
+
 def _handle_task(
     store: Store, text: Optional[str], chat_id: Optional[int]
 ) -> Reply:
@@ -2298,6 +2399,7 @@ COMMAND_TABLE: dict[str, tuple[CommandHandler, str]] = {
     "/projects": (_handle_projects, PROJECTS_ERROR_TEXT),
     "/tasks": (_handle_tasks, TASKS_ERROR_TEXT),
     "/backlog": (_handle_backlog, BACKLOG_ERROR_TEXT),
+    "/blocked": (_handle_blocked, BLOCKED_ERROR_TEXT),
     "/task": (_handle_task, TASK_ERROR_TEXT),
     "/attachment": (_handle_attachment, ATTACHMENT_ERROR_TEXT),
     "/attach": (_handle_attach, ATTACH_ERROR_TEXT),
@@ -2338,9 +2440,10 @@ def make_dispatch(
     """Build the message→reply dispatcher for a bot bound to ``store``.
 
     Store-backed commands — the rows of :data:`COMMAND_TABLE`
-    (``/projects``, ``/tasks``, ``/backlog``, ``/task``, ``/attachment``,
-    ``/attach``, ``/move``, ``/add``, ``/describe``, ``/type``,
-    ``/subscribe``, ``/unsubscribe``) — read the board through ``store``
+    (``/projects``, ``/tasks``, ``/backlog``, ``/blocked``, ``/task``,
+    ``/attachment``, ``/attach``, ``/move``, ``/add``, ``/describe``,
+    ``/type``, ``/subscribe``, ``/unsubscribe``) — read the board
+    through ``store``
     via their table handler (``/attach`` typed as a plain text message
     answers its usage text; its real path is the file handler below); the
     subscription

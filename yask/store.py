@@ -393,6 +393,27 @@ class Store:
             for r in rows
         ]
 
+    def list_blocked(self, project_id: int) -> list[dict]:
+        """The project's tasks in the Blocked state (the bot's ``/blocked`` view).
+
+        Returns lean ``{"number", "title", "state"}`` dicts for every task
+        whose state is ``Blocked``, in column order (``sort_order``). The
+        ``/blocked`` counterpart of :meth:`list_backlog`; every other state
+        (Backlog, Todo, Planning, In progress, Review, Done, Archived) is
+        excluded. Raises ``NotFound`` for an unknown project id.
+        """
+        self._get_project(project_id)
+        rows = self.conn.execute(
+            "SELECT number, title, state, sort_order, id FROM tasks "
+            "WHERE project_id = ? AND state = ?",
+            (project_id, db.BLOCKED_STATE),
+        ).fetchall()
+        rows = sorted(rows, key=lambda r: (r["sort_order"], r["id"]))
+        return [
+            {"number": r["number"], "title": r["title"], "state": r["state"]}
+            for r in rows
+        ]
+
     def find_tasks_by_title(self, project_id: int, title: str) -> list[dict]:
         """Exact, case-insensitive task-title lookup (the bot's ``/task`` view).
 

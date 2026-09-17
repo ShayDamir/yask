@@ -441,6 +441,74 @@ def test_list_backlog_unknown_project(store):
         store.list_backlog(999)
 
 
+def test_list_blocked_empty(store, project):
+    assert store.list_blocked(project["id"]) == []
+
+
+def test_list_blocked_only_blocked_tasks_and_isolation(store):
+    alpha = store.create_project("alpha")["id"]
+    beta = store.create_project("beta")["id"]
+
+    # alpha: one task in every state
+    backlog = store.create_task(alpha, "backlog")
+    todo = store.create_task(alpha, "todo")
+    store.move_task(alpha, todo["number"], "Todo", confirm=True)
+    planning = store.create_task(alpha, "planning")
+    store.move_task(alpha, planning["number"], "Planning", confirm=True)
+    working = store.create_task(alpha, "working")
+    store.move_task(alpha, working["number"], "In progress", confirm=True)
+    review = store.create_task(alpha, "review")
+    store.move_task(alpha, review["number"], "Review", confirm=True)
+    done = store.create_task(alpha, "done")
+    store.move_task(alpha, done["number"], "Done", confirm=True)
+    blocked = store.create_task(alpha, "blocked")
+    store.move_task(alpha, blocked["number"], "Blocked")
+    archived = store.create_task(alpha, "archived")
+    store.archive_task(alpha, archived["number"], confirm=True)
+
+    # beta: a Blocked task that must not leak into alpha's view
+    other = store.create_task(beta, "other blocked")
+    store.move_task(beta, other["number"], "Blocked")
+
+    out = store.list_blocked(alpha)
+    assert out == [
+        {"number": blocked["number"], "title": "blocked", "state": "Blocked"}
+    ]
+    # the excluded states never appear
+    for t in out:
+        assert t["state"] not in (
+            "Backlog", "Todo", "Planning", "In progress", "Review", "Done",
+            "Archived",
+        )
+    # per-project isolation
+    assert all(t["title"] != "other blocked" for t in out)
+
+
+def test_list_blocked_ordering(store, project):
+    pid = project["id"]
+    # create a then b, then move b before a (column order != creation
+    # order) to prove sort_order is honored
+    a = store.create_task(pid, "a")
+    store.move_task(pid, a["number"], "Blocked")
+    b = store.create_task(pid, "b")
+    store.move_task(pid, b["number"], "Blocked")
+    store.reorder_task(pid, b["number"], before_number=a["number"])
+    c = store.create_task(pid, "c")
+    store.move_task(pid, c["number"], "Blocked")
+
+    out = store.list_blocked(pid)
+    assert [(t["state"], t["title"]) for t in out] == [
+        ("Blocked", "b"),
+        ("Blocked", "a"),
+        ("Blocked", "c"),
+    ]
+
+
+def test_list_blocked_unknown_project(store):
+    with pytest.raises(NotFound):
+        store.list_blocked(999)
+
+
 def test_find_tasks_by_title_case_insensitive_and_number_order(store):
     pid = store.create_project("yask")["id"]
     a = store.create_task(pid, "Fix the bug")

@@ -2087,6 +2087,287 @@ def test_help_mentions_backlog():
     assert "/backlog" in telegram_bot.HELP_TEXT
 
 
+# --- /blocked (store-backed dispatch) ----------------------------------------
+
+
+def test_blocked_empty_board(store):
+    script = run_bot_until_stop(
+        Script([[message_update(920, "/blocked")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent) == 1
+    assert script.sent[0]["chat_id"] == 7
+    assert script.sent[0]["text"] == "Blocked:\n(none)"
+    # no tasks → no keyboard (the Bot API rejects an empty inline_keyboard)
+    assert "reply_markup" not in script.sent[0]
+
+
+def test_blocked_populated_board_exact(store):
+    # zeta is created first (id 1) but "alpha" sorts before "zeta", so the
+    # id-2 project is listed first — display order is by name.
+    zeta = store.create_project("zeta")["id"]
+    alpha = store.create_project("alpha")["id"]
+
+    # alpha: two Blocked tasks plus one task in each other state
+    t = store.create_task(alpha, "blocked 1")
+    store.move_task(alpha, t["number"], "Blocked")               # #1
+    t = store.create_task(alpha, "blocked 2")
+    store.move_task(alpha, t["number"], "Blocked")               # #2
+    store.create_task(alpha, "backlog")                        # #3 Backlog
+    t = store.create_task(alpha, "todo")
+    store.move_task(alpha, t["number"], "Todo", confirm=True)    # #4
+    t = store.create_task(alpha, "working")
+    store.move_task(alpha, t["number"], "In progress", confirm=True)  # #5
+    t = store.create_task(alpha, "done")
+    store.move_task(alpha, t["number"], "Done", confirm=True)    # #6
+    t = store.create_task(alpha, "archived")
+    store.archive_task(alpha, t["number"], confirm=True)         # #7
+
+    # zeta: a single Blocked task
+    t = store.create_task(zeta, "z blocked")                    # #1
+    store.move_task(zeta, t["number"], "Blocked")
+
+    script = run_bot_until_stop(
+        Script([[message_update(921, "/blocked")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    # the list is a rich surface: sendRichMessage with the keyboard, no
+    # plain sendMessage leg
+    assert len(script.sent_rich) == 1
+    assert script.sent == []
+    sent = script.sent_rich[0]
+    assert sent["chat_id"] == 7
+    # exact markdown: name order, id prefixes, column order, and the
+    # non-Blocked states absent
+    assert sent["rich_message"]["markdown"] == (
+        "# Blocked\n"
+        f"\n**{alpha}. alpha**\n"
+        "- #1 blocked 1\n"
+        "- #2 blocked 2\n"
+        f"\n**{zeta}. zeta**\n"
+        "- #1 z blocked"
+    )
+    # one button per task, in reading order (the t: callback payloads),
+    # then the Main-menu row (payload h)
+    assert sent["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 blocked 1", "callback_data": f"t:{alpha}:1"}],
+            [{"text": "#2 blocked 2", "callback_data": f"t:{alpha}:2"}],
+            [{"text": "#1 z blocked", "callback_data": f"t:{zeta}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
+    # every payload is well under the Bot API's 64-byte callback_data limit
+    for row in sent["reply_markup"]["inline_keyboard"]:
+        assert len(row[0]["callback_data"].encode("utf-8")) < 64
+
+
+def test_blocked_filter_by_id_and_name(store):
+    zeta = store.create_project("zeta")["id"]
+    alpha = store.create_project("alpha")["id"]
+    t = store.create_task(alpha, "alpha blocked")
+    store.move_task(alpha, t["number"], "Blocked")
+    t = store.create_task(alpha, "alpha working")
+    store.move_task(alpha, t["number"], "In progress", confirm=True)
+    t = store.create_task(zeta, "zeta blocked")
+    store.move_task(zeta, t["number"], "Blocked")
+
+    # by project name, case-insensitive — the list is a rich surface
+    script = run_bot_until_stop(
+        Script([[message_update(922, "/blocked ALPHA")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent_rich) == 1
+    assert script.sent == []
+    assert script.sent_rich[0]["rich_message"]["markdown"] == (
+        "# Blocked\n"
+        f"\n**{alpha}. alpha**\n"
+        "- #1 alpha blocked"
+    )
+    assert script.sent_rich[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 alpha blocked", "callback_data": f"t:{alpha}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
+
+    # by project id
+    script = run_bot_until_stop(
+        Script([[message_update(923, f"/blocked {zeta}")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent_rich) == 1
+    assert script.sent == []
+    assert script.sent_rich[0]["rich_message"]["markdown"] == (
+        "# Blocked\n"
+        f"\n**{zeta}. zeta**\n"
+        "- #1 zeta blocked"
+    )
+    assert script.sent_rich[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 zeta blocked", "callback_data": f"t:{zeta}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
+
+
+def test_blocked_filter_name_with_spaces(store):
+    pid = store.create_project("my big project")["id"]
+    t = store.create_task(pid, "blocked")
+    store.move_task(pid, t["number"], "Blocked")
+    script = run_bot_until_stop(
+        Script([[message_update(924, "/blocked my big project")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert len(script.sent_rich) == 1
+    assert script.sent == []
+    assert script.sent_rich[0]["rich_message"]["markdown"] == (
+        "# Blocked\n"
+        f"\n**{pid}. my big project**\n"
+        "- #1 blocked"
+    )
+    assert script.sent_rich[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "#1 blocked", "callback_data": f"t:{pid}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
+
+
+def test_blocked_filter_zero_blocked(store):
+    alpha = store.create_project("alpha")["id"]
+    zeta = store.create_project("zeta")["id"]
+    # alpha has only active-state tasks (no Blocked)
+    t = store.create_task(alpha, "working only")
+    store.move_task(alpha, t["number"], "In progress", confirm=True)
+    # zeta has a Blocked task, so the board is non-empty overall
+    t = store.create_task(zeta, "z blocked")
+    store.move_task(zeta, t["number"], "Blocked")
+
+    # project found but zero Blocked tasks
+    script = run_bot_until_stop(
+        Script([[message_update(925, "/blocked alpha")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == "Blocked:\n(none)"
+    # no tasks → no keyboard (the Bot API rejects an empty inline_keyboard)
+    assert "reply_markup" not in script.sent[0]
+
+
+def test_blocked_unknown_project(store):
+    store.create_project("alpha")
+    script = run_bot_until_stop(
+        Script([[message_update(926, "/blocked nope")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Project 'nope' not found. Use /projects to list projects."
+    )
+    assert "reply_markup" not in script.sent[0]
+    # unknown by id
+    script = run_bot_until_stop(
+        Script([[message_update(927, "/blocked 999")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == (
+        "Project '999' not found. Use /projects to list projects."
+    )
+    assert "reply_markup" not in script.sent[0]
+
+
+def test_blocked_with_bot_mention(store):
+    script = run_bot_until_stop(
+        Script([[message_update(928, "/blocked@yask_test_bot")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == "Blocked:\n(none)"
+    assert "reply_markup" not in script.sent[0]
+
+
+def test_blocked_store_failure_replies_and_recovers(store, monkeypatch):
+    # a project must exist so the no-arg view reaches list_blocked
+    store.create_project("alpha")
+
+    def boom(project_id):
+        raise RuntimeError("simulated store failure")
+
+    monkeypatch.setattr(store, "list_blocked", boom)
+    script = run_bot_until_stop(
+        Script([[message_update(929, "/blocked"), message_update(930, "/start")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    # the failure produces a reply, not a crash; the next message is still
+    # answered
+    assert len(script.sent) == 2
+    assert script.sent[0]["text"] == telegram_bot.BLOCKED_ERROR_TEXT
+    assert "reply_markup" not in script.sent[0]
+    assert script.sent[1]["text"] == telegram_bot.START_TEXT
+
+
+def test_blocked_rich_fallback_to_html(store):
+    """A failing rich leg degrades through the shared funnel: the HTML leg
+    carries the markdown re-truncated to the regular budget, converted,
+    with the per-task keyboard threaded — no double-send."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "blocked item")
+    store.move_task(pid, t["number"], "Blocked")
+    script = run_bot_until_stop(
+        Script(
+            [[message_update(931, "/blocked")]],
+            fail_rich_once=(400, "can't parse rich markdown"),
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    # the rich leg fired (and failed) exactly once, full payload
+    assert len(script.sent_rich) == 1
+    expected = telegram_bot.blocked_view(store, chat_id=7)
+    assert isinstance(expected, telegram_bot.RichReply)
+    assert script.sent_rich[0]["rich_message"]["markdown"] == expected.markdown
+    # the HTML leg replaced it — the markdown re-truncated to the regular
+    # budget, converted, keyboard threaded
+    assert len(script.sent) == 1
+    body = script.sent[0]
+    assert body["chat_id"] == 7
+    assert body["parse_mode"] == "HTML"
+    truncated = telegram_bot._truncate_inline(
+        expected.markdown, len(expected.markdown), telegram_bot.REGULAR_TEXT_MAX
+    )
+    assert body["text"] == telegram_bot.markdown_to_html(truncated)
+    assert body["reply_markup"] == expected.reply_markup
+
+
+def test_blocked_rich_kill_switch_off(store):
+    """With rich disabled the /blocked list takes the HTML leg first — no
+    sendRichMessage call."""
+    pid = store.create_project("yask")["id"]
+    t = store.create_task(pid, "blocked item")
+    store.move_task(pid, t["number"], "Blocked")
+    script = run_bot_until_stop(
+        Script(
+            [[message_update(932, "/blocked")]],
+            fail_rich_once=(400, "should never be called"),
+        ),
+        dispatch=telegram_bot.make_dispatch(store),
+        rich=False,
+    )
+    assert script.sent_rich == []
+    assert len(script.sent) == 1
+    body = script.sent[0]
+    assert body["chat_id"] == 7
+    assert body["parse_mode"] == "HTML"
+    expected = telegram_bot.blocked_view(store, chat_id=7)
+    assert isinstance(expected, telegram_bot.RichReply)
+    truncated = telegram_bot._truncate_inline(
+        expected.markdown, len(expected.markdown), telegram_bot.REGULAR_TEXT_MAX
+    )
+    assert body["text"] == telegram_bot.markdown_to_html(truncated)
+    assert body["reply_markup"] == expected.reply_markup
+
+
+def test_help_mentions_blocked():
+    assert "/blocked" in telegram_bot.HELP_TEXT
+
+
 # --- /task (store-backed dispatch) -------------------------------------------
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 100  # 108 bytes
@@ -4847,7 +5128,7 @@ def test_help_mentions_subscribe():
 
 _REGISTRY_NAMES = (
     "/start", "/help", "/login", "/whoami", "/projects", "/tasks",
-    "/task", "/backlog", "/move", "/add", "/describe", "/type",
+    "/task", "/backlog", "/blocked", "/move", "/add", "/describe", "/type",
     "/attachment", "/attach", "/subscribe", "/unsubscribe",
 )
 
@@ -4906,6 +5187,7 @@ def test_dispatch_table_error_texts_match_family_constants():
         "/projects": telegram_bot.PROJECTS_ERROR_TEXT,
         "/tasks": telegram_bot.TASKS_ERROR_TEXT,
         "/backlog": telegram_bot.BACKLOG_ERROR_TEXT,
+        "/blocked": telegram_bot.BLOCKED_ERROR_TEXT,
         "/task": telegram_bot.TASK_ERROR_TEXT,
         "/attachment": telegram_bot.ATTACHMENT_ERROR_TEXT,
         "/attach": telegram_bot.ATTACH_ERROR_TEXT,
@@ -4997,11 +5279,11 @@ def test_startup_posts_registry_commands_via_setmycommands(tmp_path):
     assert body["commands"] == telegram_bot.build_my_commands(
         telegram_bot.COMMAND_REGISTRY
     )
-    # strong exactness: registry names in order, all 16, well-formed entries
+    # strong exactness: registry names in order, all 17, well-formed entries
     assert [e["command"] for e in body["commands"]] == [
         c.name for c in telegram_bot.COMMAND_REGISTRY
     ]
-    assert len(body["commands"]) == 16
+    assert len(body["commands"]) == 17
     for entry in body["commands"]:
         assert set(entry) == {"command", "description"}
 

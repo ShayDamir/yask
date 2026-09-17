@@ -115,6 +115,8 @@ message), `/task
 description, prerequisites, attachments and recent history — the task
 found by number or by title, sent as a rich message), `/backlog
 [project]` (the tasks in the Backlog state, grouped by project, sent as
+a rich message), `/blocked
+[project]` (the tasks in the Blocked state, grouped by project, sent as
 a rich message),
 `/attachment <project> <task> <id>` (shows a task's attachment — small
 markdown (<16 KB) inline as a rich message (Bot API 10.1
@@ -134,8 +136,9 @@ remaining words name the type) and `/attach <project>
 the bot captioned `/attach <project> <number|title>` — the bot downloads
 the file and attaches it; allowed types are markdown/plain text and
 png/jpeg/gif/webp/svg images, 10 MB max). The rich surfaces (the
-`/projects`, `/tasks` and `/backlog` list views, the `/task` detail view
-and small markdown attachments) degrade to HTML, then plain text, if the
+`/projects`, `/tasks`, `/backlog` and `/blocked` list views, the `/task`
+detail view and small markdown attachments) degrade to HTML, then plain
+text, if the
 rich send fails (or the Bot API server has no `sendRichMessage`); set
 `YASK_TELEGRAM_RICH=0` to send plain text only — rich is on by default. A chat can
 `/subscribe [project]` to receive
