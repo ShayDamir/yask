@@ -95,6 +95,10 @@ def test_delete_epic_removes_subtree_with_confirmation(store, project):
     with pytest.raises(ConfirmationRequired) as exc:
         store.delete_task(pid, e["number"])
     assert {a["number"] for a in exc.value.affected} == {e["number"], s["number"]}
+    # the confirmation payload describes current state, not a transition
+    for a in exc.value.affected:
+        assert set(a) == {"number", "title", "type", "state"}
+        assert a["state"] == "Archived"
     store.delete_task(pid, e["number"], confirm=True)
     for n in (e["number"], s["number"]):
         with pytest.raises(NotFound):

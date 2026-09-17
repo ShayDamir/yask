@@ -1014,7 +1014,7 @@ class Store:
         # prerequisites forward (mirrors Archived; Blocked is the only move
         # target among the holding states).
         if to_state in db.HOLDING_STATES:
-            return self._describe_states([row["id"]], to_state)
+            return self._describe_tasks([row["id"]], to_state)
         target_rank = db.STATE_RANK[to_state]
 
         affected_ids: list[int] = [row["id"]]
@@ -1037,9 +1037,16 @@ class Store:
                 if db.STATE_RANK[p["state"]] < target_rank:
                     affected_ids.append(p["id"])
                     frontier.append(p["id"])
-        return self._describe_states(affected_ids, to_state)
+        return self._describe_tasks(affected_ids, to_state)
 
-    def _describe_states(self, ids: list[int], to_state: str) -> list[dict]:
+    def _describe_tasks(self, ids: list[int], to_state: str | None = None) -> list[dict]:
+        """Describe tasks by id for plan/confirmation payloads.
+
+        With ``to_state`` given, each entry describes a state transition:
+        ``number``/``title``/``type``/``from``/``to``. Without it, each entry
+        describes the task's current state: ``number``/``title``/``type``/
+        ``state``.
+        """
         out = []
         for i in ids:
             r = self.conn.execute(
@@ -1047,15 +1054,17 @@ class Store:
                 "FROM tasks t JOIN task_types tt ON tt.id = t.type_id WHERE t.id = ?",
                 (i,),
             ).fetchone()
-            out.append(
-                {
-                    "number": r["number"],
-                    "title": r["title"],
-                    "type": r["type_name"],
-                    "from": r["state"],
-                    "to": to_state,
-                }
-            )
+            entry = {
+                "number": r["number"],
+                "title": r["title"],
+                "type": r["type_name"],
+            }
+            if to_state is None:
+                entry["state"] = r["state"]
+            else:
+                entry["from"] = r["state"]
+                entry["to"] = to_state
+            out.append(entry)
         return out
 
     def _guard_confirmation(self, affected: list[dict], confirm: bool):
@@ -1147,7 +1156,7 @@ class Store:
                 for d in self._all_descendants(row["id"])
                 if d["state"] != db.ARCHIVED_STATE
             ]
-        return self._describe_states(ids, db.ARCHIVED_STATE)
+        return self._describe_tasks(ids, db.ARCHIVED_STATE)
 
     def archive_task(self, project_id: int, number: int, confirm: bool = False) -> dict:
         affected = self.plan_archive(project_id, number)
@@ -1208,22 +1217,7 @@ class Store:
     def plan_delete(self, project_id: int, number: int) -> list[dict]:
         row = self._get_task(project_id, number)
         ids = [row["id"]] + [d["id"] for d in self._all_descendants(row["id"])]
-        out = []
-        for i in ids:
-            r = self.conn.execute(
-                "SELECT t.number, t.title, tt.name AS type_name, t.state "
-                "FROM tasks t JOIN task_types tt ON tt.id = t.type_id WHERE t.id = ?",
-                (i,),
-            ).fetchone()
-            out.append(
-                {
-                    "number": r["number"],
-                    "title": r["title"],
-                    "type": r["type_name"],
-                    "state": r["state"],
-                }
-            )
-        return out
+        return self._describe_tasks(ids)
 
     def delete_task(self, project_id: int, number: int, confirm: bool = False) -> dict:
         row = self._get_task(project_id, number)
