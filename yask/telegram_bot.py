@@ -343,30 +343,29 @@ UNKNOWN_CALLBACK_TEXT = (
     "This button is out of date. Try /help to see what I can do."
 )
 
-# Store-backed command failed: reply, don't crash the poll loop.
-PROJECTS_ERROR_TEXT = "I could not read the board right now. Please try again."
-TASKS_ERROR_TEXT = "I could not read the board right now. Please try again."
-BACKLOG_ERROR_TEXT = "I could not read the board right now. Please try again."
-BLOCKED_ERROR_TEXT = "I could not read the board right now. Please try again."
-TASK_ERROR_TEXT = "I could not read the board right now. Please try again."
-ATTACHMENT_ERROR_TEXT = "I could not read the board right now. Please try again."
+# Store-backed command failed: reply, don't crash the poll loop. All
+# read-failing commands share READ_ERROR_TEXT; all write-failing commands
+# share WRITE_ERROR_TEXT. The per-command names below are aliases kept for
+# the dispatch table and tests, so a wording change is a one-line edit.
+READ_ERROR_TEXT = "I could not read the board right now. Please try again."
+WRITE_ERROR_TEXT = "I could not write to the board right now. Please try again."
+PROJECTS_ERROR_TEXT = READ_ERROR_TEXT
+TASKS_ERROR_TEXT = READ_ERROR_TEXT
+BACKLOG_ERROR_TEXT = READ_ERROR_TEXT
+BLOCKED_ERROR_TEXT = READ_ERROR_TEXT
+TASK_ERROR_TEXT = READ_ERROR_TEXT
+ATTACHMENT_ERROR_TEXT = READ_ERROR_TEXT
 SUBSCRIBE_ERROR_TEXT = (
     "I could not change your subscription right now. Please try again."
 )
 UNSUBSCRIBE_ERROR_TEXT = (
     "I could not change your subscription right now. Please try again."
 )
-MOVE_ERROR_TEXT = "I could not write to the board right now. Please try again."
-ADD_ERROR_TEXT = "I could not write to the board right now. Please try again."
-DESCRIBE_ERROR_TEXT = (
-    "I could not write to the board right now. Please try again."
-)
-TYPE_ERROR_TEXT = (
-    "I could not write to the board right now. Please try again."
-)
-ATTACH_ERROR_TEXT = (
-    "I could not write to the board right now. Please try again."
-)
+MOVE_ERROR_TEXT = WRITE_ERROR_TEXT
+ADD_ERROR_TEXT = WRITE_ERROR_TEXT
+DESCRIBE_ERROR_TEXT = WRITE_ERROR_TEXT
+TYPE_ERROR_TEXT = WRITE_ERROR_TEXT
+ATTACH_ERROR_TEXT = WRITE_ERROR_TEXT
 
 TASK_USAGE_TEXT = (
     "Usage: /task <project> <number|title>\n"

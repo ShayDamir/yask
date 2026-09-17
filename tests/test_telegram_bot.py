@@ -5202,6 +5202,24 @@ def test_dispatch_table_error_texts_match_family_constants():
     assert actual == expected
 
 
+def test_error_family_constants_pin_published_strings():
+    # Aliases cannot drift from the family constants (they are
+    # assignments), but the published wording is product-facing and
+    # currently unpinned: pin it.
+    assert telegram_bot.READ_ERROR_TEXT == (
+        "I could not read the board right now. Please try again.")
+    assert telegram_bot.WRITE_ERROR_TEXT == (
+        "I could not write to the board right now. Please try again.")
+    for name in ("PROJECTS_ERROR_TEXT", "TASKS_ERROR_TEXT",
+                 "BACKLOG_ERROR_TEXT", "BLOCKED_ERROR_TEXT",
+                 "TASK_ERROR_TEXT", "ATTACHMENT_ERROR_TEXT"):
+        assert getattr(telegram_bot, name) == telegram_bot.READ_ERROR_TEXT
+    for name in ("MOVE_ERROR_TEXT", "ADD_ERROR_TEXT",
+                 "DESCRIBE_ERROR_TEXT", "TYPE_ERROR_TEXT",
+                 "ATTACH_ERROR_TEXT"):
+        assert getattr(telegram_bot, name) == telegram_bot.WRITE_ERROR_TEXT
+
+
 # --- command menu (setMyCommands, #66) ----------------------------------------
 
 
