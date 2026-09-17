@@ -185,6 +185,12 @@ def _in_clause(seq) -> tuple[str, list]:
     return (",".join("?" * len(seq)) if seq else "NULL"), seq
 
 
+# Return values for ``Store._bfs``'s ``visit`` callback: end the walk now /
+# mark the neighbor seen without recording or walking it.
+_BFS_STOP = object()
+_BFS_PRUNE = object()
+
+
 def _validate_estimate(estimate: float | None, is_epic: bool) -> None:
     """Shared estimate guards for create/update.
 
@@ -278,6 +284,56 @@ class Store:
             " VALUES (?, ?, ?, ?, ?)",
             (task_id, from_state, to_state, now, self.source if source is None else source),
         )
+
+    def _bfs(self, seed_ids, edge_sql, visit=None, *, id_key="id", seen=None):
+        """Batched BFS over a set of directed edges; returns the visited rows.
+
+        ``edge_sql`` selects one row per neighbor and contains exactly one
+        ``{ph}`` placeholder, filled with ``_in_clause(frontier)``'s
+        placeholders and bound to the frontier ids (an empty frontier
+        degrades to ``IN (NULL)`` and ends the walk, as today). The walk
+        issues one batch query per level; each neighbor is deduped by
+        ``row[id_key]`` against ``seen``, so each neighbor's ``visit`` runs
+        at most once, in BFS order (neighbors in SQL row order).
+
+        ``visit(row)`` decides what a visited neighbor does: any non-sentinel
+        return value (including ``None``) records the row in the result and
+        enqueues the neighbor; ``_BFS_PRUNE`` marks it seen but records and
+        walks nothing (the branch ends); ``_BFS_STOP`` ends the whole walk.
+        ``visit=None`` records and walks every neighbor.
+
+        ``seen`` (default empty) pre-seeds the dedup set — pass the walk's
+        own seed ids to make the walk refuse to loop back to them.
+
+        Note: dedup happens before ``visit``, so a ``visit`` that matches a
+        specific id and stops the walk must never rely on that id being
+        unseen when it is matched (it only enters ``seen`` via the match
+        itself, which ends the walk).
+
+        ``edge_sql`` is applied with ``.format(ph=...)``, so it must contain
+        exactly one ``{ph}`` placeholder and no other literal braces.
+        """
+        seen = set(seen) if seen is not None else set()
+        out = []
+        frontier = list(seed_ids)
+        while frontier:
+            placeholders, params = _in_clause(frontier)
+            rows = self.conn.execute(edge_sql.format(ph=placeholders), params).fetchall()
+            frontier = []
+            for r in rows:
+                nid = r[id_key]
+                if nid in seen:
+                    continue
+                seen.add(nid)
+                if visit is not None:
+                    decision = visit(r)
+                    if decision is _BFS_STOP:
+                        return out
+                    if decision is _BFS_PRUNE:
+                        continue
+                out.append(r)
+                frontier.append(nid)
+        return out
 
     # -- projects ------------------------------------------------------------
 
@@ -677,23 +733,7 @@ class Store:
 
     def _all_descendants(self, task_id: int) -> list[sqlite3.Row]:
         """All transitive children of an epic (BFS over parent links)."""
-        out: list[sqlite3.Row] = []
-        frontier = [task_id]
-        seen: set[int] = set()
-        while frontier:
-            placeholders, params = _in_clause(frontier)
-            rows = self.conn.execute(
-                f"SELECT * FROM tasks WHERE parent_id IN ({placeholders})",
-                params,
-            ).fetchall()
-            frontier = []
-            for r in rows:
-                if r["id"] in seen:
-                    continue
-                seen.add(r["id"])
-                out.append(r)
-                frontier.append(r["id"])
-        return out
+        return self._bfs([task_id], "SELECT * FROM tasks WHERE parent_id IN ({ph})")
 
     def _estimate_total(self, task_id: int) -> float | None:
         """Epic estimate = sum of contained regular tasks' estimates (transitive)."""
@@ -988,24 +1028,25 @@ class Store:
 
     def _depends_on(self, from_id: int, to_id: int) -> bool:
         """True if `from_id` transitively depends on `to_id` via prereq edges."""
-        frontier = [from_id]
-        seen: set[int] = set()
-        while frontier:
-            placeholders, params = _in_clause(frontier)
-            rows = self.conn.execute(
-                f"SELECT prereq_id FROM task_prereqs "
-                f"WHERE task_id IN ({placeholders})",
-                params,
-            ).fetchall()
-            frontier = []
-            for r in rows:
-                if r["prereq_id"] == to_id:
-                    return True
-                if r["prereq_id"] in seen:
-                    continue
-                seen.add(r["prereq_id"])
-                frontier.append(r["prereq_id"])
-        return False
+        found = False
+
+        def visit(r):
+            # A match is only ever seen for the first time here (a match ends
+            # the walk, and `_bfs` marks neighbors seen before calling
+            # `visit`), so the dedupe-first ordering changes nothing.
+            nonlocal found
+            if r["prereq_id"] == to_id:
+                found = True
+                return _BFS_STOP
+            return None
+
+        self._bfs(
+            [from_id],
+            "SELECT prereq_id FROM task_prereqs WHERE task_id IN ({ph})",
+            visit,
+            id_key="prereq_id",
+        )
+        return found
 
     def set_prerequisites(
         self, project_id: int, number: int, prereq_numbers: list[int]
@@ -1050,25 +1091,25 @@ class Store:
         target_rank = db.STATE_RANK[to_state]
 
         affected_ids: list[int] = [row["id"]]
-        seen = {row["id"]}
-        frontier = [row["id"]]
-        while frontier:
-            placeholders, params = _in_clause(frontier)
-            rows = self.conn.execute(
-                "SELECT p2.* FROM task_prereqs pr JOIN tasks p2 ON p2.id = pr.prereq_id "
-                f"WHERE pr.task_id IN ({placeholders})",
-                params,
-            ).fetchall()
-            frontier = []
-            for p in rows:
-                if p["id"] in seen:
-                    continue
-                seen.add(p["id"])
-                if p["state"] in db.HOLDING_STATES:
-                    continue
-                if db.STATE_RANK[p["state"]] < target_rank:
-                    affected_ids.append(p["id"])
-                    frontier.append(p["id"])
+
+        def visit(p):
+            # Prune without walking: prerequisite chains stop at holding-state
+            # tasks (Blocked/Archived) and at tasks already at/past the
+            # target stage.
+            if p["state"] in db.HOLDING_STATES:
+                return _BFS_PRUNE
+            if db.STATE_RANK[p["state"]] < target_rank:
+                affected_ids.append(p["id"])
+                return None
+            return _BFS_PRUNE
+
+        self._bfs(
+            [row["id"]],
+            "SELECT p2.* FROM task_prereqs pr JOIN tasks p2 ON p2.id = pr.prereq_id "
+            "WHERE pr.task_id IN ({ph})",
+            visit,
+            seen={row["id"]},
+        )
         return self._describe_tasks(affected_ids, to_state)
 
     def _describe_tasks(self, ids: list[int], to_state: str | None = None) -> list[dict]:
