@@ -134,6 +134,25 @@ def _verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(digest, expected)
 
 
+_DECOY_HASH: str | None = None
+
+
+def _decoy_hash() -> str:
+    """A random scrypt hash used as the verification target for *unknown*
+    chat ids (task #129), so they cost the server exactly one full scrypt —
+    indistinguishable in timing from a wrong password.
+
+    Lazy and cached: built once per process from the *current*
+    ``SCRYPT_N/R/P`` parameters, so the decoy cost tracks real verifications
+    even if the constants change. ``secrets.token_bytes`` returns ``bytes``,
+    which ``_hash_password`` cannot ``.encode()`` — hence ``token_urlsafe``.
+    """
+    global _DECOY_HASH
+    if _DECOY_HASH is None:
+        _DECOY_HASH = _hash_password(secrets.token_urlsafe(SALT_BYTES))
+    return _DECOY_HASH
+
+
 class YaskError(Exception):
     """Base class for domain errors."""
 
@@ -1680,11 +1699,17 @@ class Store:
         """Whether ``chat_id`` is permitted and ``password`` is its password.
 
         Returns ``False`` both for an unknown chat and for a wrong password —
-        callers (the bot) must not be able to tell the two apart.
+        callers (the bot) must not be able to tell the two apart. An unknown
+        chat is checked against a decoy scrypt hash instead of returning
+        early, so the two answers are indistinguishable *in timing as well*
+        (task #129): an unknown chat costs the server exactly one full
+        hash, the same as a wrong password.
         """
         row = self._get_telegram_user_row(chat_id)
         if row is None:
-            return False
+            # unknown chat: verify against the decoy hash — same result
+            # (False), same cost as a wrong password (task #129)
+            return _verify_password(password or "", _decoy_hash())
         return _verify_password(password or "", row["password_hash"])
 
     def login_telegram_user(self, chat_id: int, password: str) -> bool:
@@ -1695,20 +1720,27 @@ class Store:
         all return ``False`` indistinguishably — no allowlist enumeration).
         A chat is temporarily **locked out** after
         :data:`TELEGRAM_LOGIN_MAX_ATTEMPTS` consecutive failed attempts; the
-        lockout is enforced *before* scrypt is computed, so a locked-out or
-        unknown attempt costs the server no hash. This is the throttle that
-        closes CWE-307 on the bot's ``/login`` (task #69): an attacker who
-        replays ``/login`` can no longer brute-force a weak password an
-        unlimited number of times. On success the chat's
-        ``authenticated_at`` is stamped with the current time and the failure
-        counter is reset — the session lives in the database, so it survives
-        bot restarts. A re-login simply re-stamps the timestamp (idempotent).
+        lockout is enforced *before* scrypt is computed, so a locked-out
+        attempt costs the server no hash. An unknown attempt, by contrast,
+        pays a full decoy hash — response timing must not reveal allowlist
+        membership (task #129). This is the throttle that closes CWE-307 on
+        the bot's ``/login`` (task #69): an attacker who replays ``/login``
+        can no longer brute-force a weak password an unlimited number of
+        times. On success the chat's ``authenticated_at`` is stamped with the
+        current time and the failure counter is reset — the session lives in
+        the database, so it survives bot restarts. A re-login simply
+        re-stamps the timestamp (idempotent).
         """
-        # Unknown chat short-circuits with no state written; a locked-out chat
-        # short-circuits *before* scrypt — the throttle gates verification, not
-        # merely the result of it.
+        # An unknown chat pays one decoy scrypt (no state is written) so its
+        # latency matches a wrong password (task #129); a locked-out chat
+        # short-circuits *before* scrypt — the throttle gates verification,
+        # not merely the result of it. Residual (intentional): a *locked*
+        # known chat still responds faster than an unknown one; costing
+        # locked attempts a full hash would undo task #69's "lockout costs
+        # no hash" DoS protection.
         row = self._get_telegram_user_row(chat_id)
         if row is None:
+            _verify_password(password or "", _decoy_hash())  # cost only; always False
             return False
         if _is_locked(row):
             return False

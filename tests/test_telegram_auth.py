@@ -5,6 +5,9 @@ plaintext, never returned), password verification. API level: the four
 global endpoints the web UI uses to manage the list.
 """
 
+import statistics
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -361,3 +364,36 @@ def test_lockout_is_independently_keyed_by_chat():
     assert store.login_telegram_user(7, "pw") is False
     # ...but chat 8, a different chat, still logs in
     assert store.login_telegram_user(8, "pw") is True
+
+
+# --- store: unknown-chat decoy / timing (task #129) ---------------------------
+
+
+def test_unknown_chat_costs_as_much_as_wrong_password():
+    """An unknown chat id must take about as long as a wrong password:
+    response time must not reveal allowlist membership (task #129)."""
+    store = Store(db.connect(":memory:"))
+    store.add_telegram_user(7, "pw")
+    # warm up on an *unknown* chat only: triggers the one-time decoy
+    # generation (2x scrypt) outside the measured window, and deliberately
+    # leaves chat 7's failure counter at 0 — a burned counter would make the
+    # lock land on the 4th measured attempt and the 5th would fast-path
+    store.login_telegram_user(8, "warm")
+    unknown = []
+    for _ in range(5):
+        start = time.perf_counter()
+        store.login_telegram_user(8, "pw")
+        unknown.append(time.perf_counter() - start)
+    # the 5 wrong attempts reach the lockout threshold exactly on the 5th —
+    # the lock stamp is written *after* that attempt's verification, so all
+    # 5 measurements pay the full scrypt
+    wrong = []
+    for _ in range(5):
+        start = time.perf_counter()
+        store.login_telegram_user(7, "wrong")
+        wrong.append(time.perf_counter() - start)
+    # relative band (machine/CI-speed independent): a regression to a fast
+    # early-return would collapse the unknown side to ~0.1 ms vs ~100 ms
+    median_unknown = statistics.median(unknown)
+    median_wrong = statistics.median(wrong)
+    assert 0.5 * median_wrong <= median_unknown <= 1.5 * median_wrong
