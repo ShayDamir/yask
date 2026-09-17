@@ -2449,8 +2449,10 @@ def make_dispatch(
         within ``Store.MAX_ATTACHMENT_SIZE``); then the file is
         downloaded (``api.get_file_bytes``) and stored
         (``store.add_attachment`` — which sanitizes the filename and
-        re-enforces the type allowlist and the size cap as the backstop
-        when Telegram's metadata was missing). The success reply is a
+        re-enforces the type allowlist, the size cap, and the bitmap pixel
+        cap as the backstop when Telegram's metadata was missing; a
+        store-level ``ValidationError`` is answered with its own domain
+        message, e.g. the pixel-bomb rejection). The success reply is a
         :class:`KeyboardReply` confirmation with the task's detail
         button and the Main-menu row (the ``/add`` confirmation's
         shape); every failure path is a plain ``str``.
@@ -2500,6 +2502,8 @@ def make_dispatch(
             meta = store.add_attachment(
                 project["id"], task["number"], filename, content_type, data
             )
+        except ValidationError as e:
+            return str(e)
         except Exception:
             return ATTACH_ERROR_TEXT
         text = (

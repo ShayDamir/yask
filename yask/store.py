@@ -29,6 +29,7 @@ import math
 import re
 import secrets
 import sqlite3
+import struct
 from typing import Any
 
 from . import db, spec
@@ -221,6 +222,112 @@ def _validate_estimate(estimate: float | None, is_epic: bool) -> None:
         raise ValidationError(
             "epics are not estimated; their estimate is the sum of contained tasks"
         )
+
+
+# -- raster image headers (the attachment pixel-bomb guard, task #127) -------
+#
+# Pure-stdlib header reads for the four bitmap attachment types. The guard
+# needs only the *declared* canvas size, never a decode. Every parser returns
+# ``None`` on truncation or malformation — fail-open: a headerless bitmap is
+# not renderable as a bomb by a browser either.
+
+
+def _png_dimensions(data: bytes) -> tuple[int, int] | None:
+    # 8-byte signature, then the first chunk: len (BE32) + "IHDR" + w (BE32)
+    # + h (BE32).
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        return None
+    w, h = struct.unpack(">II", data[16:24])
+    return w, h
+
+
+def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
+    # SOI, then segments: FF <marker>; TEM (0x01) and RST0-RST7 (0xD0-0xD7)
+    # are standalone, FF 00 is a fill byte, every other marker carries a
+    # BE16 length (itself included). The first SOFn (0xC0-0xCF, excluding the
+    # DHT/JPG/DAC 0xC4/0xC8/0xCC) holds precision + h (BE16) + w (BE16).
+    if len(data) < 2 or data[:2] != b"\xff\xd8":
+        return None
+    i, n = 2, len(data)
+    while i + 1 < n:
+        if data[i] != 0xFF:
+            return None
+        marker = data[i + 1]
+        if marker == 0x01 or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        if marker == 0x00:
+            i += 1
+            continue
+        if marker == 0xD9:
+            return None  # EOI before any SOF
+        if i + 4 > n:
+            return None
+        length = struct.unpack(">H", data[i + 2 : i + 4])[0]
+        if length < 2:
+            return None
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            if length < 8 or i + 9 > n:
+                return None
+            h, w = struct.unpack(">HH", data[i + 5 : i + 9])
+            return w, h
+        i += 2 + length
+    return None
+
+
+def _gif_dimensions(data: bytes) -> tuple[int, int] | None:
+    # "GIF87a"/"GIF89a" + logical screen descriptor: w (LE16) + h (LE16).
+    if len(data) < 10 or data[:6] not in (b"GIF87a", b"GIF89a"):
+        return None
+    w, h = struct.unpack("<HH", data[6:10])
+    return w, h
+
+
+def _webp_dimensions(data: bytes) -> tuple[int, int] | None:
+    # RIFF container: "RIFF" + size (LE32) + "WEBP" + chunk fourcc; the chunk
+    # data starts at 20.
+    if len(data) < 16 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        return None
+    fourcc = data[12:16]
+    if fourcc == b"VP8 ":
+        # Lossy: start code (20:23) + frame tag (23:26), then w/h as LE16
+        # with 14-bit fields.
+        if len(data) < 30:
+            return None
+        w = int.from_bytes(data[26:28], "little") & 0x3FFF
+        h = int.from_bytes(data[28:30], "little") & 0x3FFF
+        return w, h
+    if fourcc == b"VP8L":
+        # Lossless: signature byte 0x2F, then a 32-bit bitstream with w-1 in
+        # bits 0-13 and h-1 in bits 14-27.
+        if len(data) < 25 or data[20] != 0x2F:
+            return None
+        v = struct.unpack("<I", data[21:25])[0]
+        return (v & 0x3FFF) + 1, ((v >> 14) & 0x3FFF) + 1
+    if fourcc == b"VP8X":
+        # Extended (what the pixel-bomb report calls "VP9X"): flags (20:24),
+        # then w-1 / h-1 as 24-bit little-endian.
+        if len(data) < 30:
+            return None
+        w = int.from_bytes(data[24:27], "little") + 1
+        h = int.from_bytes(data[27:30], "little") + 1
+        return w, h
+    return None
+
+
+def _image_dimensions(content_type: str, data: bytes) -> tuple[int, int] | None:
+    """The declared (width, height) of a raster attachment, or ``None`` when
+    the header cannot be deciphered (truncated / malformed → caller
+    accepts; see the fail-open note above)."""
+    if content_type == "image/png":
+        return _png_dimensions(data)
+    if content_type == "image/jpeg":
+        return _jpeg_dimensions(data)
+    if content_type == "image/gif":
+        return _gif_dimensions(data)
+    if content_type == "image/webp":
+        return _webp_dimensions(data)
+    return None
 
 
 class Store:
@@ -1671,6 +1778,22 @@ class Store:
         "image/svg+xml",
     }
     MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024
+    # The bitmap pixel-area cap (task #127): the encoded-size cap above is
+    # not enough — a few-KB PNG/JPEG may declare a 30000x30000 canvas that
+    # decodes to ~3.6 GB of pixels, and the web viewer's <img> then freezes
+    # / OOMs the tab of whoever opens it (CWE-400). 25 Mpixel ≈ 100 MB of
+    # RGBA stays within what browsers decode sanely; the 10 MB encoded cap
+    # remains the backstop.
+    MAX_IMAGE_PIXELS = 25_000_000
+    # The bitmap types subject to the pixel cap. SVG is excluded: a vector
+    # format with no bitmap dimensions (and served as a forced download
+    # under an inert CSP, never decoded in-page).
+    RASTER_IMAGE_TYPES = {
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+    }
 
     @staticmethod
     def _sanitize_filename(filename: str) -> str:
@@ -1750,6 +1873,19 @@ class Store:
             )
         if len(data) > self.MAX_ATTACHMENT_SIZE:
             raise ValidationError("attachment exceeds 10 MB limit")
+        # Pixel-bomb guard (task #127): a few-KB bitmap may declare a canvas
+        # that decodes to gigabytes of pixels and DoS the web viewer of
+        # whoever opens it. Undecipherable headers fail open — see
+        # _image_dimensions.
+        if content_type in self.RASTER_IMAGE_TYPES:
+            dims = _image_dimensions(content_type, data)
+            if dims is not None:
+                w, h = dims
+                if w * h > self.MAX_IMAGE_PIXELS:
+                    raise ValidationError(
+                        f"image exceeds {self.MAX_IMAGE_PIXELS // 1_000_000} "
+                        f"MPixel limit ({w}x{h})"
+                    )
         now = self._now()
         with self.conn:
             cur = self.conn.execute(

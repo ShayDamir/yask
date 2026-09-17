@@ -9,6 +9,7 @@ import html
 import json
 import re
 import sqlite3
+import struct
 import time
 
 import httpx
@@ -4928,7 +4929,9 @@ def test_attach_missing_metadata_falls_back_and_is_rejected(store):
 
 def test_attach_missing_size_backstopped_by_store_cap(store):
     """When Telegram omits file_size the pre-check is skipped; the store's
-    10 MB cap still rejects the downloaded bytes (the attach error text)."""
+    10 MB cap still rejects the downloaded bytes — the reply is the store's
+    domain message (store-level ValidationErrors are surfaced as their own
+    text, task #127), not the generic attach error."""
     pid = store.create_project("yask")["id"]
     store.create_task(pid, "the bug")
     body = b"x" * (Store.MAX_ATTACHMENT_SIZE + 1)
@@ -4947,7 +4950,50 @@ def test_attach_missing_size_backstopped_by_store_cap(store):
         ),
         build_dispatch=_attach_build(store),
     )
-    assert script.sent[0]["text"] == telegram_bot.ATTACH_ERROR_TEXT
+    assert script.sent[0]["text"] == "attachment exceeds 10 MB limit"
+    assert script.file_gets == ["DOC-1"]
+    assert store.list_attachments(pid, 1) == []
+
+
+def _bomb_png(w: int, h: int) -> bytes:
+    """A minimal crafted PNG: signature + IHDR with the declared canvas
+    (the pixel-bomb shape; CRC/IDAT omitted)."""
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", 13)
+        + b"IHDR"
+        + struct.pack(">II", w, h)
+        + b"\x08\x06\x00\x00\x00"
+    )
+
+
+def test_attach_pixel_bomb_rejected(store):
+    """A pixel bomb passes the declared-size pre-check (the encoded bytes
+    are tiny) but the store's pixel cap still rejects it — the reply is the
+    specific domain message (not the generic attach error text), nothing
+    is stored."""
+    pid = store.create_project("yask")["id"]
+    store.create_task(pid, "the bug")
+    body = _bomb_png(30000, 30000)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [
+                    document_update(
+                        819,
+                        caption="/attach yask 1",
+                        file_name="bomb.png",
+                        mime_type="image/png",
+                        file_size=len(body),
+                    )
+                ]
+            ],
+            file_bytes=body,
+        ),
+        build_dispatch=_attach_build(store),
+    )
+    assert "MPixel" in script.sent[0]["text"]
+    assert "30000x30000" in script.sent[0]["text"]
     assert script.file_gets == ["DOC-1"]
     assert store.list_attachments(pid, 1) == []
 
