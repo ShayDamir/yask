@@ -251,6 +251,24 @@ class Store:
     def _is_epic_row(self, row: sqlite3.Row) -> bool:
         return bool(self._get_type(row["type_id"])["is_epic"])
 
+    def _replace_links(self, table: str, key_col: str, key, item_col: str, values: list) -> None:
+        """Replace every link row owned by `key` in one transaction.
+
+        The DELETE and INSERT run in a single `with self.conn:` block, so
+        the link set is swapped atomically: either all old rows are gone
+        and all new rows present, or (on error) nothing changed. All
+        validation must happen in the caller before this runs, so a
+        rejected call leaves the previous links untouched.
+        """
+        with self.conn:
+            self.conn.execute(
+                f"DELETE FROM {table} WHERE {key_col} = ?", (key,)
+            )
+            self.conn.executemany(
+                f"INSERT INTO {table}({key_col}, {item_col}) VALUES (?, ?)",
+                [(key, v) for v in values],
+            )
+
     def _log_state(
         self, task_id: int, from_state: str | None, to_state: str, now: str,
         source: str | None = None,
@@ -984,14 +1002,7 @@ class Store:
                 )
             if target["id"] not in prereq_ids:
                 prereq_ids.append(target["id"])
-        with self.conn:
-            self.conn.execute(
-                "DELETE FROM task_prereqs WHERE task_id = ?", (row["id"],)
-            )
-            self.conn.executemany(
-                "INSERT INTO task_prereqs(task_id, prereq_id) VALUES (?, ?)",
-                [(row["id"], p) for p in prereq_ids],
-            )
+        self._replace_links("task_prereqs", "task_id", row["id"], "prereq_id", prereq_ids)
         return self.get_task(project_id, number)
 
     # -- moving in the workflow --------------------------------------------------
@@ -1768,14 +1779,7 @@ class Store:
                 raise ValidationError(f"label {lid} does not belong to this project")
             if lid not in deduped:
                 deduped.append(lid)
-        with self.conn:
-            self.conn.execute(
-                "DELETE FROM task_labels WHERE task_id = ?", (row["id"],)
-            )
-            self.conn.executemany(
-                "INSERT INTO task_labels(task_id, label_id) VALUES (?, ?)",
-                [(row["id"], lid) for lid in deduped],
-            )
+        self._replace_links("task_labels", "task_id", row["id"], "label_id", deduped)
         return self.get_task(project_id, number)
 
     def delete_label(self, project_id: int, label_id: int) -> dict:
@@ -1829,14 +1833,7 @@ class Store:
                 continue
             seen.add(key)
             order.append(name)
-        with self.conn:
-            self.conn.execute(
-                "DELETE FROM project_roles WHERE project_id = ?", (project_id,)
-            )
-            self.conn.executemany(
-                "INSERT INTO project_roles(project_id, name) VALUES (?, ?)",
-                [(project_id, name) for name in order],
-            )
+        self._replace_links("project_roles", "project_id", project_id, "name", order)
         return self.list_project_roles(project_id)
 
     def remove_project_role(self, project_id: int, name: str) -> dict:
