@@ -5,6 +5,10 @@ tasks, their types, prerequisites, state history, attachments, Telegram
 subscriptions and the Telegram bot's permitted-user allowlist (hashed
 passwords plus each chat's persisted login session) — is stored here.
 Attachments are kept as BLOBs so the database is fully self-contained.
+
+Because of that the data is machine-private: ``connect`` keeps the data
+directory at 0700 and the database file with its WAL sidecars at 0600,
+re-applied on every connect.
 """
 
 from __future__ import annotations
@@ -178,7 +182,38 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     _ensure_missing_columns(conn)
     _seed_task_types(conn)
+    _restrict_permissions(path)
     return conn
+
+
+def _restrict_permissions(path: Path) -> None:
+    """Make the data directory (0700) and database files (0600) machine-private.
+
+    The DB holds the whole board, attachments as BLOBs, and the Telegram
+    allowlist's scrypt password hashes, so a 0644 file in a 0755 directory
+    (the umask-022 default) would leak all of it to every local user.
+    Chmodding on every connect — not only on creation — is deliberate:
+    SQLite recreates the WAL sidecars with umask-default permissions after
+    every checkpoint, and a legacy world-readable install is repaired on the
+    next start of any subcommand.
+
+    Anonymous in-memory databases are skipped: they have no on-disk state to
+    protect, and for ``Path(":memory:")`` the parent is the process's current
+    working directory, so chmodding it would silently revoke other local
+    users' access to an unrelated directory.
+    """
+    if path.name == ":memory:":
+        return
+    # Leaf only: ancestors created by mkdir(parents=True) (e.g.
+    # ~/.local/share) are shared with other apps and must not be touched.
+    path.parent.chmod(0o700)
+    for candidate in (
+        path,
+        path.with_name(path.name + "-wal"),
+        path.with_name(path.name + "-shm"),
+    ):
+        if candidate.exists():
+            candidate.chmod(0o600)
 
 
 def _ensure_missing_columns(conn: sqlite3.Connection) -> None:

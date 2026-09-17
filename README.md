@@ -72,6 +72,11 @@ yask serve --data DIR     # or: YASK_DATA=DIR yask serve
 The UI is vanilla ES modules (no build step). State lives in a SQLite database
 inside the data directory (default `~/.local/share/yask/yask.db`).
 
+The data directory is machine-private: it is created 0700 and the database
+file with its WAL sidecars 0600, and these modes are re-applied on every
+start — the DB holds the boards, attachment BLOBs, and the Telegram bot's
+password hashes, so other local users must not be able to read it.
+
 The server is loopback-only by design and unauthenticated: the loopback bind
 is the boundary. As defense in depth it also rejects non-loopback `Host`
 headers and cross-origin `Origin` / `Sec-Fetch-Site: cross-site` requests, so
