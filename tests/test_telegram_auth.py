@@ -20,6 +20,7 @@ from yask.store import (
     Store,
     ValidationError,
     TELEGRAM_LOGIN_MAX_ATTEMPTS,
+    TELEGRAM_MAX_PASSWORD_LENGTH,
     TELEGRAM_MIN_PASSWORD_LENGTH,
     TELEGRAM_SESSION_TTL_SECONDS,
 )
@@ -92,6 +93,28 @@ def test_add_telegram_user_password_length_boundary(store):
         store.add_telegram_user(1, "a1234567890")
     # exactly the floor with two character classes: accepted
     assert store.add_telegram_user(1, "a12345678901")["chat_id"] == 1
+
+
+def test_telegram_user_password_max_length_boundary(store):
+    # task #133: scrypt's CPU cost scales with password length, so the set
+    # paths cap it (before the hash runs) — exactly the cap is accepted,
+    # one char beyond is rejected.
+    ok = "a" * (TELEGRAM_MAX_PASSWORD_LENGTH - 2) + "19"
+    assert store.add_telegram_user(1, ok)["chat_id"] == 1
+    over = "a" * (TELEGRAM_MAX_PASSWORD_LENGTH - 1) + "19"
+    with pytest.raises(
+        ValidationError, match=f"at most {TELEGRAM_MAX_PASSWORD_LENGTH}"
+    ):
+        store.add_telegram_user(2, over)
+    # the rejected chat was never created
+    assert [u["chat_id"] for u in store.list_telegram_users()] == [1]
+    # the rotation path enforces the same cap, and a rejected rotation
+    # leaves the stored password intact
+    with pytest.raises(
+        ValidationError, match=f"at most {TELEGRAM_MAX_PASSWORD_LENGTH}"
+    ):
+        store.set_telegram_user_password(1, over)
+    assert store.verify_telegram_user(1, ok) is True
 
 
 def test_add_telegram_user_requires_two_character_classes(store):
@@ -364,6 +387,11 @@ def test_telegram_users_api_crud(client):
     assert client.post("/api/telegram-users", json={"chat_id": 43, "password": " "}).status_code == 400
     # a weak password is a validation error (the strength floor, task #130)
     assert client.post("/api/telegram-users", json={"chat_id": 45, "password": "short"}).status_code == 400
+    # an over-the-limit password is a validation error (task #133)
+    over = "a" * (TELEGRAM_MAX_PASSWORD_LENGTH - 1) + "19"
+    assert client.post("/api/telegram-users", json={"chat_id": 46, "password": over}).status_code == 400
+    # exactly the cap is accepted
+    assert client.post("/api/telegram-users", json={"chat_id": 47, "password": "a" * (TELEGRAM_MAX_PASSWORD_LENGTH - 2) + "19"}).status_code == 201
 
     # password rotation
     r = client.put("/api/telegram-users/42", json={"password": NEW_PW})
@@ -374,11 +402,14 @@ def test_telegram_users_api_crud(client):
     assert client.put("/api/telegram-users/99", json={"password": TEST_PW}).status_code == 404
     assert client.put("/api/telegram-users/42", json={"password": ""}).status_code == 400
     assert client.put("/api/telegram-users/42", json={"password": "short"}).status_code == 400
+    # an over-the-limit password is a validation error (task #133)
+    assert client.put("/api/telegram-users/42", json={"password": over}).status_code == 400
 
     # removal
     r = client.delete("/api/telegram-users/42")
     assert r.status_code == 200
     assert r.json() == {"applied": True, "removed": True}
+    assert client.delete("/api/telegram-users/47").status_code == 200
     assert client.get("/api/telegram-users").json() == []
     assert client.delete("/api/telegram-users/42").status_code == 404
 

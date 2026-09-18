@@ -46,6 +46,11 @@ FIELD_LIMITS = {
     "labelName": 64,
     "roleName": 64,
     "attachmentFilename": 255,
+    # Telegram allowlist password (task #133): scrypt's CPU cost scales with
+    # password length, so a multi-MB password from the (loopback-only,
+    # unauthenticated) set endpoints is a CPU DoS — cap it well above any
+    # sane password.
+    "telegramPassword": 256,
 }
 
 # The shared inline-markdown subset, keyed by construction. The ``_star``

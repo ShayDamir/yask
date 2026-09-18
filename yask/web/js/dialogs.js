@@ -835,6 +835,7 @@ export function openTelegramUsersModal() {
         type: "password",
         placeholder: "new password",
         minlength: "12",
+        maxlength: FIELD_LIMITS.telegramPassword,
         autocomplete: "new-password",
       });
       const saveBtn = h("button", { class: "btn ghost", type: "button" }, "Save");
@@ -938,6 +939,7 @@ export function openTelegramUsersModal() {
     id: "tg-add-pw",
     placeholder: "password",
     minlength: "12",
+    maxlength: FIELD_LIMITS.telegramPassword,
     autocomplete: "new-password",
   });
   const addBtn = h("button", { class: "btn", type: "button", id: "tg-add-btn" }, "Add");

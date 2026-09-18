@@ -51,6 +51,7 @@ TYPE_NAME_MAX = spec.FIELD_LIMITS["taskTypeName"]
 LABEL_NAME_MAX = spec.FIELD_LIMITS["labelName"]
 ROLE_NAME_MAX = spec.FIELD_LIMITS["roleName"]
 FILENAME_MAX = spec.FIELD_LIMITS["attachmentFilename"]
+TELEGRAM_MAX_PASSWORD_LENGTH = spec.FIELD_LIMITS["telegramPassword"]
 
 
 # -- password hashing (the Telegram bot's user allowlist) ----------------------
@@ -97,9 +98,14 @@ TELEGRAM_MIN_PASSWORD_LENGTH = 12
 
 
 def _check_telegram_password(password: str) -> None:
-    """Raise ``ValidationError`` unless ``password`` is non-empty, at least
-    ``TELEGRAM_MIN_PASSWORD_LENGTH`` characters, and spans at least two of
-    the lowercase / uppercase / digit / other character classes.
+    """Raise ``ValidationError`` unless ``password`` is non-empty, between
+    ``TELEGRAM_MIN_PASSWORD_LENGTH`` and ``TELEGRAM_MAX_PASSWORD_LENGTH``
+    characters, and spans at least two of the lowercase / uppercase / digit
+    / other character classes.
+
+    The cap (task #133) is enforced here — before the scrypt hash runs,
+    whose CPU cost scales with password length — so an oversized password
+    costs the server nothing.
 
     The two set paths (``add_telegram_user`` / ``set_telegram_user_password``)
     share this; the verify/login paths deliberately do not check strength, so
@@ -110,6 +116,10 @@ def _check_telegram_password(password: str) -> None:
     if len(password) < TELEGRAM_MIN_PASSWORD_LENGTH:
         raise ValidationError(
             f"password must be at least {TELEGRAM_MIN_PASSWORD_LENGTH} characters"
+        )
+    if len(password) > TELEGRAM_MAX_PASSWORD_LENGTH:
+        raise ValidationError(
+            f"password must be at most {TELEGRAM_MAX_PASSWORD_LENGTH} characters"
         )
     classes = sum(
         (
@@ -1689,14 +1699,15 @@ class Store:
         """Permit a Telegram chat to authenticate to the bot.
 
         ``chat_id`` must be a positive integer and ``password`` must meet
-        the strength floor (``_check_telegram_password``: non-empty, at
-        least ``TELEGRAM_MIN_PASSWORD_LENGTH`` characters, at least two
-        character classes); the password is stored only as a salted scrypt
-        hash, never in plain form. A chat that is already permitted is a
-        conflict — use :meth:`set_telegram_user_password` to rotate its
-        password. The returned dict never carries the hash. A newly
-        permitted chat holds no login session yet — it must ``/login`` once
-        before the board is open to it.
+        the strength floor (``_check_telegram_password``: non-empty, between
+        ``TELEGRAM_MIN_PASSWORD_LENGTH`` and ``TELEGRAM_MAX_PASSWORD_LENGTH``
+        characters, at least two character classes); the password is stored
+        only as a salted scrypt hash, never in plain form. A chat that is
+        already permitted is a conflict — use
+        :meth:`set_telegram_user_password` to rotate its password. The
+        returned dict never carries the hash. A newly permitted chat holds
+        no login session yet — it must ``/login`` once before the board is
+        open to it.
         """
         if not isinstance(chat_id, int) or isinstance(chat_id, bool) or chat_id <= 0:
             raise ValidationError("chat id must be a positive integer")
