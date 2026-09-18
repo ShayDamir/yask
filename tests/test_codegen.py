@@ -2,8 +2,8 @@
 
 Python is the single source of truth for the cross-language constants
 (workflow states + ``DEFAULT_STATE`` from ``yask.db``, the label-color
-hex regex, the shared inline-markdown regex subset, and the free-text
-field length limits from ``yask.spec``). ``yask.codegen`` emits ``yask/web/js/constants.js`` from
+hex regex, the shared inline-markdown regex subset, the free-text field
+length limits, and the bitmap pixel-cap constants from ``yask.spec``). ``yask.codegen`` emits ``yask/web/js/constants.js`` from
 them; these tests pin the generated file to the Python constants so that
 editing one side without regenerating (or letting a regex drift between
 the two languages) fails here. There is no JS runtime in the dev
@@ -15,7 +15,7 @@ import json
 import re
 from pathlib import Path
 
-from yask import codegen, db, spec
+from yask import codegen, db, spec, store
 from yask import telegram_bot
 
 CONSTANTS_JS = Path(__file__).parent.parent / "yask" / "web" / "js" / "constants.js"
@@ -59,6 +59,21 @@ def test_field_limits_constants():
     assert exp["FIELD_LIMITS"] == spec.FIELD_LIMITS
     # every limit is a positive character count
     assert all(isinstance(v, int) and v > 0 for v in exp["FIELD_LIMITS"].values())
+
+
+def test_image_pixel_constants():
+    """The pixel-bomb cap and its raster types are single-sourced in spec
+    (#127 store enforcement, #134 viewer re-check): the generated exports,
+    the spec source, and the store's class attributes must agree so the
+    upload check and the display check cannot drift in either direction."""
+    exp = _exports()
+    assert isinstance(exp["MAX_IMAGE_PIXELS"], int)
+    assert exp["MAX_IMAGE_PIXELS"] == spec.MAX_IMAGE_PIXELS > 0
+    assert exp["RASTER_IMAGE_TYPES"] == spec.RASTER_IMAGE_TYPES
+    assert all(t.startswith("image/") for t in exp["RASTER_IMAGE_TYPES"])
+    # the store (enforcement point) mirrors the spec
+    assert store.Store.MAX_IMAGE_PIXELS == spec.MAX_IMAGE_PIXELS
+    assert store.Store.RASTER_IMAGE_TYPES == set(spec.RASTER_IMAGE_TYPES)
 
 
 def test_color_hex_regex_constant():

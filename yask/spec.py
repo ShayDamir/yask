@@ -5,7 +5,9 @@ languages:
 
 * Python imports them directly — ``store`` compiles
   :data:`COLOR_HEX_RE` (``_normalize_color``) and enforces
-  :data:`FIELD_LIMITS` (every free-text field length limit),
+  :data:`FIELD_LIMITS` (every free-text field length limit) and
+  :data:`MAX_IMAGE_PIXELS` (the bitmap pixel-area cap, task #127, which the
+  web viewer re-checks per :data:`RASTER_IMAGE_TYPES` — task #134);
   ``telegram_bot`` compiles the :data:`MARKDOWN` regexes (the HTML-fallback
   converter's inline subset).
 * JavaScript receives them through the generated
@@ -52,6 +54,26 @@ FIELD_LIMITS = {
     # sane password.
     "telegramPassword": 256,
 }
+
+# The bitmap pixel-area cap (task #127): a few-KB PNG/JPEG may declare a
+# 30000x30000 canvas that decodes to ~3.6 GB of pixels, and the web viewer's
+# ``<img>`` then freezes / OOMs the tab of whoever opens it (CWE-400).
+# 25 Mpixel ≈ 100 MB of RGBA stays within what browsers decode sanely.
+# Python enforces it at upload (``store.add_attachment``); the web viewer
+# re-checks it when displaying bitmaps stored before that fix existed
+# (task #134). Single-sourced here so the two checks cannot drift.
+MAX_IMAGE_PIXELS = 25_000_000
+
+# The bitmap content types subject to the pixel cap, sorted so the generated
+# JS literal is deterministic. SVG is excluded: a vector format with no
+# bitmap dimensions (and served as a forced download under an inert CSP,
+# never decoded in-page).
+RASTER_IMAGE_TYPES = [
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+]
 
 # The shared inline-markdown subset, keyed by construction. The ``_star``
 # suffix distinguishes the ``**``/``*`` variants from the Telegram-only

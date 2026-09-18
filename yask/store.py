@@ -2022,16 +2022,14 @@ class Store:
     # / OOMs the tab of whoever opens it (CWE-400). 25 Mpixel ≈ 100 MB of
     # RGBA stays within what browsers decode sanely; the 10 MB encoded cap
     # remains the backstop.
-    MAX_IMAGE_PIXELS = 25_000_000
+    # Single-sourced in spec.MAX_IMAGE_PIXELS (shared with the web viewer
+    # via codegen, which re-checks it on display — task #134).
+    MAX_IMAGE_PIXELS = spec.MAX_IMAGE_PIXELS
     # The bitmap types subject to the pixel cap. SVG is excluded: a vector
     # format with no bitmap dimensions (and served as a forced download
     # under an inert CSP, never decoded in-page).
-    RASTER_IMAGE_TYPES = {
-        "image/png",
-        "image/jpeg",
-        "image/gif",
-        "image/webp",
-    }
+    # Single-sourced in spec.RASTER_IMAGE_TYPES.
+    RASTER_IMAGE_TYPES = frozenset(spec.RASTER_IMAGE_TYPES)
 
     @staticmethod
     def _sanitize_filename(filename: str) -> str:

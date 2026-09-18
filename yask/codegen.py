@@ -53,6 +53,8 @@ def generate() -> str:
         "COLOR_HEX_RE": spec.COLOR_HEX_RE,
         "MARKDOWN_REGEXES": spec.MARKDOWN,
         "FIELD_LIMITS": spec.FIELD_LIMITS,
+        "MAX_IMAGE_PIXELS": spec.MAX_IMAGE_PIXELS,
+        "RASTER_IMAGE_TYPES": spec.RASTER_IMAGE_TYPES,
     }
     lines = [HEADER.rstrip("\n"), ""]
     for name, value in exports.items():

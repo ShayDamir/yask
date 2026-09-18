@@ -1,7 +1,7 @@
 // Modals: task editor, new task, confirmation, attachment viewer.
 
 import api from "./api.js";
-import { DEFAULT_STATE, FIELD_LIMITS } from "./constants.js";
+import { DEFAULT_STATE, FIELD_LIMITS, MAX_IMAGE_PIXELS, RASTER_IMAGE_TYPES } from "./constants.js";
 import { h, clear, fmtEstimate, fmtBytes, fmtTime, typeClass, walkTasks } from "./util.js";
 import { renderMarkdown } from "./markdown.js";
 import { toast, toastError } from "./toast.js";
@@ -125,6 +125,28 @@ export function confirmDialog({
 
 // -- attachment viewer -----------------------------------------------------------
 
+// Pixel-bomb guard (task #134): #127 rejects oversized bitmaps at upload,
+// but attachments stored in DBs from before that fix remain, and decoding
+// one into an <img> would freeze / OOM this tab. Decode the fetched blob
+// off-DOM with createImageBitmap and re-check the decoded area against the
+// single-sourced cap (the same check, same cap, as the store's). Throws on
+// oversize so the caller's catch shows the regular load-error message;
+// legacy browsers without createImageBitmap fail open, mirroring the
+// store's fail-open on undecipherable headers.
+async function assertImageWithinPixelCap(blob) {
+  if (typeof createImageBitmap !== "function") return;
+  const bmp = await createImageBitmap(blob);
+  try {
+    if (bmp.width * bmp.height > MAX_IMAGE_PIXELS) {
+      throw new Error(
+        `image exceeds ${Math.round(MAX_IMAGE_PIXELS / 1_000_000)} MPixel limit (${bmp.width}x${bmp.height})`
+      );
+    }
+  } finally {
+    bmp.close();
+  }
+}
+
 export async function openAttachmentViewer(task, att) {
   const modal = openModal(
     h("div", {}, h("h2", {}, att.filename), h("div", { id: "viewer-body" }, "Loading…"))
@@ -135,6 +157,11 @@ export async function openAttachmentViewer(task, att) {
     const blob = await res.blob();
     clear(modal.el.querySelector("#viewer-body"));
     if (att.content_type.startsWith("image/")) {
+      // Raster types only: SVG is vector, no bitmap dimensions (the store
+      // applies the same exclusion to uploads).
+      if (RASTER_IMAGE_TYPES.includes(att.content_type)) {
+        await assertImageWithinPixelCap(blob);
+      }
       const url = URL.createObjectURL(blob);
       modal.el.querySelector("#viewer-body").append(h("img", { class: "viewer-img", src: url }));
     } else {
