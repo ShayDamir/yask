@@ -78,6 +78,43 @@ SCRYPT_MAXMEM = 64 * 1024 * 1024
 TELEGRAM_LOGIN_MAX_ATTEMPTS = 5
 TELEGRAM_LOGIN_LOCK_SECONDS = 15 * 60
 
+# Minimum strength for an allowlist password (task #130). The allowlist is
+# the bot's only authentication, and a copied database lets an attacker
+# crack the scrypt hashes offline — the password is the real defense, so
+# length is the primary floor and a two-of-four character-class count keeps
+# degenerate low-entropy strings ("aaaaaaaaaaaa", "123456789012") out.
+TELEGRAM_MIN_PASSWORD_LENGTH = 12
+
+
+def _check_telegram_password(password: str) -> None:
+    """Raise ``ValidationError`` unless ``password`` is non-empty, at least
+    ``TELEGRAM_MIN_PASSWORD_LENGTH`` characters, and spans at least two of
+    the lowercase / uppercase / digit / other character classes.
+
+    The two set paths (``add_telegram_user`` / ``set_telegram_user_password``)
+    share this; the verify/login paths deliberately do not check strength, so
+    a password stored before the floor existed still verifies.
+    """
+    if password is None or not password.strip():
+        raise ValidationError("password must not be empty")
+    if len(password) < TELEGRAM_MIN_PASSWORD_LENGTH:
+        raise ValidationError(
+            f"password must be at least {TELEGRAM_MIN_PASSWORD_LENGTH} characters"
+        )
+    classes = sum(
+        (
+            any(c.islower() for c in password),
+            any(c.isupper() for c in password),
+            any(c.isdigit() for c in password),
+            any(not c.isalnum() for c in password),
+        )
+    )
+    if classes < 2:
+        raise ValidationError(
+            "password must use at least two character classes "
+            "(lowercase, uppercase, digits, symbols)"
+        )
+
 
 def _hash_password(password: str) -> str:
     """Salted scrypt hash of ``password`` (``scrypt$n$r$p$salt$hash``)."""
@@ -1626,18 +1663,19 @@ class Store:
     def add_telegram_user(self, chat_id: int, password: str) -> dict:
         """Permit a Telegram chat to authenticate to the bot.
 
-        ``chat_id`` must be a positive integer and ``password`` non-empty;
-        the password is stored only as a salted scrypt hash, never in plain
-        form. A chat that is already permitted is a conflict — use
-        :meth:`set_telegram_user_password` to rotate its password. The
-        returned dict never carries the hash. A newly permitted chat holds
-        no login session yet — it must ``/login`` once before the board is
-        open to it.
+        ``chat_id`` must be a positive integer and ``password`` must meet
+        the strength floor (``_check_telegram_password``: non-empty, at
+        least ``TELEGRAM_MIN_PASSWORD_LENGTH`` characters, at least two
+        character classes); the password is stored only as a salted scrypt
+        hash, never in plain form. A chat that is already permitted is a
+        conflict — use :meth:`set_telegram_user_password` to rotate its
+        password. The returned dict never carries the hash. A newly
+        permitted chat holds no login session yet — it must ``/login`` once
+        before the board is open to it.
         """
         if not isinstance(chat_id, int) or isinstance(chat_id, bool) or chat_id <= 0:
             raise ValidationError("chat id must be a positive integer")
-        if password is None or not password.strip():
-            raise ValidationError("password must not be empty")
+        _check_telegram_password(password)
         if self._get_telegram_user_row(chat_id) is not None:
             raise Conflict(f"telegram user {chat_id} already exists")
         now = self._now()
@@ -1669,8 +1707,7 @@ class Store:
         password is required, and a running bot picks up the revocation on
         its next gate check.
         """
-        if password is None or not password.strip():
-            raise ValidationError("password must not be empty")
+        _check_telegram_password(password)
         row = self._get_telegram_user_row(chat_id)
         if row is None:
             raise NotFound(f"telegram user {chat_id} not found")

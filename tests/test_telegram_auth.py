@@ -19,7 +19,15 @@ from yask.store import (
     Store,
     ValidationError,
     TELEGRAM_LOGIN_MAX_ATTEMPTS,
+    TELEGRAM_MIN_PASSWORD_LENGTH,
 )
+
+# Passwords that satisfy the strength floor (task #130): at least 12
+# characters, at least two character classes. Rotation tests need two
+# distinct ones.
+TEST_PW = "pw-01234567890"  # 14 chars, 3 classes
+OLD_PW = "pw-01234567890"  # rotation seed
+NEW_PW = "Pw-9876543210"  # 13 chars, 3 classes; distinct from OLD_PW
 
 
 @pytest.fixture()
@@ -35,7 +43,7 @@ def client(tmp_path):
 
 
 def test_add_telegram_user_stores_hash_not_plaintext(store):
-    user = store.add_telegram_user(111, "s3cret!")
+    user = store.add_telegram_user(111, TEST_PW)
     assert user["chat_id"] == 111
     assert user["created_at"] == user["updated_at"]
     # the result never carries the hash (or the password)
@@ -44,14 +52,14 @@ def test_add_telegram_user_stores_hash_not_plaintext(store):
         "SELECT password_hash FROM telegram_users WHERE chat_id = 111"
     ).fetchone()
     stored = row["password_hash"]
-    assert stored != "s3cret!"
-    assert "s3cret!" not in stored
+    assert stored != TEST_PW
+    assert TEST_PW not in stored
     assert stored.startswith("scrypt$")
 
 
 def test_same_password_different_chats_get_different_hashes(store):
-    store.add_telegram_user(1, "same")
-    store.add_telegram_user(2, "same")
+    store.add_telegram_user(1, TEST_PW)
+    store.add_telegram_user(2, TEST_PW)
     rows = {
         r["chat_id"]: r["password_hash"]
         for r in store.conn.execute(
@@ -64,9 +72,9 @@ def test_same_password_different_chats_get_different_hashes(store):
 
 def test_add_telegram_user_validation(store):
     with pytest.raises(ValidationError):
-        store.add_telegram_user(0, "pw")
+        store.add_telegram_user(0, TEST_PW)
     with pytest.raises(ValidationError):
-        store.add_telegram_user(-5, "pw")
+        store.add_telegram_user(-5, TEST_PW)
     with pytest.raises(ValidationError):
         store.add_telegram_user(1, "")
     with pytest.raises(ValidationError):
@@ -74,17 +82,37 @@ def test_add_telegram_user_validation(store):
     assert store.list_telegram_users() == []
 
 
+def test_add_telegram_user_password_length_boundary(store):
+    # one char under the floor: rejected on length
+    with pytest.raises(
+        ValidationError, match=f"at least {TELEGRAM_MIN_PASSWORD_LENGTH}"
+    ):
+        store.add_telegram_user(1, "a1234567890")
+    # exactly the floor with two character classes: accepted
+    assert store.add_telegram_user(1, "a12345678901")["chat_id"] == 1
+
+
+def test_add_telegram_user_requires_two_character_classes(store):
+    # long enough, but a single character class: rejected on the class floor
+    with pytest.raises(ValidationError, match="character classes"):
+        store.add_telegram_user(1, "aaaaaaaaaaaa")
+    with pytest.raises(ValidationError, match="character classes"):
+        store.add_telegram_user(1, "123456789012")
+    # two classes: accepted
+    assert store.add_telegram_user(1, "a12345678901")["chat_id"] == 1
+
+
 def test_add_telegram_user_duplicate_is_conflict(store):
-    store.add_telegram_user(7, "pw")
+    store.add_telegram_user(7, TEST_PW)
     with pytest.raises(Conflict):
-        store.add_telegram_user(7, "other")
+        store.add_telegram_user(7, NEW_PW)
     # the original password still verifies
-    assert store.verify_telegram_user(7, "pw") is True
+    assert store.verify_telegram_user(7, TEST_PW) is True
 
 
 def test_list_telegram_users_never_exposes_hash(store):
-    store.add_telegram_user(20, "a")
-    store.add_telegram_user(10, "b")
+    store.add_telegram_user(20, TEST_PW)
+    store.add_telegram_user(10, NEW_PW)
     users = store.list_telegram_users()
     assert [u["chat_id"] for u in users] == [10, 20]  # chat-id order
     for u in users:
@@ -95,43 +123,60 @@ def test_list_telegram_users_never_exposes_hash(store):
 
 
 def test_set_telegram_user_password_rehashes(store):
-    created = store.add_telegram_user(7, "old")
-    updated = store.set_telegram_user_password(7, "new")
+    created = store.add_telegram_user(7, OLD_PW)
+    updated = store.set_telegram_user_password(7, NEW_PW)
     assert updated["chat_id"] == 7
     assert updated["created_at"] == created["created_at"]
     assert updated["updated_at"] >= created["updated_at"]
-    assert store.verify_telegram_user(7, "new") is True
-    assert store.verify_telegram_user(7, "old") is False  # rotated
+    assert store.verify_telegram_user(7, NEW_PW) is True
+    assert store.verify_telegram_user(7, OLD_PW) is False  # rotated
     row = store.conn.execute(
         "SELECT password_hash FROM telegram_users WHERE chat_id = 7"
     ).fetchone()
-    assert "old" not in row["password_hash"]
-    assert "new" not in row["password_hash"]
+    assert OLD_PW not in row["password_hash"]
+    assert NEW_PW not in row["password_hash"]
+
+
+def test_set_telegram_user_password_rejects_weak_password(store):
+    created = store.add_telegram_user(7, TEST_PW)
+    with pytest.raises(ValidationError, match="at least 12"):
+        store.set_telegram_user_password(7, "short")
+    with pytest.raises(ValidationError, match="character classes"):
+        store.set_telegram_user_password(7, "aaaaaaaaaaaa")
+    # the rotation never happened: the old password still verifies and
+    # updated_at is unchanged
+    assert store.verify_telegram_user(7, TEST_PW) is True
+    row = store.conn.execute(
+        "SELECT updated_at FROM telegram_users WHERE chat_id = 7"
+    ).fetchone()
+    assert row["updated_at"] == created["updated_at"]
 
 
 def test_set_telegram_user_password_unknown_chat_is_not_found(store):
     with pytest.raises(NotFound):
-        store.set_telegram_user_password(99, "pw")
+        store.set_telegram_user_password(99, TEST_PW)
     with pytest.raises(ValidationError):
         store.set_telegram_user_password(99, "  ")
 
 
 def test_remove_telegram_user(store):
-    store.add_telegram_user(7, "pw")
+    store.add_telegram_user(7, TEST_PW)
     assert store.remove_telegram_user(7) == {"applied": True, "removed": True}
     assert store.list_telegram_users() == []
-    assert store.verify_telegram_user(7, "pw") is False
+    assert store.verify_telegram_user(7, TEST_PW) is False
     with pytest.raises(NotFound):
         store.remove_telegram_user(7)
 
 
 def test_verify_telegram_user(store):
-    store.add_telegram_user(7, "pw")
-    assert store.verify_telegram_user(7, "pw") is True
+    store.add_telegram_user(7, TEST_PW)
+    assert store.verify_telegram_user(7, TEST_PW) is True
+    # the verify path has no strength check: a weak password still fails
+    # like any wrong one
     assert store.verify_telegram_user(7, "wrong") is False
     assert store.verify_telegram_user(7, "") is False
     # unknown chat: False, indistinguishable from a wrong password
-    assert store.verify_telegram_user(8, "pw") is False
+    assert store.verify_telegram_user(8, TEST_PW) is False
 
 
 # --- store: the persisted login session (task #55) ------------------------------
@@ -145,51 +190,51 @@ def _authenticated_at(store, chat_id=7):
 
 
 def test_login_telegram_user(store):
-    store.add_telegram_user(7, "pw")
-    assert store.login_telegram_user(7, "pw") is True
+    store.add_telegram_user(7, TEST_PW)
+    assert store.login_telegram_user(7, TEST_PW) is True
     # re-login is idempotent (a re-stamp, not an error)
-    assert store.login_telegram_user(7, "pw") is True
+    assert store.login_telegram_user(7, TEST_PW) is True
     # wrong password, empty password, unknown chat: False, indistinguishable
     assert store.login_telegram_user(7, "wrong") is False
     assert store.login_telegram_user(7, "") is False
-    assert store.login_telegram_user(8, "pw") is False
+    assert store.login_telegram_user(8, TEST_PW) is False
 
 
 def test_login_telegram_user_stamps_the_row(store):
-    store.add_telegram_user(7, "pw")
+    store.add_telegram_user(7, TEST_PW)
     assert _authenticated_at(store) is None  # permitted, never logged in
-    assert store.login_telegram_user(7, "pw") is True
+    assert store.login_telegram_user(7, TEST_PW) is True
     assert _authenticated_at(store) is not None
 
 
 def test_is_telegram_user_authenticated(store):
-    store.add_telegram_user(7, "pw")
+    store.add_telegram_user(7, TEST_PW)
     assert store.is_telegram_user_authenticated(7) is False  # never logged in
     assert store.is_telegram_user_authenticated(8) is False  # not permitted
-    store.login_telegram_user(7, "pw")
+    store.login_telegram_user(7, TEST_PW)
     assert store.is_telegram_user_authenticated(7) is True
 
 
 def test_password_rotation_invalidates_the_session(store):
-    store.add_telegram_user(7, "old")
-    store.login_telegram_user(7, "old")
+    store.add_telegram_user(7, OLD_PW)
+    store.login_telegram_user(7, OLD_PW)
     assert store.is_telegram_user_authenticated(7) is True
-    store.set_telegram_user_password(7, "new")
+    store.set_telegram_user_password(7, NEW_PW)
     # rotated out: the old password no longer logs in, the new one does
     assert store.is_telegram_user_authenticated(7) is False
-    assert store.login_telegram_user(7, "old") is False
+    assert store.login_telegram_user(7, OLD_PW) is False
     assert store.is_telegram_user_authenticated(7) is False
-    assert store.login_telegram_user(7, "new") is True
+    assert store.login_telegram_user(7, NEW_PW) is True
     assert store.is_telegram_user_authenticated(7) is True
 
 
 def test_removal_invalidates_the_session(store):
-    store.add_telegram_user(7, "pw")
-    store.login_telegram_user(7, "pw")
+    store.add_telegram_user(7, TEST_PW)
+    store.login_telegram_user(7, TEST_PW)
     assert store.is_telegram_user_authenticated(7) is True
     store.remove_telegram_user(7)
     assert store.is_telegram_user_authenticated(7) is False
-    assert store.login_telegram_user(7, "pw") is False
+    assert store.login_telegram_user(7, TEST_PW) is False
 
 
 def test_login_session_survives_a_reconnect(tmp_path):
@@ -198,14 +243,14 @@ def test_login_session_survives_a_reconnect(tmp_path):
     path = tmp_path / "restart.db"
     conn = db.connect(path)
     store = Store(conn)
-    store.add_telegram_user(7, "pw")
-    assert store.login_telegram_user(7, "pw") is True
+    store.add_telegram_user(7, TEST_PW)
+    assert store.login_telegram_user(7, TEST_PW) is True
     conn.close()
     conn = db.connect(path)
     restarted = Store(conn)
     try:
         assert restarted.is_telegram_user_authenticated(7) is True
-        assert restarted.login_telegram_user(7, "pw") is True
+        assert restarted.login_telegram_user(7, TEST_PW) is True
         assert restarted.login_telegram_user(7, "wrong") is False
         assert restarted.is_telegram_user_authenticated(7) is True
     finally:
@@ -218,7 +263,7 @@ def test_login_session_survives_a_reconnect(tmp_path):
 def test_telegram_users_api_crud(client):
     assert client.get("/api/telegram-users").json() == []
 
-    r = client.post("/api/telegram-users", json={"chat_id": 42, "password": "pw"})
+    r = client.post("/api/telegram-users", json={"chat_id": 42, "password": TEST_PW})
     assert r.status_code == 201
     body = r.json()
     assert body["chat_id"] == 42
@@ -230,19 +275,22 @@ def test_telegram_users_api_crud(client):
     assert "password_hash" not in users[0]
 
     # duplicate chat is a conflict; bad input is a validation error
-    assert client.post("/api/telegram-users", json={"chat_id": 42, "password": "x"}).status_code == 409
-    assert client.post("/api/telegram-users", json={"chat_id": 0, "password": "x"}).status_code == 400
-    assert client.post("/api/telegram-users", json={"chat_id": -3, "password": "x"}).status_code == 400
+    assert client.post("/api/telegram-users", json={"chat_id": 42, "password": NEW_PW}).status_code == 409
+    assert client.post("/api/telegram-users", json={"chat_id": 0, "password": TEST_PW}).status_code == 400
+    assert client.post("/api/telegram-users", json={"chat_id": -3, "password": TEST_PW}).status_code == 400
     assert client.post("/api/telegram-users", json={"chat_id": 43, "password": " "}).status_code == 400
+    # a weak password is a validation error (the strength floor, task #130)
+    assert client.post("/api/telegram-users", json={"chat_id": 45, "password": "short"}).status_code == 400
 
     # password rotation
-    r = client.put("/api/telegram-users/42", json={"password": "new"})
+    r = client.put("/api/telegram-users/42", json={"password": NEW_PW})
     assert r.status_code == 200
     assert r.json()["chat_id"] == 42
     assert r.json()["created_at"] == body["created_at"]
-    # unknown chat / blank password
-    assert client.put("/api/telegram-users/99", json={"password": "x"}).status_code == 404
+    # unknown chat / blank or weak password
+    assert client.put("/api/telegram-users/99", json={"password": TEST_PW}).status_code == 404
     assert client.put("/api/telegram-users/42", json={"password": ""}).status_code == 400
+    assert client.put("/api/telegram-users/42", json={"password": "short"}).status_code == 400
 
     # removal
     r = client.delete("/api/telegram-users/42")
@@ -258,20 +306,20 @@ def test_telegram_users_api_password_verifiable(tmp_path):
     # loopback base URL (task #85): the enforced app rejects non-loopback
     # Host headers, so the suite must hit it as a local client
     with TestClient(app, base_url="http://127.0.0.1:4304") as c:
-        r = c.post("/api/telegram-users", json={"chat_id": 42, "password": "via-api"})
+        r = c.post("/api/telegram-users", json={"chat_id": 42, "password": TEST_PW})
         assert r.status_code == 201
-        assert c.put("/api/telegram-users/42", json={"password": "rotated"}).status_code == 200
+        assert c.put("/api/telegram-users/42", json={"password": NEW_PW}).status_code == 200
     conn = db.connect(tmp_path / "auth.db")
     try:
         s = Store(conn)
-        assert s.verify_telegram_user(42, "rotated") is True
-        assert s.verify_telegram_user(42, "via-api") is False
-        assert s.verify_telegram_user(43, "rotated") is False
+        assert s.verify_telegram_user(42, NEW_PW) is True
+        assert s.verify_telegram_user(42, TEST_PW) is False
+        assert s.verify_telegram_user(43, NEW_PW) is False
         # the DB holds only a hash — the plaintext appears nowhere
         row = conn.execute(
             "SELECT password_hash FROM telegram_users WHERE chat_id = 42"
         ).fetchone()
-        assert "rotated" not in row["password_hash"]
+        assert NEW_PW not in row["password_hash"]
     finally:
         conn.close()
 
@@ -296,14 +344,14 @@ def _set_locked_until(store, chat_id, value):
 
 def test_login_locks_out_after_threshold():
     store = Store(db.connect(":memory:"))
-    store.add_telegram_user(7, "pw")
+    store.add_telegram_user(7, TEST_PW)
     # the threshold failures: 5 wrong passwords
     for _ in range(TELEGRAM_LOGIN_MAX_ATTEMPTS):
         assert store.login_telegram_user(7, "wrong") is False
     assert _tg_failures(store)[0] == TELEGRAM_LOGIN_MAX_ATTEMPTS
     assert _tg_failures(store)[1] is not None  # a lockout stamp is set
     # the 6th attempt — even the *correct* password — is locked out
-    assert store.login_telegram_user(7, "pw") is False
+    assert store.login_telegram_user(7, TEST_PW) is False
     locked = _tg_failures(store)[1]
     assert locked is not None and locked > db.utcnow()
 
@@ -312,31 +360,31 @@ def test_locked_out_returns_false_without_scrypt():
     """Once locked, the correct password still fails — proving the throttle
     gates *before* the scrypt cost, not by simply getting a wrong answer."""
     store = Store(db.connect(":memory:"))
-    store.add_telegram_user(7, "pw")
+    store.add_telegram_user(7, TEST_PW)
     for _ in range(TELEGRAM_LOGIN_MAX_ATTEMPTS):
         store.login_telegram_user(7, "wrong")
     # force a far-future lock: the attempt must fail without ever verifying
     _set_locked_until(store, 7, "2999-01-01T00:00:00Z")
-    assert store.login_telegram_user(7, "pw") is False
+    assert store.login_telegram_user(7, TEST_PW) is False
 
 
 def test_lockout_expires():
     store = Store(db.connect(":memory:"))
-    store.add_telegram_user(7, "pw")
+    store.add_telegram_user(7, TEST_PW)
     for _ in range(TELEGRAM_LOGIN_MAX_ATTEMPTS):
         store.login_telegram_user(7, "wrong")
     # simulate the window elapsing: a past ``locked_until`` is not in force
     _set_locked_until(store, 7, "2000-01-01T00:00:00Z")
-    assert store.login_telegram_user(7, "pw") is True
+    assert store.login_telegram_user(7, TEST_PW) is True
 
 
 def test_success_resets_failure_counter():
     store = Store(db.connect(":memory:"))
-    store.add_telegram_user(7, "pw")
+    store.add_telegram_user(7, TEST_PW)
     for _ in range(TELEGRAM_LOGIN_MAX_ATTEMPTS - 2):
         store.login_telegram_user(7, "wrong")
     assert _tg_failures(store)[0] == TELEGRAM_LOGIN_MAX_ATTEMPTS - 2
-    assert store.login_telegram_user(7, "pw") is True
+    assert store.login_telegram_user(7, TEST_PW) is True
     # the counter is cleared on success — a fresh window begins
     assert _tg_failures(store)[0] == 0
     assert _tg_failures(store)[1] is None
@@ -356,14 +404,14 @@ def test_unknown_chat_is_not_locked():
 
 def test_lockout_is_independently_keyed_by_chat():
     store = Store(db.connect(":memory:"))
-    store.add_telegram_user(7, "pw")
-    store.add_telegram_user(8, "pw")
+    store.add_telegram_user(7, TEST_PW)
+    store.add_telegram_user(8, TEST_PW)
     for _ in range(TELEGRAM_LOGIN_MAX_ATTEMPTS):
         store.login_telegram_user(7, "wrong")
     # chat 7 is locked...
-    assert store.login_telegram_user(7, "pw") is False
+    assert store.login_telegram_user(7, TEST_PW) is False
     # ...but chat 8, a different chat, still logs in
-    assert store.login_telegram_user(8, "pw") is True
+    assert store.login_telegram_user(8, TEST_PW) is True
 
 
 # --- store: unknown-chat decoy / timing (task #129) ---------------------------
@@ -373,7 +421,7 @@ def test_unknown_chat_costs_as_much_as_wrong_password():
     """An unknown chat id must take about as long as a wrong password:
     response time must not reveal allowlist membership (task #129)."""
     store = Store(db.connect(":memory:"))
-    store.add_telegram_user(7, "pw")
+    store.add_telegram_user(7, TEST_PW)
     # warm up on an *unknown* chat only: triggers the one-time decoy
     # generation (2x scrypt) outside the measured window, and deliberately
     # leaves chat 7's failure counter at 0 — a burned counter would make the

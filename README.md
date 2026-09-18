@@ -172,6 +172,9 @@ same commands.
 **Authentication.** Board commands are password-gated. Permitted users — a
 Telegram chat id plus a password, stored only as a salted scrypt hash — are
 managed in the web UI (topbar → ✈ "Telegram bot users"), not via Telegram.
+A password is checked against a strength floor when it is set or rotated:
+at least 12 characters, using at least two of the lowercase, uppercase,
+digit, and symbol character classes.
 A user asks the bot `/whoami` to learn their chat id, the administrator
 enters it in the web UI with a password, and the user unlocks the board
 with `/login <password>`. A successful login persists across bot restarts

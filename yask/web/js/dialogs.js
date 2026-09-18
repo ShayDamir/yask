@@ -749,6 +749,7 @@ export function openTelegramUsersModal() {
       const pwInput = h("input", {
         type: "password",
         placeholder: "new password",
+        minlength: "12",
         autocomplete: "new-password",
       });
       const saveBtn = h("button", { class: "btn ghost", type: "button" }, "Save");
@@ -756,6 +757,10 @@ export function openTelegramUsersModal() {
         const pw = pwInput.value;
         if (!pw) {
           toast("Enter a new password", "info");
+          return;
+        }
+        if (pw.length < 12) {
+          toast("Password must be at least 12 characters", "info");
           return;
         }
         saveBtn.disabled = true;
@@ -819,6 +824,7 @@ export function openTelegramUsersModal() {
     type: "password",
     id: "tg-add-pw",
     placeholder: "password",
+    minlength: "12",
     autocomplete: "new-password",
   });
   const addBtn = h("button", { class: "btn", type: "button", id: "tg-add-btn" }, "Add");
@@ -831,6 +837,10 @@ export function openTelegramUsersModal() {
     }
     if (!password) {
       toast("Enter a password", "info");
+      return;
+    }
+    if (password.length < 12) {
+      toast("Password must be at least 12 characters", "info");
       return;
     }
     addBtn.disabled = true;
