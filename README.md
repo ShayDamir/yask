@@ -186,6 +186,16 @@ auth-required notice and no board data, and state-change notifications are
 not delivered to it; `/start`, `/help`, `/login` and `/whoami` stay
 available to everyone.
 
+Each permitted user can additionally be restricted to a list of visible
+projects (web UI → ✈ "Telegram bot users" → **Projects** per user). With
+no list set, all projects are visible; with a list, non-visible projects
+behave as if they do not exist for that user in every bot command, inline
+button and state-change notification (the regular not-found wording — a
+restricted user cannot tell a hidden project from a nonexistent one), and
+state-change notifications for a hidden project are not delivered to it.
+Stale subscriptions to projects that later become non-visible are left in
+place but inert: hidden from the subscription list, never notified.
+
 ## Project layout
 
 - `yask/store.py` — all domain logic (projects, numbering, epic trees,

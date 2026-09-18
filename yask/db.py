@@ -122,6 +122,18 @@ CREATE TABLE IF NOT EXISTS telegram_users (
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
+
+-- Per-user project visibility (the bot's allowlist restriction): a chat with
+-- no rows sees every project; a chat with rows sees only those. Foreign keys
+-- cascade the cleanup when the user or the project is removed.
+CREATE TABLE IF NOT EXISTS telegram_user_projects (
+    chat_id    INTEGER NOT NULL REFERENCES telegram_users(chat_id) ON DELETE CASCADE,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (chat_id, project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_telegram_user_projects_project
+    ON telegram_user_projects(project_id);
 """
 
 # Seed task types. Epic is the single compound type.

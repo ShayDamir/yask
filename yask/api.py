@@ -236,6 +236,10 @@ class TelegramUserPasswordIn(BaseModel):
     password: str
 
 
+class TelegramUserProjectsIn(BaseModel):
+    project_ids: list[int]
+
+
 # -- app factory -------------------------------------------------------------
 
 
@@ -595,6 +599,13 @@ def create_app(db_path: str | Path, allow_remote: bool = False) -> FastAPI:
            body=TelegramUserPasswordIn)
     _route("DELETE", "/api/telegram-users/{chat_id}", "remove_telegram_user",
            name="api_remove_telegram_user")
+    _route("GET", "/api/telegram-users/{chat_id}/projects",
+           "list_telegram_user_projects",
+           name="api_list_telegram_user_projects")
+    _route("PUT", "/api/telegram-users/{chat_id}/projects",
+           "set_telegram_user_projects",
+           name="api_set_telegram_user_projects",
+           body=TelegramUserProjectsIn)
 
     # -- task types
 

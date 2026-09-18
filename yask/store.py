@@ -1835,6 +1835,91 @@ class Store:
         ).fetchone()
         return row is not None and row["authenticated_at"] is not None
 
+    # -- telegram user project visibility --------------------------------
+
+    def set_telegram_user_projects(
+        self, chat_id: int, project_ids: list[int]
+    ) -> dict:
+        """Replace the chat's visible-project list (replace semantics).
+
+        The chat must be in the allowlist (``NotFound`` otherwise) and every
+        id must be an existing project (``NotFound`` otherwise) — all
+        validation runs before any write, so a rejected call leaves the
+        previous list untouched. The rows are swapped in one transaction
+        (:meth:`_now` stamps the new rows' ``created_at``). An empty list
+        clears the restriction (the chat sees all projects again); the
+        result is the id-ordered list that was set.
+        """
+        if self._get_telegram_user_row(chat_id) is None:
+            raise NotFound(f"telegram user {chat_id} not found")
+        for project_id in project_ids:
+            self._get_project(project_id)
+        ids = sorted(set(project_ids))
+        now = self._now()
+        with self.conn:
+            self.conn.execute(
+                "DELETE FROM telegram_user_projects WHERE chat_id = ?",
+                (chat_id,),
+            )
+            self.conn.executemany(
+                "INSERT INTO telegram_user_projects"
+                "(chat_id, project_id, created_at) VALUES (?, ?, ?)",
+                [(chat_id, project_id, now) for project_id in ids],
+            )
+        return {"chat_id": chat_id, "project_ids": ids}
+
+    def list_telegram_user_projects(self, chat_id: int) -> list[dict]:
+        """The chat's visible projects (``{"id", "name"}``) in name order.
+
+        The chat must be in the allowlist (``NotFound`` otherwise); ``[]``
+        means unrestricted (the chat sees every project) — the same
+        convention :meth:`visible_project_ids` uses for ``None``.
+        """
+        if self._get_telegram_user_row(chat_id) is None:
+            raise NotFound(f"telegram user {chat_id} not found")
+        rows = self.conn.execute(
+            "SELECT p.id, p.name "
+            "FROM telegram_user_projects up "
+            "JOIN projects p ON p.id = up.project_id "
+            "WHERE up.chat_id = ? ORDER BY p.name COLLATE NOCASE",
+            (chat_id,),
+        ).fetchall()
+        return [{"id": r["id"], "name": r["name"]} for r in rows]
+
+    def visible_project_ids(self, chat_id: int) -> list[int] | None:
+        """The chat's visible project ids, or ``None`` when unrestricted.
+
+        ``None`` (no rows at all — a newly permitted or never-restricted
+        chat) means every project is visible; otherwise the id-ordered
+        list of the projects the chat may see. The raw filter the bot's
+        visibility checks build their sets from.
+        """
+        rows = self.conn.execute(
+            "SELECT project_id FROM telegram_user_projects "
+            "WHERE chat_id = ? ORDER BY project_id",
+            (chat_id,),
+        ).fetchall()
+        ids = [r["project_id"] for r in rows]
+        return ids or None
+
+    def project_visible_to(self, chat_id: int, project_id: int) -> bool:
+        """Whether ``project_id`` is in the chat's visible set.
+
+        One query (the :class:`Notifier`'s per-chat, per-change check): a
+        chat with no visibility rows is unrestricted and sees the project;
+        otherwise the project must have a row for the chat.
+        """
+        row = self.conn.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM telegram_user_projects "
+            " WHERE chat_id = ?) > 0 AS restricted, "
+            "EXISTS (SELECT 1 FROM telegram_user_projects "
+            " WHERE chat_id = ? AND project_id = ?) AS visible "
+            "FROM (SELECT 1)",
+            (chat_id, chat_id, project_id),
+        ).fetchone()
+        return not row["restricted"] or bool(row["visible"])
+
     # -- attachments --------------------------------------------------------------------
 
     ALLOWED_ATTACHMENT_TYPES = {

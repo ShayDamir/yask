@@ -121,6 +121,11 @@ const api = {
   setTelegramUserPassword: (chatId, password) =>
     req("PUT", `/api/telegram-users/${chatId}`, { password }),
   removeTelegramUser: (chatId) => req("DELETE", `/api/telegram-users/${chatId}`),
+  // per-user visible projects (an empty list = no restriction, all visible)
+  listTelegramUserProjects: (chatId) =>
+    req("GET", `/api/telegram-users/${chatId}/projects`),
+  setTelegramUserProjects: (chatId, projectIds) =>
+    req("PUT", `/api/telegram-users/${chatId}/projects`, { project_ids: projectIds }),
 };
 
 export default api;

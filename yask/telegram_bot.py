@@ -11,7 +11,15 @@ that persists across bot restarts (a password rotation or a removal from
 the web UI revokes it, requiring a fresh ``/login``); until a chat has
 authenticated, the board commands and every inline-keyboard callback
 answer with an auth-required notice and no board data, and state-change
-notifications are not delivered to it. The ungated
+notifications are not delivered to it. A permitted chat may additionally
+be restricted to a list of visible projects (the store's
+``telegram_user_projects`` table, managed in the web UI's Telegram bot
+users dialog): a chat with no such list sees all projects, and for a
+restricted chat a non-visible project behaves as if it does not exist in
+every surface — the command views, the inline-keyboard callbacks and the
+state-change notifications (the existing not-found wording, so a
+restricted user cannot distinguish a hidden project from a nonexistent
+one). The ungated
 commands are ``/start``, ``/help``, ``/login`` and ``/whoami`` (the chat's
 own id — the identifier the administrator enters in the web UI). Today the
 authenticated bot answers
@@ -585,8 +593,17 @@ def project_view(store: Store, chat_id: Optional[int] = None) -> Reply:
     just ``Projects:`` and ``(none)`` as a plain ``str`` in either form —
     the Bot API rejects an empty inline keyboard, and there are no tap
     targets anyway.
+
+    A ``chat_id`` also restricts the list to the chat's visible projects
+    (per-user project visibility, task #135): the overviews of
+    non-visible projects are omitted, and a restricted chat whose
+    projects are all hidden gets the same empty-board reply as a truly
+    empty board (no existence leak).
     """
     overviews = store.list_project_overviews()
+    visible = _visible_project_ids(store, chat_id)
+    if visible is not None:
+        overviews = [ov for ov in overviews if ov["id"] in visible]
     if not overviews:
         return "Projects:\n(none)"
     blocks = ["# Projects"]
@@ -642,8 +659,26 @@ def _tasks_arg(text: Optional[str]) -> Optional[str]:
     return " ".join(words)
 
 
+def _visible_project_ids(store: Store, chat_id: Optional[int]) -> Optional[set[int]]:
+    """The chat's visible project ids as a set, or None when unrestricted.
+
+    Per-user project visibility (task #135): a ``None`` chat (no sender /
+    no chat context — inaccessible messages, legacy no-auth mode) and a
+    chat with no visibility rows are unrestricted — every project is
+    visible. Otherwise only the ids in the set are; a non-visible project
+    behaves as if it does not exist (the existing not-found wording, so a
+    restricted user cannot tell a hidden project from a nonexistent one).
+    Built once per message/callback from
+    :meth:`Store.visible_project_ids`.
+    """
+    if chat_id is None:
+        return None
+    visible = store.visible_project_ids(chat_id)
+    return None if visible is None else set(visible)
+
+
 def _split_project(
-    store: Store, words: list[str]
+    store: Store, words: list[str], chat_id: Optional[int] = None
 ) -> tuple[Optional[dict], list[str]]:
     """Split argument words into a project reference and the rest.
 
@@ -653,9 +688,14 @@ def _split_project(
     it is the remaining argument words. When no prefix resolves, the first
     word is kept as the failed reference so the not-found reply can quote
     it: ``(None, [words[0]])``.
+
+    With a ``chat_id``, prefixes that resolve to a non-visible project are
+    skipped by the walk (per-user project visibility, task #135), so a
+    visible project whose name is a prefix of a non-visible one still
+    resolves — the hidden project is invisible to the split.
     """
     for i in range(len(words), 0, -1):
-        project = _resolve_project(store, " ".join(words[:i]))
+        project = _resolve_project(store, " ".join(words[:i]), chat_id)
         if project is not None:
             return project, words[i:]
     return None, [words[0]]
@@ -670,17 +710,28 @@ def _human_size(n: int) -> str:
     return f"{n / 1024 / 1024:.1f} MB"
 
 
-def _resolve_project(store: Store, arg: str) -> Optional[dict]:
+def _resolve_project(
+    store: Store, arg: str, chat_id: Optional[int] = None
+) -> Optional[dict]:
     """Resolve a project reference to its project dict, or None.
 
     One canonical resolver — :meth:`Store.resolve_project` (numeric id,
     then case-insensitive name) — with the store's ``NotFound`` mapped to
     None so command views can answer with their own not-found text.
+
+    With a ``chat_id``, a resolved project that is not in the chat's
+    visible set also yields None (per-user project visibility, task #135):
+    the caller's existing not-found wording answers it, so a non-visible
+    project is indistinguishable from a nonexistent one.
     """
     try:
-        return store.resolve_project(arg)
+        project = store.resolve_project(arg)
     except NotFound:
         return None
+    visible = _visible_project_ids(store, chat_id)
+    if visible is not None and project["id"] not in visible:
+        return None
+    return project
 
 
 def _task_sections(tasks: list[dict]) -> list[tuple[str, list[dict]]]:
@@ -739,17 +790,26 @@ def _build_board_view(
     in the plain lines; a ``None`` label emits its tasks directly. An
     unresolvable ``project_arg`` yields :func:`_project_not_found` with the
     argument quoted verbatim.
+
+    The ``chat_id`` also applies per-user project visibility (task #135):
+    the no-argument form skips non-visible projects when listing, and the
+    argument form resolves through the visibility-aware
+    :func:`_resolve_project` (a non-visible project yields the regular
+    not-found text).
     """
     if project_arg is None:
         projects = []
+        visible = _visible_project_ids(store, chat_id)
         for p in store.list_projects():
+            if visible is not None and p["id"] not in visible:
+                continue
             tasks = fetch_fn(p["id"])
             if tasks:
                 projects.append((p, tasks))
         if not projects:
             return f"{header}:\n(none)"
     else:
-        project = _resolve_project(store, project_arg)
+        project = _resolve_project(store, project_arg, chat_id)
         if project is None:
             return _project_not_found(project_arg)
         tasks = fetch_fn(project["id"])
@@ -1670,11 +1730,15 @@ def task_view(
     currently subscribed to the project (computed from
     ``store.list_subscriptions``). Without one, the plain text form is
     returned.
+
+    The ``chat_id`` also applies per-user project visibility (task #135)
+    through :func:`_split_project`: a non-visible project gets the same
+    not-found reply as a nonexistent one.
     """
     if arg is None or not arg.strip():
         return TASK_USAGE_TEXT
     words = arg.split()
-    project, rest = _split_project(store, words)
+    project, rest = _split_project(store, words, chat_id)
     if project is None:
         return _project_not_found(words[0])
     if not rest:
@@ -1753,7 +1817,7 @@ def attachment_reply(
 
 
 def attachment_view(
-    store: Store, arg: Optional[str]
+    store: Store, arg: Optional[str], chat_id: Optional[int] = None
 ) -> Union[str, FileReply, RichReply]:
     """Resolve ``/attachment <project> <task> <attachment-id>``.
 
@@ -1764,11 +1828,16 @@ def attachment_view(
     small markdown attachments, an inline text reply for small plain text,
     a :class:`FileReply` for images (photo) and larger content (document)
     — or a usage / not-found text.
+
+    The ``chat_id`` applies per-user project visibility (task #135)
+    through :func:`_split_project`: a non-visible project gets the same
+    not-found reply as a nonexistent one (and no attachment is ever sent
+    from it).
     """
     if arg is None or not arg.strip():
         return ATTACHMENT_USAGE_TEXT
     words = arg.split()
-    project, rest = _split_project(store, words)
+    project, rest = _split_project(store, words, chat_id)
     if project is None:
         return _project_not_found(words[0])
     if len(rest) < 2:
@@ -1883,7 +1952,7 @@ def _confirm_move_markup(
     )
 
 
-def move_view(store: Store, arg: Optional[str]) -> Reply:
+def move_view(store: Store, arg: Optional[str], chat_id: Optional[int] = None) -> Reply:
     """Format the ``/move <project> <task> <state>`` reply.
 
     The argument mixes a project reference, a task reference (number or
@@ -1900,11 +1969,15 @@ def move_view(store: Store, arg: Optional[str]) -> Reply:
     ``c:`` button is pressed. ``Blocked`` is never a target (a move there
     must carry an ``unblock.md`` attachment — web UI / MCP only) and
     archived tasks are refused.
+
+    The ``chat_id`` applies per-user project visibility (task #135)
+    through :func:`_split_project`: a non-visible project gets the same
+    not-found reply as a nonexistent one (nothing is moved there).
     """
     if arg is None or not arg.strip():
         return MOVE_USAGE_TEXT
     words = arg.split()
-    project, rest = _split_project(store, words)
+    project, rest = _split_project(store, words, chat_id)
     if project is None:
         return _project_not_found(words[0])
     if not rest:
@@ -1931,7 +2004,7 @@ def move_view(store: Store, arg: Optional[str]) -> Reply:
     return f"Moved #{task['number']} to {target}."
 
 
-def add_view(store: Store, arg: Optional[str]) -> Reply:
+def add_view(store: Store, arg: Optional[str], chat_id: Optional[int] = None) -> Reply:
     """Format the ``/add <project> <title> [as <type>]`` reply.
 
     The argument mixes a project reference and a title, either of which
@@ -1952,11 +2025,15 @@ def add_view(store: Store, arg: Optional[str]) -> Reply:
     it, the Main-menu row (:func:`_main_menu_button`, payload ``h``) —
     the same shape the state-change notifications carry. The failure
     paths (usage, not-found) stay plain ``str``.
+
+    The ``chat_id`` applies per-user project visibility (task #135)
+    through :func:`_split_project`: a non-visible project gets the same
+    not-found reply as a nonexistent one (no task is created there).
     """
     if arg is None or not arg.strip():
         return add_usage_text(store)
     words = arg.split()
-    project, rest = _split_project(store, words)
+    project, rest = _split_project(store, words, chat_id)
     if project is None:
         return _project_not_found(words[0])
     type_names = [t["name"] for t in store.list_task_types()]
@@ -1974,7 +2051,9 @@ def add_view(store: Store, arg: Optional[str]) -> Reply:
     return _task_button_reply(text, project["id"], task["number"], task["title"])
 
 
-def describe_view(store: Store, arg: Optional[str]) -> Reply:
+def describe_view(
+    store: Store, arg: Optional[str], chat_id: Optional[int] = None
+) -> Reply:
     """Format the ``/describe <project> <number|title> <description>`` reply.
 
     Sets — replaces — the task's description (``store.update_task``, the
@@ -2002,11 +2081,15 @@ def describe_view(store: Store, arg: Optional[str]) -> Reply:
     (:func:`_main_menu_button`, payload ``h``) — the same shape the
     ``/add`` confirmation carries. The failure paths (usage, not-found,
     disambiguation) stay plain ``str``.
+
+    The ``chat_id`` applies per-user project visibility (task #135)
+    through :func:`_split_project`: a non-visible project gets the same
+    not-found reply as a nonexistent one (nothing is written there).
     """
     if arg is None or not arg.strip():
         return DESCRIBE_USAGE_TEXT
     words = arg.split()
-    project, rest = _split_project(store, words)
+    project, rest = _split_project(store, words, chat_id)
     if project is None:
         return _project_not_found(words[0])
     if not rest:
@@ -2028,7 +2111,9 @@ def describe_view(store: Store, arg: Optional[str]) -> Reply:
     return _task_button_reply(text, project["id"], task["number"], task["title"])
 
 
-def type_view(store: Store, arg: Optional[str]) -> Reply:
+def type_view(
+    store: Store, arg: Optional[str], chat_id: Optional[int] = None
+) -> Reply:
     """Format the ``/type <project> <number|title> <type>`` reply.
 
     Changes the task's type (``store.update_task``, the same write as the
@@ -2069,11 +2154,15 @@ def type_view(store: Store, arg: Optional[str]) -> Reply:
     (:func:`_main_menu_button`, payload ``h``) — the same shape the
     ``/add`` and ``/describe`` confirmations carry. The failure paths
     (usage, not-found, disambiguation) stay plain ``str``.
+
+    The ``chat_id`` applies per-user project visibility (task #135)
+    through :func:`_split_project`: a non-visible project gets the same
+    not-found reply as a nonexistent one (nothing is written there).
     """
     if arg is None or not arg.strip():
         return type_usage_text(store)
     words = arg.split()
-    project, rest = _split_project(store, words)
+    project, rest = _split_project(store, words, chat_id)
     if project is None:
         return _project_not_found(words[0])
     if not rest:
@@ -2117,9 +2206,18 @@ def subscribe_view(store: Store, chat_id: int, arg: Optional[str] = None) -> str
     ``/projects``. With an argument, subscribes the chat to the resolved
     project (case-insensitive name or integer id); an unresolvable argument
     yields the same not-found reply as ``/tasks``.
+
+    Per-user project visibility (task #135): the list form shows only the
+    subscriptions whose project is visible to the chat (stale subscriptions
+    to non-visible projects are hidden, not removed), and the argument form
+    resolves through the visibility-aware :func:`_resolve_project`
+    (subscribing to a non-visible project answers not-found).
     """
     if arg is None:
         subs = store.list_subscriptions(chat_id)
+        visible = _visible_project_ids(store, chat_id)
+        if visible is not None:
+            subs = [s for s in subs if s["project_id"] in visible]
         if not subs:
             return "Your subscriptions:\n(none)"
         lines = ["Your subscriptions:"]
@@ -2127,7 +2225,7 @@ def subscribe_view(store: Store, chat_id: int, arg: Optional[str] = None) -> str
             lines.append(f"{s['project_id']}. {s['project_name']}")
         return "\n".join(lines)
 
-    project = _resolve_project(store, arg)
+    project = _resolve_project(store, arg, chat_id)
     if project is None:
         return _project_not_found(arg)
     sub = store.subscribe_project(chat_id, project["id"])
@@ -2144,8 +2242,12 @@ def unsubscribe_view(store: Store, chat_id: int, arg: str) -> str:
     the chat's subscription: a confirmation when a row was removed, a
     "not subscribed" notice when there was nothing to remove, and the
     ``/tasks`` not-found text for an unresolvable argument.
+
+    Per-user project visibility (task #135): the resolution is
+    visibility-aware (a non-visible project answers not-found, so a
+    restricted user cannot probe for one's existence).
     """
-    project = _resolve_project(store, arg)
+    project = _resolve_project(store, arg, chat_id)
     if project is None:
         return _project_not_found(arg)
     result = store.unsubscribe_project(chat_id, project["id"])
@@ -2273,35 +2375,35 @@ def _handle_attachment(
     store: Store, text: Optional[str], chat_id: Optional[int]
 ) -> Reply:
     """``/attachment``: one of a task's attachments (text, photo or file)."""
-    return attachment_view(store, _tasks_arg(text))
+    return attachment_view(store, _tasks_arg(text), chat_id)
 
 
 def _handle_move(
     store: Store, text: Optional[str], chat_id: Optional[int]
 ) -> Reply:
     """``/move``: move a task to a state (confirm keyboard on cascades)."""
-    return move_view(store, _tasks_arg(text))
+    return move_view(store, _tasks_arg(text), chat_id)
 
 
 def _handle_add(
     store: Store, text: Optional[str], chat_id: Optional[int]
 ) -> Reply:
     """``/add``: create a task in the project's backlog."""
-    return add_view(store, _tasks_arg(text))
+    return add_view(store, _tasks_arg(text), chat_id)
 
 
 def _handle_describe(
     store: Store, text: Optional[str], chat_id: Optional[int]
 ) -> Reply:
     """``/describe``: set a task's description (replace semantics)."""
-    return describe_view(store, _tasks_arg(text))
+    return describe_view(store, _tasks_arg(text), chat_id)
 
 
 def _handle_type(
     store: Store, text: Optional[str], chat_id: Optional[int]
 ) -> Reply:
     """``/type``: change a task's type (store-enforced domain rules)."""
-    return type_view(store, _tasks_arg(text))
+    return type_view(store, _tasks_arg(text), chat_id)
 
 
 def _handle_attach(
@@ -2439,7 +2541,10 @@ def make_dispatch(
         resolution runs through the command path's own helpers
         (``_split_project`` + ``_resolve_task`` — the disambiguation
         list and the not-found texts pass through unchanged, and no
-        failure path downloads anything); the filename/content type come
+        failure path downloads anything; ``_split_project`` is also
+        visibility-aware (task #135), so a non-visible project gets the
+        regular not-found text before any download); the filename/content
+        type come
         from the file's declared metadata (document: ``file_name``/
         ``mime_type`` with an ``"attachment"`` /
         ``"application/octet-stream"`` fallback, photo:
@@ -2469,7 +2574,7 @@ def make_dispatch(
         words = file.caption.split()[1:]
         if not words:
             return ATTACH_USAGE_TEXT
-        project, rest = _split_project(store, words)
+        project, rest = _split_project(store, words, chat_id)
         if project is None:
             return _project_not_found(words[0])
         if not rest:
@@ -2615,7 +2720,8 @@ def _attachment_not_found(
 
 
 def _resolve_project_id(
-    store: Store, project_id: int, error_text: str
+    store: Store, project_id: int, error_text: str,
+    chat_id: Optional[int] = None,
 ) -> Union[dict, CallbackAction]:
     """Resolve a project by id, or a ready-to-return
     :class:`CallbackAction`.
@@ -2624,13 +2730,21 @@ def _resolve_project_id(
     store failure answers with ``error_text`` (the family's error text).
     The id-based twin of :func:`_resolve_project` (which resolves text
     references for the command path).
+
+    With a ``chat_id``, per-user project visibility (task #135) applies:
+    a resolved project that is not visible to the chat answers the same
+    not-found text as a nonexistent one (no data, no existence leak).
     """
     try:
-        return store.get_project(project_id)
+        project = store.get_project(project_id)
     except NotFound:
         return CallbackAction(reply=_project_not_found(project_id))
     except Exception:
         return CallbackAction(reply=error_text)
+    visible = _visible_project_ids(store, chat_id)
+    if visible is not None and project_id not in visible:
+        return CallbackAction(reply=_project_not_found(project_id))
+    return project
 
 
 def _resolve_task_number(
@@ -2655,7 +2769,8 @@ def _resolve_task_number(
 
 
 def _resolve_move_context(
-    store: Store, project_id: int, number: int
+    store: Store, project_id: int, number: int,
+    chat_id: Optional[int] = None,
 ) -> Union[CallbackAction, tuple[dict, dict]]:
     """Resolve project + task for the ``m:``/``c:``/``x:`` move families.
 
@@ -2663,8 +2778,12 @@ def _resolve_move_context(
     texts; any other store failure answers with :data:`MOVE_ERROR_TEXT`.
     Returns ``(project, task)`` or a ready-to-return
     :class:`CallbackAction`.
+
+    The ``chat_id`` applies per-user project visibility (task #135)
+    through :func:`_resolve_project_id`: a non-visible project answers
+    the same not-found text as a nonexistent one (nothing is moved there).
     """
-    project = _resolve_project_id(store, project_id, MOVE_ERROR_TEXT)
+    project = _resolve_project_id(store, project_id, MOVE_ERROR_TEXT, chat_id)
     if not isinstance(project, dict):
         return project
     task = _resolve_task_number(
@@ -2840,6 +2959,15 @@ def make_callback_dispatch(
     reply for every payload family — in particular no attachment bytes are
     ever sent to an unauthenticated chat. Without an ``auth`` the presses
     are open (the legacy, unauthenticated behavior).
+
+    Per-user project visibility (task #135) applies to every family that
+    resolves a project (``p:``, ``t:``, ``a:``, ``s:``/``u:``,
+    ``m:``/``c:``/``x:``): the pressing chat's visible set (the same chat
+    id as the auth gate) is resolved with
+    :func:`_visible_project_ids`, and a non-visible project answers the
+    same not-found text as a nonexistent one (no data, no existence
+    leak); the ``h:p``/``h:t``/``h:s`` menu routes go through the
+    already chat-aware views.
     """
 
     def _callback_chat_id(callback_query: dict) -> Optional[int]:
@@ -2857,15 +2985,18 @@ def make_callback_dispatch(
         if not parts[1].isdigit():
             return None  # malformed → run_bot's out-of-date toast
         project_id = int(parts[1])
-        resolved = _resolve_project_id(store, project_id, TASKS_ERROR_TEXT)
-        if not isinstance(resolved, dict):
-            return resolved
         # The same view typing "/tasks <id>" would send (including its
         # own t: keyboard when the project has active tasks): rich for the
         # pressing chat; an inaccessible message (no chat) keeps the plain
         # KeyboardReply form with its per-task keyboard (the tap targets
-        # must survive).
+        # must survive). The chat also gates per-user project visibility
+        # (task #135) in the resolution below.
         chat_id = _callback_chat_id(callback_query)
+        resolved = _resolve_project_id(
+            store, project_id, TASKS_ERROR_TEXT, chat_id
+        )
+        if not isinstance(resolved, dict):
+            return resolved
         try:
             view = tasks_view(store, str(project_id), chat_id)
         except Exception:
@@ -2884,7 +3015,14 @@ def make_callback_dispatch(
             number = int(parts[2])
         except ValueError:
             return None
-        project = _resolve_project_id(store, project_id, TASK_ERROR_TEXT)
+        # The button's chat (an inaccessible message arrives with no chat
+        # → the plain text, as before): the toggle button reflects that
+        # chat's subscription state, and it gates per-user project
+        # visibility (task #135) in the resolution below.
+        chat_id = _callback_chat_id(callback_query)
+        project = _resolve_project_id(
+            store, project_id, TASK_ERROR_TEXT, chat_id
+        )
         if not isinstance(project, dict):
             return project
         task = _resolve_task_number(
@@ -2896,11 +3034,6 @@ def make_callback_dispatch(
             history = store.get_history(project_id, number)
         except Exception:
             return CallbackAction(reply=TASK_ERROR_TEXT)
-        # The detail reply carries its own keyboard only when the
-        # button's chat is known (an inaccessible message arrives with
-        # no chat → the plain text, as before): the toggle button
-        # reflects that chat's subscription state.
-        chat_id = _callback_chat_id(callback_query)
         subscribed = False
         if chat_id is not None:
             try:
@@ -2925,8 +3058,12 @@ def make_callback_dispatch(
         project_id = int(parts[1])
         number = int(parts[2])
         attachment_id = int(parts[3])
+        # The button's chat gates per-user project visibility (task #135)
+        # in the resolution below (no attachment bytes from a hidden
+        # project).
+        chat_id = _callback_chat_id(callback_query)
         project = _resolve_project_id(
-            store, project_id, ATTACHMENT_ERROR_TEXT
+            store, project_id, ATTACHMENT_ERROR_TEXT, chat_id
         )
         if not isinstance(project, dict):
             return project
@@ -2963,14 +3100,16 @@ def make_callback_dispatch(
         error_text = (
             SUBSCRIBE_ERROR_TEXT if parts[0] == "s" else UNSUBSCRIBE_ERROR_TEXT
         )
-        project = _resolve_project_id(store, project_id, error_text)
-        if not isinstance(project, dict):
-            return project
         # A subscription is per chat: an inaccessible message (no chat)
-        # cannot be toggled → the out-of-date toast.
+        # cannot be toggled → the out-of-date toast. The chat also gates
+        # per-user project visibility (task #135) in the resolution
+        # below (toggling a hidden project answers not-found).
         chat_id = _callback_chat_id(callback_query)
         if chat_id is None:
             return None
+        project = _resolve_project_id(store, project_id, error_text, chat_id)
+        if not isinstance(project, dict):
+            return project
         if parts[0] == "s":
             try:
                 store.subscribe_project(chat_id, project_id)
@@ -3034,7 +3173,11 @@ def make_callback_dispatch(
             return None
         project_id, number = int(parts[1]), int(parts[2])
         target = db.WORKFLOW_STATES[int(parts[3])]
-        resolved = _resolve_move_context(store, project_id, number)
+        # The button's chat gates per-user project visibility (task #135)
+        # in the resolution below (moving a hidden project answers
+        # not-found).
+        chat_id = _callback_chat_id(callback_query)
+        resolved = _resolve_move_context(store, project_id, number, chat_id)
         if not isinstance(resolved, tuple):
             return resolved
         project, task = resolved
@@ -3086,7 +3229,10 @@ def make_callback_dispatch(
         if not all(parts[i].isdigit() for i in (1, 2)):
             return None  # malformed → run_bot's out-of-date toast
         project_id, number = int(parts[1]), int(parts[2])
-        resolved = _resolve_move_context(store, project_id, number)
+        # The button's chat gates per-user project visibility (task #135)
+        # in the resolution below (a hidden project answers not-found).
+        chat_id = _callback_chat_id(callback_query)
+        resolved = _resolve_move_context(store, project_id, number, chat_id)
         if not isinstance(resolved, tuple):
             return resolved
         project, task = resolved
@@ -3580,7 +3726,13 @@ class Notifier:
     passed, each change fans out only to subscribed chats that are
     *currently* authenticated; a subscriber that has logged out misses
     changes made while logged out (the cursor still advances — a lost
-    change would be a leak, a replay a surprise).
+    change would be a leak, a replay a surprise). Per-user project
+    visibility (task #135) applies to every subscriber, regardless of
+    auth: a change is skipped for a subscribed chat whose visible set
+    excludes its project (``Store.project_visible_to``; an unrestricted
+    subscriber — no visibility rows — is always delivered). The cursor
+    still advances past a change all of whose *visible* subscribers
+    received it, exactly as with a logged-out one.
     """
 
     def __init__(
@@ -3607,6 +3759,13 @@ class Notifier:
             for chat_id in self._store.subscribed_chats(change["project_id"]):
                 if self._auth is not None and not self._auth.is_authenticated(chat_id):
                     continue  # no board data for unauthenticated chats
+                # Per-user project visibility (task #135): a subscriber
+                # whose visible set excludes the changed project must not
+                # receive a notification that leaks its title/state.
+                if not self._store.project_visible_to(
+                    chat_id, change["project_id"]
+                ):
+                    continue
                 await _send_reply(
                     self._api, chat_id, format_notification(change), self._rich
                 )

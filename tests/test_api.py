@@ -660,6 +660,8 @@ def test_openapi_route_table_stable(client):
         ("POST", "/api/telegram-users", "201", "api_add_telegram_user_api_telegram_users_post"),
         ("PUT", "/api/telegram-users/{chat_id}", "200", "api_set_telegram_user_password_api_telegram_users__chat_id__put"),
         ("DELETE", "/api/telegram-users/{chat_id}", "200", "api_remove_telegram_user_api_telegram_users__chat_id__delete"),
+        ("GET", "/api/telegram-users/{chat_id}/projects", "200", "api_list_telegram_user_projects_api_telegram_users__chat_id__projects_get"),
+        ("PUT", "/api/telegram-users/{chat_id}/projects", "200", "api_set_telegram_user_projects_api_telegram_users__chat_id__projects_put"),
         ("GET", "/api/task-types", "200", "api_list_types_api_task_types_get"),
         ("POST", "/api/task-types", "201", "api_create_type_api_task_types_post"),
         ("PATCH", "/api/task-types/{type_id}", "200", "api_rename_type_api_task_types__type_id__patch"),

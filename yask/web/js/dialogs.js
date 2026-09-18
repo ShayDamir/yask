@@ -722,6 +722,91 @@ export function openEditorModal(project, task, actions) {
 
 // -- telegram users (the bot's password allowlist) ------------------------------
 
+// Per-user visible projects (task #135): a nested dialog over the Telegram
+// users list — one checkbox per project plus a "No restriction" checkbox.
+// Save posts the checked ids (or [] when unrestricted — an empty list clears
+// the restriction, the chat sees all projects again).
+function openTelegramUserProjectsModal(chatId, onSaved) {
+  const listEl = h("div", { class: "check-list" });
+  const noRestrict = h("input", { type: "checkbox", id: "tgproj-no-restrict" });
+  // When "No restriction" is on, the per-project checkboxes are disabled and
+  // unchecked (there is nothing to pick); turning it off re-enables them.
+  const syncDisabled = () => {
+    for (const cb of listEl.querySelectorAll("input[type='checkbox']")) {
+      cb.disabled = noRestrict.checked;
+      if (noRestrict.checked) cb.checked = false;
+    }
+  };
+  noRestrict.addEventListener("change", syncDisabled);
+
+  (async () => {
+    try {
+      const [projects, userProjects] = await Promise.all([
+        api.listProjects(),
+        api.listTelegramUserProjects(chatId),
+      ]);
+      const chosen = new Set(userProjects.map((p) => p.id));
+      for (const p of projects) {
+        const cb = h("input", {
+          type: "checkbox",
+          value: String(p.id),
+          checked: chosen.has(p.id) ? "checked" : null,
+        });
+        listEl.append(
+          h("label", {}, cb, h("span", {}, p.name), h("span", { class: "dim" }, `(${p.id})`))
+        );
+      }
+      if (!projects.length) {
+        listEl.append(h("span", { class: "dim-sm" }, "No projects on the board."));
+      }
+      // No rows at all = unrestricted: check "No restriction" up front.
+      noRestrict.checked = userProjects.length === 0;
+      syncDisabled();
+    } catch (err) {
+      listEl.append(
+        h("span", { class: "dim" }, `Could not load projects: ${err.message}`)
+      );
+    }
+  })();
+
+  const form = h(
+    "form",
+    {
+      id: "tgproj-form",
+      onsubmit: async (e) => {
+        e.preventDefault();
+        const saveBtn = form.querySelector("#tgproj-save");
+        saveBtn.disabled = true;
+        try {
+          const ids = noRestrict.checked
+            ? []
+            : [...listEl.querySelectorAll("input:checked")].map((c) => Number(c.value));
+          await api.setTelegramUserProjects(chatId, ids);
+          toast(`Projects updated for chat ${chatId}`, "success");
+          modal.close();
+          if (onSaved) onSaved();
+        } catch (err) {
+          toastError(err);
+          saveBtn.disabled = false;
+        }
+      },
+    },
+    h("h2", {}, `Projects for chat ${chatId}`),
+    h("p", { class: "hint" },
+      "Projects this Telegram user can see in the bot. Non-visible projects behave as if they do not exist."),
+    h("label", { class: "tgproj-no-restrict" }, noRestrict, " No restriction — all projects visible"),
+    listEl,
+    h(
+      "div",
+      { class: "modal-actions" },
+      h("span", { class: "spacer" }),
+      h("button", { type: "submit", class: "btn", id: "tgproj-save" }, "Save")
+    )
+  );
+  const modal = openModal(form, { small: true });
+  return modal;
+}
+
 export function openTelegramUsersModal() {
   const listEl = h("div", { class: "tg-user-list" });
   const render = async () => {
@@ -797,6 +882,32 @@ export function openTelegramUsersModal() {
           toastError(err);
         }
       });
+      // per-user visible projects (task #135): the indicator is filled by a
+      // background fetch ("all" = no restriction, "N of M" = restricted);
+      // the button opens the project-checkbox modal above.
+      const projIndicator = h("span", { class: "tg-projects-ind" }, "…");
+      (async () => {
+        try {
+          const [userProjects, all] = await Promise.all([
+            api.listTelegramUserProjects(u.chat_id),
+            api.listProjects(),
+          ]);
+          projIndicator.textContent = userProjects.length
+            ? `${userProjects.length} of ${all.length}`
+            : "all";
+        } catch {
+          projIndicator.textContent = "";
+        }
+      })();
+      const projBtn = h("button", {
+        class: "btn ghost",
+        type: "button",
+        title: `Visible projects for chat ${u.chat_id}`,
+        "aria-label": `Visible projects for chat ${u.chat_id}`,
+      }, "Projects");
+      projBtn.addEventListener("click", () =>
+        openTelegramUserProjectsModal(u.chat_id, () => render())
+      );
       listEl.append(
         h(
           "div",
@@ -804,6 +915,8 @@ export function openTelegramUsersModal() {
           h("span", { class: "tg-chat-id" }, String(u.chat_id)),
           h("span", { class: "tg-ts" },
             `added ${fmtTime(u.created_at)} · updated ${fmtTime(u.updated_at)}`),
+          projIndicator,
+          projBtn,
           pwInput,
           saveBtn,
           delBtn
