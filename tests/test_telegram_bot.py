@@ -11,6 +11,7 @@ import re
 import sqlite3
 import struct
 import time
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -18,7 +19,7 @@ import pytest
 from yask import cli
 from yask import db
 from yask import telegram_bot
-from yask.store import Store
+from yask.store import Store, TELEGRAM_SESSION_TTL_SECONDS
 
 BOT_TOKEN = "12345:TEST"
 # Allowlist seeds must pass the store's strength floor (task #130): at
@@ -5248,9 +5249,9 @@ def test_help_mentions_subscribe():
 # --- command registry (source of truth for /help + setMyCommands) ---------
 
 _REGISTRY_NAMES = (
-    "/start", "/help", "/login", "/whoami", "/projects", "/tasks",
-    "/task", "/backlog", "/blocked", "/move", "/add", "/describe", "/type",
-    "/attachment", "/attach", "/subscribe", "/unsubscribe",
+    "/start", "/help", "/login", "/logout", "/whoami", "/projects",
+    "/tasks", "/task", "/backlog", "/blocked", "/move", "/add", "/describe",
+    "/type", "/attachment", "/attach", "/subscribe", "/unsubscribe",
 )
 
 
@@ -5418,11 +5419,11 @@ def test_startup_posts_registry_commands_via_setmycommands(tmp_path):
     assert body["commands"] == telegram_bot.build_my_commands(
         telegram_bot.COMMAND_REGISTRY
     )
-    # strong exactness: registry names in order, all 17, well-formed entries
+    # strong exactness: registry names in order, all 18, well-formed entries
     assert [e["command"] for e in body["commands"]] == [
         c.name for c in telegram_bot.COMMAND_REGISTRY
     ]
-    assert len(body["commands"]) == 17
+    assert len(body["commands"]) == 18
     for entry in body["commands"]:
         assert set(entry) == {"command", "description"}
 
@@ -7896,6 +7897,92 @@ def test_login_password_with_spaces(store):
     assert auth.is_authenticated(7)
 
 
+def _session_stamp(store, chat_id=7):
+    return store.conn.execute(
+        "SELECT authenticated_at FROM telegram_users WHERE chat_id = ?",
+        (chat_id,),
+    ).fetchone()["authenticated_at"]
+
+
+def _backdate_session(store, chat_id, seconds):
+    """Set ``authenticated_at`` to ``seconds`` before now.
+
+    Second-precision timestamps (``db.utcnow()``'s format), so TTL
+    boundary tests always use a margin of at least a minute — never exact
+    equality.
+    """
+    stamp = (
+        datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    store.conn.execute(
+        "UPDATE telegram_users SET authenticated_at = ? WHERE chat_id = ?",
+        (stamp, chat_id),
+    )
+
+
+def test_logout_revokes_the_session(store):
+    store.add_telegram_user(7, TEST_PW)
+    auth = telegram_bot.Auth(store)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [message_update(661, f"/login {TEST_PW}")],
+                [message_update(662, "/logout")],
+                [message_update(663, "/projects")],
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store, auth),
+    )
+    assert script.sent[0]["text"] == telegram_bot.LOGIN_OK_TEXT
+    assert script.sent[1]["text"] == telegram_bot.LOGOUT_OK_TEXT
+    # the logout revoked the session in the store, and the board is
+    # closed again
+    assert auth.is_authenticated(7) is False
+    assert script.sent[2]["text"] == telegram_bot.AUTH_REQUIRED_TEXT
+    # a fresh /login works
+    script = run_bot_until_stop(
+        Script([[message_update(664, f"/login {TEST_PW}")]]),
+        dispatch=telegram_bot.make_dispatch(store, auth),
+    )
+    assert script.sent[0]["text"] == telegram_bot.LOGIN_OK_TEXT
+    assert auth.is_authenticated(7) is True
+
+
+def test_logout_when_not_logged_in(store):
+    """Permitted-but-never-logged-in and unknown chats get the exact same
+    reply — the bot must not reveal allowlist membership (task #129)."""
+    store.add_telegram_user(7, TEST_PW)
+    auth = telegram_bot.Auth(store)
+    script = run_bot_until_stop(
+        Script(
+            [
+                [message_update(671, "/logout")],  # chat 7: permitted, never logged in
+                [message_update(672, "/logout", chat_id=9)],  # chat 9: unknown
+            ]
+        ),
+        dispatch=telegram_bot.make_dispatch(store, auth),
+    )
+    assert script.sent[0]["text"] == telegram_bot.LOGOUT_NOT_LOGGED_IN_TEXT
+    assert script.sent[1]["text"] == telegram_bot.LOGOUT_NOT_LOGGED_IN_TEXT
+
+
+def test_logout_without_auth_object(store):
+    # legacy no-auth mode: there is no session concept, so the consistent
+    # answer is "not logged in" (judgment call, task #131)
+    store.add_telegram_user(7, TEST_PW)
+    script = run_bot_until_stop(
+        Script([[message_update(673, "/logout")]]),
+        dispatch=telegram_bot.make_dispatch(store),
+    )
+    assert script.sent[0]["text"] == telegram_bot.LOGOUT_NOT_LOGGED_IN_TEXT
+
+
+def test_logout_in_help_and_menu():
+    assert "/logout" in telegram_bot.HELP_TEXT
+    commands = telegram_bot.build_my_commands(telegram_bot.COMMAND_REGISTRY)
+    assert "/logout" in [c["command"] for c in commands]
+
+
 def test_board_command_requires_auth_then_works_after_login(store):
     pid = store.create_project("yask")["id"]
     store.create_task(pid, "top secret task")
@@ -7922,6 +8009,34 @@ def test_board_command_requires_auth_then_works_after_login(store):
     text = script.sent_rich[0]["rich_message"]["markdown"]
     assert text.startswith("# Projects")
     assert "yask" in text
+
+
+def test_authenticated_activity_refreshes_the_session(store):
+    """A gated command passes the gate and refreshes the session stamp
+    (task #131): the TTL window runs from the last authenticated activity,
+    not from the last /login."""
+    store.create_project("yask")
+    store.add_telegram_user(7, TEST_PW)
+    auth = telegram_bot.Auth(store)
+    dispatch = telegram_bot.make_dispatch(store, auth)
+    assert auth.authenticate(7, TEST_PW)
+    # just inside the TTL: still live, but the stamp is near expiry
+    _backdate_session(store, 7, TELEGRAM_SESSION_TTL_SECONDS - 60)
+    assert auth.is_authenticated(7)
+    # a gated command passes the gate and moves the stamp to ~now
+    assert (
+        dispatch("/projects", chat_id=7) is not telegram_bot.AUTH_REQUIRED_TEXT
+    )
+    new = _session_stamp(store, 7)
+    lower_bound = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=TELEGRAM_SESSION_TTL_SECONDS - 120)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert new > lower_bound
+    # then backdated past the TTL with no activity: the gate fails again
+    _backdate_session(store, 7, TELEGRAM_SESSION_TTL_SECONDS + 60)
+    assert dispatch("/projects", chat_id=7) == telegram_bot.AUTH_REQUIRED_TEXT
+    assert auth.is_authenticated(7) is False
 
 
 def test_all_board_commands_gated_for_unauthenticated_chat(store):
@@ -8102,6 +8217,34 @@ def test_notifier_skips_unauthenticated_subscribers(store):
     asyncio.run(notifier.check())
     # only the authenticated subscriber receives the notification; the
     # change is not replayed later (the cursor advances past it)
+    assert api.sent == [(1, _notification(pid, t, "working", "Review"), markup)]
+    asyncio.run(notifier.check())
+    assert api.sent == [(1, _notification(pid, t, "working", "Review"), markup)]
+
+
+def test_notifier_skips_expired_sessions(store):
+    """A subscriber whose session has expired (the TTL, task #131) is
+    treated like a logged-out one: no delivery, and the cursor still
+    advances past the change (no replay)."""
+    pid = store.create_project("yask")["id"]
+    store.add_telegram_user(1, TEST_PW)
+    store.add_telegram_user(2, TEST_PW_ALT)
+    store.subscribe_project(1, pid)
+    store.subscribe_project(2, pid)
+    auth = telegram_bot.Auth(store)
+    auth.authenticate(1, TEST_PW)
+    auth.authenticate(2, TEST_PW_ALT)
+    # chat 2's session expires
+    _backdate_session(store, 2, TELEGRAM_SESSION_TTL_SECONDS + 60)
+    assert auth.is_authenticated(2) is False
+    api = FakeAPI()
+    notifier = telegram_bot.Notifier(api, store, auth)
+    notifier.seed()
+    t = _moved(store, pid)
+    markup = _notification_markup(pid, t, "working")
+    asyncio.run(notifier.check())
+    # only the live subscriber receives the notification; the change is
+    # not replayed later (the cursor advances past it)
     assert api.sent == [(1, _notification(pid, t, "working", "Review"), markup)]
     asyncio.run(notifier.check())
     assert api.sent == [(1, _notification(pid, t, "working", "Review"), markup)]

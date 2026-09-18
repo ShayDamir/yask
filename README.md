@@ -178,13 +178,17 @@ digit, and symbol character classes.
 A user asks the bot `/whoami` to learn their chat id, the administrator
 enters it in the web UI with a password, and the user unlocks the board
 with `/login <password>`. A successful login persists across bot restarts
-(the session is stored in the database); a newly added chat must log in
-once, and a password change or removal from the web UI requires a fresh
-`/login` (removal revokes access immediately). Until a chat is
-authenticated, the board commands and all inline buttons answer with an
-auth-required notice and no board data, and state-change notifications are
-not delivered to it; `/start`, `/help`, `/login` and `/whoami` stay
-available to everyone.
+(the session is stored in the database) and has a TTL: the stamp tracks
+the chat's last authenticated activity (any board command or inline-button
+use refreshes it), and after 24 hours without such activity the session
+expires and the chat must `/login` again — state-change notifications are
+not delivered while the session is expired. `/logout` ends the session
+immediately. A newly added chat must log in once, and a password change or
+removal from the web UI requires a fresh `/login` (removal revokes access
+immediately). Until a chat is authenticated, the board commands and all
+inline buttons answer with an auth-required notice and no board data, and
+state-change notifications are not delivered to it; `/start`, `/help`,
+`/login`, `/logout` and `/whoami` stay available to everyone.
 
 Each permitted user can additionally be restricted to a list of visible
 projects (web UI → ✈ "Telegram bot users" → **Projects** per user). With

@@ -78,6 +78,16 @@ SCRYPT_MAXMEM = 64 * 1024 * 1024
 TELEGRAM_LOGIN_MAX_ATTEMPTS = 5
 TELEGRAM_LOGIN_LOCK_SECONDS = 15 * 60
 
+# Login session TTL (task #131). ``authenticated_at`` is the session's
+# *last authenticated activity*: it is stamped by a successful ``/login``
+# and refreshed by each subsequent gated board command or inline-button
+# press. A session whose stamp is older than
+# ``TELEGRAM_SESSION_TTL_SECONDS`` is expired and treated as unauthenticated
+# everywhere (the gates and the notification fan-out alike). Notifications
+# never refresh the session — a server push is not user activity, and
+# refreshing on them would let an otherwise-idle session never run out.
+TELEGRAM_SESSION_TTL_SECONDS = 24 * 60 * 60
+
 # Minimum strength for an allowlist password (task #130). The allowlist is
 # the bot's only authentication, and a copied database lets an attacker
 # crack the scrypt hashes offline — the password is the real defense, so
@@ -149,6 +159,21 @@ def _lock_expiry() -> str:
         seconds=TELEGRAM_LOGIN_LOCK_SECONDS
     )
     return expiry.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _session_cutoff() -> str:
+    """ISO-8601 UTC timestamp ``TELEGRAM_SESSION_TTL_SECONDS`` before now.
+
+    A login session (task #131) is live iff its ``authenticated_at`` stamp
+    compares lexicographically *after* this cutoff — the same string
+    comparison ``_is_locked`` uses for ``locked_until``.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        seconds=TELEGRAM_SESSION_TTL_SECONDS
+    )
+    return cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _verify_password(password: str, stored: str) -> bool:
@@ -1823,17 +1848,65 @@ class Store:
             )
 
     def is_telegram_user_authenticated(self, chat_id: int) -> bool:
-        """Whether the chat is permitted *and* holds a persisted session.
+        """Whether the chat is permitted *and* holds a live login session.
 
         A newly permitted chat has no session yet (``authenticated_at`` is
         NULL) — it must ``/login`` once before the board is open to it.
         ``False`` for a chat that is not in the allowlist at all.
+
+        The stamp is the session's *last authenticated activity* (task
+        #131): a session whose stamp is older than
+        :data:`TELEGRAM_SESSION_TTL_SECONDS` is expired and answers
+        ``False`` everywhere — indistinguishable from never having logged
+        in.
         """
         row = self.conn.execute(
             "SELECT authenticated_at FROM telegram_users WHERE chat_id = ?",
             (chat_id,),
         ).fetchone()
-        return row is not None and row["authenticated_at"] is not None
+        if row is None or row["authenticated_at"] is None:
+            return False
+        return row["authenticated_at"] > _session_cutoff()
+
+    def logout_telegram_user(self, chat_id: int) -> bool:
+        """Revoke the chat's own login session (the bot's ``/logout``).
+
+        If the row exists and holds a stamp — a live *or* expired session —
+        the stamp is NULLed and ``updated_at`` bumped in one conditional
+        UPDATE; returns ``True``. Unknown chat, never logged in, or already
+        logged out all return ``False`` without raising: the bot must answer
+        the same "not logged in" text for all three, so the reply must not
+        reveal allowlist membership (task #129's stance).
+        """
+        now = self._now()
+        with self.conn:
+            result = self.conn.execute(
+                "UPDATE telegram_users SET authenticated_at = NULL, "
+                "updated_at = ? "
+                "WHERE chat_id = ? AND authenticated_at IS NOT NULL",
+                (now, chat_id),
+            )
+        return result.rowcount > 0
+
+    def touch_telegram_session(self, chat_id: int) -> bool:
+        """Refresh the chat's session stamp to now (the bot's session TTL,
+        task #131).
+
+        Called after each authenticated board command or inline-button
+        press — the stamp is the session's last activity. The
+        ``IS NOT NULL`` guard makes a touch a no-op when the stamp has been
+        cleared in the meantime (a concurrent password rotation or a
+        ``/logout``), so a touch can never resurrect a revoked session.
+        Returns whether a row was touched.
+        """
+        now = self._now()
+        with self.conn:
+            result = self.conn.execute(
+                "UPDATE telegram_users SET authenticated_at = ? "
+                "WHERE chat_id = ? AND authenticated_at IS NOT NULL",
+                (now, chat_id),
+            )
+        return result.rowcount > 0
 
     # -- telegram user project visibility --------------------------------
 

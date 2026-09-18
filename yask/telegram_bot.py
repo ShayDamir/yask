@@ -7,8 +7,9 @@ answers incoming messages. Board access is password-authenticated: the
 permitted chats (a chat id plus a password, stored only as a salted hash in
 the store's ``telegram_users`` table and managed from the web UI) may
 ``/login <password>``; a successful login stamps a session in the store
-that persists across bot restarts (a password rotation or a removal from
-the web UI revokes it, requiring a fresh ``/login``); until a chat has
+that persists across bot restarts, until the session TTL elapses or the
+chat ``/logout``s (a password rotation or a removal from the web UI
+revokes it too, requiring a fresh ``/login``); until a chat has
 authenticated, the board commands and every inline-keyboard callback
 answer with an auth-required notice and no board data, and state-change
 notifications are not delivered to it. A permitted chat may additionally
@@ -20,8 +21,9 @@ every surface — the command views, the inline-keyboard callbacks and the
 state-change notifications (the existing not-found wording, so a
 restricted user cannot distinguish a hidden project from a nonexistent
 one). The ungated
-commands are ``/start``, ``/help``, ``/login`` and ``/whoami`` (the chat's
-own id — the identifier the administrator enters in the web UI). Today the
+commands are ``/start``, ``/help``, ``/login``, ``/logout`` and ``/whoami``
+(the chat's own id — the identifier the administrator enters in the web
+UI). Today the
 authenticated bot answers
 ``/projects`` (the project list with per-state task
 counts, with one inline button per project — the list is sent as a rich
@@ -207,6 +209,11 @@ COMMAND_REGISTRY: list[Command] = [
         auth_gated=False,
     ),
     Command(
+        "/logout",
+        "end this chat's login session",
+        auth_gated=False,
+    ),
+    Command(
         "/whoami",
         "show this chat's id (give it to the yask administrator)",
         auth_gated=False,
@@ -337,6 +344,13 @@ LOGIN_OK_TEXT = "Authenticated. You can now use the board."
 # bot must not reveal which chat ids exist in the allowlist.
 LOGIN_FAIL_TEXT = "Authentication failed. Check your password and try again."
 
+LOGOUT_OK_TEXT = "Logged out. Use /login <password> to authenticate again."
+
+# Same text for an unknown chat, a never-logged-in chat and an already
+# logged-out one: the reply must not reveal which case applies (no
+# allowlist enumeration, task #129's stance).
+LOGOUT_NOT_LOGGED_IN_TEXT = "You are not logged in."
+
 WHOAMI_TEXT = (
     "Your chat id is {chat_id}. "
     "Give it to your yask administrator to get access."
@@ -374,6 +388,7 @@ ADD_ERROR_TEXT = WRITE_ERROR_TEXT
 DESCRIBE_ERROR_TEXT = WRITE_ERROR_TEXT
 TYPE_ERROR_TEXT = WRITE_ERROR_TEXT
 ATTACH_ERROR_TEXT = WRITE_ERROR_TEXT
+LOGOUT_ERROR_TEXT = WRITE_ERROR_TEXT
 
 TASK_USAGE_TEXT = (
     "Usage: /task <project> <number|title>\n"
@@ -502,17 +517,24 @@ class Auth:
     sessions themselves both live in the store's ``telegram_users`` table —
     the allowlist is managed from the web UI, stored only as salted hashes.
     A successful ``/login`` stamps the session in the database, so it
-    survives bot restarts. A password rotation or a removal from the web UI
-    invalidates the session (NULL / row gone), and because the store is
-    consulted on every check, the revocation bites immediately — even in a
-    running bot process — no restart needed.
+    survives bot restarts. The stamp is the session's *last authenticated
+    activity* (task #131): authenticated board commands and inline-button
+    presses refresh it (:meth:`refresh`), and the session expires once the
+    stamp is older than the store's session TTL (the check is the store's —
+    :meth:`is_authenticated` answers ``False`` for an expired session).
+    Server pushes never refresh: the notifier does not count as activity.
+    ``/logout`` (:meth:`logout`), a password rotation, and a removal from
+    the web UI all invalidate the session (NULL / row gone), and because
+    the store is consulted on every check, the revocation bites immediately
+    — even in a running bot process — no restart needed.
     """
 
     def __init__(self, store: Store) -> None:
         self._store = store
 
     def is_authenticated(self, chat_id: Optional[int]) -> bool:
-        """Whether this chat has a persisted login session."""
+        """Whether this chat has a *live* login session (an expired stamp
+        is not authenticated — the store's TTL check)."""
         if chat_id is None:
             return False
         return self._store.is_telegram_user_authenticated(chat_id)
@@ -528,6 +550,29 @@ class Auth:
         if chat_id is None:
             return False
         return self._store.login_telegram_user(chat_id, password)
+
+    def logout(self, chat_id: Optional[int]) -> bool:
+        """Revoke this chat's session (the ``/logout`` command).
+
+        ``True`` iff a session (live or expired) was revoked; ``False`` for
+        a ``None`` chat (no sender), an unknown chat, or one with no
+        session — the bot cannot tell the last two apart and must not
+        reveal which applies.
+        """
+        if chat_id is None:
+            return False
+        return self._store.logout_telegram_user(chat_id)
+
+    def refresh(self, chat_id: Optional[int]) -> bool:
+        """Refresh this chat's session stamp (authenticated activity,
+        task #131).
+
+        ``False`` for a ``None`` chat or a row with no stamp to refresh —
+        a cleared stamp (logged out / rotated) is never resurrected.
+        """
+        if chat_id is None:
+            return False
+        return self._store.touch_telegram_session(chat_id)
 
 
 def _command_token(text: Optional[str]) -> Optional[str]:
@@ -2491,10 +2536,11 @@ def make_dispatch(
     answers its usage text; its real path is the file handler below); the
     subscription
     commands additionally need the sender's chat id, hence
-    ``dispatch(text, chat_id)``. ``/login`` and ``/whoami`` are explicit
-    special cases before the table lookup (they need the auth state and
-    the sender's own chat id). Everything else falls back to the static
-    :func:`reply_for`. A failure reading (or writing) the store yields
+    ``dispatch(text, chat_id)``. ``/login``, ``/logout`` and ``/whoami``
+    are explicit special cases before the table lookup (they need the
+    auth state and the sender's own chat id). Everything else falls back
+    to the static :func:`reply_for`. A failure reading (or writing) the
+    store yields
     the command's row error text instead of crashing the long-poll loop.
     ``/task`` resolves to a text reply and ``/attachment`` to an inline
     text reply (small text attachments) or a :class:`FileReply` (the
@@ -2522,10 +2568,16 @@ def make_dispatch(
     data — the gate covers exactly the registry's auth_gated commands
     (:func:`_verify_dispatch_table` fails the import on any divergence)
     — and the file handler is gated the same way, before any resolution
-    or download. ``/login`` (success/failure indistinguishable for
-    unknown chats) and ``/whoami`` (the sender's own chat id) are
-    ungated. Without an ``auth`` the commands are open (the legacy,
-    unauthenticated behavior).
+    or download. A gate pass is authenticated activity: it refreshes the
+    chat's session stamp so the session TTL (task #131) runs from the
+    last real use — on the text path and the file path here, and the
+    callback path in :func:`make_callback_dispatch`; the notifier is the
+    exception (a server push is not user activity). ``/login`` (success/
+    failure indistinguishable for unknown chats), ``/logout`` (revokes
+    the session — ``False`` replies and unknown chats are
+    indistinguishable, no allowlist enumeration) and ``/whoami`` (the
+    sender's own chat id) are ungated. Without an ``auth`` the commands
+    are open (the legacy, unauthenticated behavior).
     """
 
     def _authed(chat_id: Optional[int]) -> bool:
@@ -2564,6 +2616,10 @@ def make_dispatch(
         """
         if auth is not None and not auth.is_authenticated(chat_id):
             return AUTH_REQUIRED_TEXT
+        if auth is not None:
+            # Authenticated activity: the gate just passed, so refresh
+            # the session window (task #131).
+            auth.refresh(chat_id)
         if api is None or file.file_id is None:
             return ATTACH_ERROR_TEXT
         cmd = _command_token(file.caption)
@@ -2649,12 +2705,31 @@ def make_dispatch(
             except Exception:
                 ok = False
             return LOGIN_OK_TEXT if ok else LOGIN_FAIL_TEXT
+        if cmd == "/logout":
+            if chat_id is None:
+                return None  # no sender to log out
+            # Legacy no-auth mode has no session concept: the consistent
+            # "not logged in" (judgment call, task #131).
+            if auth is None:
+                return LOGOUT_NOT_LOGGED_IN_TEXT
+            try:
+                ok = auth.logout(chat_id)
+            except Exception:
+                return LOGOUT_ERROR_TEXT
+            # Unknown chat, never logged in and already logged out all
+            # get the same text (no allowlist enumeration).
+            return LOGOUT_OK_TEXT if ok else LOGOUT_NOT_LOGGED_IN_TEXT
         if cmd == "/whoami":
             if chat_id is None:
                 return None  # no sender whose id could be shown
             return WHOAMI_TEXT.format(chat_id=chat_id)
-        if cmd in COMMAND_TABLE and not _authed(chat_id):
-            return AUTH_REQUIRED_TEXT
+        if cmd in COMMAND_TABLE:
+            if not _authed(chat_id):
+                return AUTH_REQUIRED_TEXT
+            # Authenticated activity: the gate just passed, so refresh
+            # the session window (task #131).
+            if auth is not None:
+                auth.refresh(chat_id)
         entry = COMMAND_TABLE.get(cmd)
         if entry is not None:
             handler, error_text = entry
@@ -3316,14 +3391,18 @@ def make_callback_dispatch(
         if not isinstance(data, str):
             return None
         # Board access: the chat the button was pressed in (the original
-        # message's chat.id) must hold a login session — persisted in the
-        # store, so a bot restart does not log it out.
+        # message's chat.id) must hold a *live* login session — persisted
+        # in the store, so a bot restart does not log it out (the store's
+        # TTL check does). A pass is authenticated activity: it refreshes
+        # the session window (task #131).
         if auth is not None:
-            if not auth.is_authenticated(_callback_chat_id(callback_query)):
+            callback_chat_id = _callback_chat_id(callback_query)
+            if not auth.is_authenticated(callback_chat_id):
                 return CallbackAction(
                     answer_text=AUTH_REQUIRED_TEXT,
                     reply=AUTH_REQUIRED_TEXT,
                 )
+            auth.refresh(callback_chat_id)
         parts = data.split(":")
         handler = handlers.get((parts[0], len(parts)))
         # Any other shape (unknown family or arity; each handler also
@@ -3724,9 +3803,12 @@ class Notifier:
 
     Notifications leak task titles and states, so when an :class:`Auth` is
     passed, each change fans out only to subscribed chats that are
-    *currently* authenticated; a subscriber that has logged out misses
-    changes made while logged out (the cursor still advances — a lost
-    change would be a leak, a replay a surprise). Per-user project
+    *currently* authenticated; a subscriber that has logged out — or whose
+    session has expired (the store's TTL check, task #131) — misses
+    changes made while unauthenticated (the cursor still advances — a lost
+    change would be a leak, a replay a surprise). The check here does not
+    refresh the session: a server push is not user activity. Per-user
+    project
     visibility (task #135) applies to every subscriber, regardless of
     auth: a change is skipped for a subscribed chat whose visible set
     excludes its project (``Store.project_visible_to``; an unrestricted
@@ -4134,7 +4216,8 @@ async def _amain(
     # the history with source "telegram".
     store = Store(conn, source="telegram")
 
-    # Login sessions live in the store: a restart does not log anyone out.
+    # Login sessions live in the store: a restart does not log out anyone
+    # whose session is still inside the TTL (task #131).
     auth = Auth(store)
 
     # The rich-message kill switch, read once at startup (not per send).

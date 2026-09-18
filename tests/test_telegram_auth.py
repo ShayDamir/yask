@@ -7,6 +7,7 @@ global endpoints the web UI uses to manage the list.
 
 import statistics
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,6 +21,7 @@ from yask.store import (
     ValidationError,
     TELEGRAM_LOGIN_MAX_ATTEMPTS,
     TELEGRAM_MIN_PASSWORD_LENGTH,
+    TELEGRAM_SESSION_TTL_SECONDS,
 )
 
 # Passwords that satisfy the strength floor (task #130): at least 12
@@ -255,6 +257,87 @@ def test_login_session_survives_a_reconnect(tmp_path):
         assert restarted.is_telegram_user_authenticated(7) is True
     finally:
         conn.close()
+
+
+# --- store: session TTL and /logout (task #131) --------------------------------
+
+
+def _backdate_session(store, chat_id, seconds):
+    """Set ``authenticated_at`` to ``seconds`` before now.
+
+    Second-precision timestamps (``db.utcnow()``'s format), so TTL
+    boundary tests always use a margin of at least a minute — never exact
+    equality.
+    """
+    stamp = (
+        datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    store.conn.execute(
+        "UPDATE telegram_users SET authenticated_at = ? WHERE chat_id = ?",
+        (stamp, chat_id),
+    )
+
+
+def test_login_session_expires_after_ttl(store):
+    store.add_telegram_user(7, TEST_PW)
+    assert store.login_telegram_user(7, TEST_PW) is True
+    assert store.is_telegram_user_authenticated(7) is True
+    # backdate the stamp past the cutoff: the session has expired
+    _backdate_session(store, 7, TELEGRAM_SESSION_TTL_SECONDS + 60)
+    assert store.is_telegram_user_authenticated(7) is False
+    # a fresh /login re-stamps the window
+    assert store.login_telegram_user(7, TEST_PW) is True
+    assert store.is_telegram_user_authenticated(7) is True
+
+
+def test_login_session_within_ttl_is_live(store):
+    store.add_telegram_user(7, TEST_PW)
+    assert store.login_telegram_user(7, TEST_PW) is True
+    # just inside the window (cutoff + a minute of margin): still live
+    _backdate_session(store, 7, TELEGRAM_SESSION_TTL_SECONDS - 60)
+    assert store.is_telegram_user_authenticated(7) is True
+
+
+def test_logout_telegram_user(store):
+    store.add_telegram_user(7, TEST_PW)
+    assert store.login_telegram_user(7, TEST_PW) is True
+    assert store.logout_telegram_user(7) is True
+    assert _authenticated_at(store) is None
+    assert store.is_telegram_user_authenticated(7) is False
+    # no session left to revoke: a second logout is a no-op
+    assert store.logout_telegram_user(7) is False
+    # a fresh /login works after a logout
+    assert store.login_telegram_user(7, TEST_PW) is True
+    assert store.is_telegram_user_authenticated(7) is True
+
+
+def test_logout_unknown_or_unlogged_in_is_false_and_no_error(store):
+    store.add_telegram_user(7, TEST_PW)
+    # unknown chat: False, no NotFound — the bot must not reveal
+    # allowlist membership (task #129's stance)
+    assert store.logout_telegram_user(8) is False
+    # permitted but never logged in: False, no error
+    assert store.logout_telegram_user(7) is False
+
+
+def test_touch_telegram_session(store):
+    store.add_telegram_user(7, TEST_PW)
+    assert store.login_telegram_user(7, TEST_PW) is True
+    # past the cutoff: expired — a touch (authenticated activity) moves
+    # the stamp back into the live window
+    _backdate_session(store, 7, TELEGRAM_SESSION_TTL_SECONDS + 60)
+    assert store.is_telegram_user_authenticated(7) is False
+    assert store.touch_telegram_session(7) is True
+    assert store.is_telegram_user_authenticated(7) is True
+    # no session to touch: False, the stamp stays NULL
+    store.add_telegram_user(9, TEST_PW)  # permitted, never logged in
+    assert store.touch_telegram_session(9) is False
+    assert _authenticated_at(store, 9) is None
+    # a NULLed stamp (logged out / rotated) is never resurrected
+    assert store.logout_telegram_user(7) is True
+    assert store.touch_telegram_session(7) is False
+    assert _authenticated_at(store) is None
+    assert store.is_telegram_user_authenticated(7) is False
 
 
 # --- API: the web UI's management endpoints -------------------------------------
