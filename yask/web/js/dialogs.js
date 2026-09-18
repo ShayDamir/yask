@@ -30,7 +30,18 @@ function setLastType(pid, type) {
 
 let modalCount = 0;
 
+// Object URLs created by the attachment viewer, keyed by the modal
+// backdrop element, so closeModal can revoke them (task #137). WeakMap:
+// entries vanish with the element; at most one URL per viewer today,
+// but a list keeps closeModal generic if more are added.
+const viewerUrls = new WeakMap();
+
 function closeModal(modal) {
+  const urls = viewerUrls.get(modal);
+  if (urls) {
+    for (const u of urls) URL.revokeObjectURL(u);
+    viewerUrls.delete(modal);
+  }
   modal.remove();
   modalCount--;
   if (modalCount === 0) document.body.style.overflow = "";
@@ -162,7 +173,13 @@ export async function openAttachmentViewer(task, att) {
       if (RASTER_IMAGE_TYPES.includes(att.content_type)) {
         await assertImageWithinPixelCap(blob);
       }
+      // The viewer may have been closed while loading; don't create a URL
+      // that no closeModal will ever revoke.
+      if (!modal.el.isConnected) return;
       const url = URL.createObjectURL(blob);
+      const urls = viewerUrls.get(modal.el) || [];
+      urls.push(url);
+      viewerUrls.set(modal.el, urls);
       modal.el.querySelector("#viewer-body").append(h("img", { class: "viewer-img", src: url }));
     } else {
       const text = await blob.text();
