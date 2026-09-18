@@ -333,12 +333,18 @@ def create_app(db_path: str | Path, allow_remote: bool = False) -> FastAPI:
         # policy keeps it — attachment bytes carry the inert policy
         # (task #84) — so the invariant is: every response has the four
         # headers, and the CSP is endpoint-specific when set.
+        # #132: /api/* carries sensitive data (board state, attachment
+        # metadata, the Telegram allowlist) — no-store keeps browsers
+        # and shared proxies from caching or serving it. Static UI
+        # assets are the only cacheable responses.
         response = await call_next(request)
         if "content-security-policy" not in response.headers:
             response.headers["Content-Security-Policy"] = CSP
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
         return response
 
     def store() -> Store:

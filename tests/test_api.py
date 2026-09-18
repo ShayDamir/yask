@@ -707,6 +707,34 @@ def test_security_headers_on_api_and_error_responses(client, pid):
         assert r.headers["referrer-policy"] == "no-referrer"
 
 
+def test_api_responses_carry_cache_control_no_store(client, pid):
+    """#132: /api/* carries sensitive data (board state, attachment
+    metadata, Telegram allowlist) — no-store keeps it out of browser
+    and shared-proxy HTTP caches. Static UI assets stay cacheable."""
+    ok = client.get(f"/api/projects/{pid}")          # GET, 200
+    created = client.post("/api/projects", json={"name": "CC"})  # POST, 201
+    tg = client.get("/api/telegram-users")           # allowlist, 200
+    assert (ok.status_code, created.status_code, tg.status_code) == (200, 201, 200)
+    for r in (ok, created, tg):
+        assert r.headers["cache-control"] == "no-store"
+
+    # streaming response: the attachment download must carry it too
+    task = client.post(f"/api/projects/{pid}/tasks", json={"title": "t"})
+    att = client.post(
+        f"/api/projects/{pid}/tasks/{task.json()['number']}/attachments",
+        files={"file": ("notes.md", b"# hi", "text/markdown")},
+    )
+    assert att.status_code == 201
+    got = client.get(f"/api/attachments/{att.json()['id']}")
+    assert got.status_code == 200
+    assert got.headers["cache-control"] == "no-store"
+
+    # boundary: the static UI shell is not part of /api/* and stays
+    # cacheable (task #132 scopes the fix to /api/*)
+    for path in ("/", "/static/js/main.js"):
+        assert "cache-control" not in client.get(path).headers
+
+
 def test_project_isolation_over_api(client):
     a = client.post("/api/projects", json={"name": "A"}).json()["id"]
     b = client.post("/api/projects", json={"name": "B"}).json()["id"]
