@@ -957,14 +957,16 @@ export function openTelegramUsersModal() {
         h(
           "div",
           { class: "tg-user-row" },
-          h("span", { class: "tg-chat-id" }, String(u.chat_id)),
-          h("span", { class: "tg-ts" },
-            `added ${fmtTime(u.created_at)} · updated ${fmtTime(u.updated_at)}`),
-          projIndicator,
-          projBtn,
-          pwInput,
-          saveBtn,
-          delBtn
+          h("div", { class: "tg-user-info" },
+            h("span", { class: "tg-chat-id" }, String(u.chat_id)),
+            h("span", { class: "tg-ts" },
+              `added ${fmtTime(u.created_at)} · updated ${fmtTime(u.updated_at)}`)),
+          h("div", { class: "tg-user-actions" },
+            projIndicator,
+            projBtn,
+            pwInput,
+            saveBtn,
+            delBtn)
         )
       );
     }

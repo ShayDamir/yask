@@ -604,9 +604,13 @@ textarea { resize: vertical; min-height: 70px; width: 100%; }
   border: 1px solid var(--border); border-radius: var(--radius); padding: 8px;
 }
 .tg-user-row {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
   padding: 3px 4px; border-radius: 5px; font-size: max(13px, var(--min-font));
 }
+.tg-user-row .tg-user-info {
+  display: flex; align-items: baseline; gap: 8px; flex: 1 1 100%; min-width: 0;
+}
+.tg-user-row .tg-user-actions { display: flex; align-items: center; gap: 8px; }
 .tg-user-row:hover { background: var(--bg-hover); }
 .tg-user-row .tg-chat-id { font-weight: 600; min-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tg-user-row .tg-ts { color: var(--text-dim); font-size: max(11px, var(--min-font)); flex: 1; min-width: 0; }
