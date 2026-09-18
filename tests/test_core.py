@@ -617,16 +617,18 @@ def test_list_subscriptions_per_chat_in_name_order(store):
     alpha = store.create_project("alpha")["id"]
     z_sub = store.subscribe_project(7, zeta)
     a_sub = store.subscribe_project(7, alpha)
-    store.subscribe_project(8, zeta)  # a different chat
+    z8_sub = store.subscribe_project(8, zeta)  # a different chat
 
     subs = store.list_subscriptions(7)
-    # name order, project name joined, only this chat's rows
+    # name order, project name joined, only this chat's rows; created_at is
+    # compared per row against that row's own subscription return value
+    # (timestamps have second precision, so cross-row comparison is racy)
     assert subs == [
         {"project_id": alpha, "project_name": "alpha", "created_at": a_sub["created_at"]},
         {"project_id": zeta, "project_name": "zeta", "created_at": z_sub["created_at"]},
     ]
     assert store.list_subscriptions(8) == [
-        {"project_id": zeta, "project_name": "zeta", "created_at": z_sub["created_at"]}
+        {"project_id": zeta, "project_name": "zeta", "created_at": z8_sub["created_at"]}
     ]
     assert store.list_subscriptions(99) == []
 
