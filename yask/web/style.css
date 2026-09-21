@@ -363,57 +363,20 @@ html, body {
   -webkit-box-orient: vertical;
 }
 
-/* ---- epic children ------------------------------------------------------ */
-
-.epic-children { margin-top: 9px; border-top: 1px solid var(--border); padding-top: 8px; display: flex; flex-direction: column; gap: 8px; }
-
-.child-group-head {
+/* "Epic #<n>" chip on a card that belongs to an epic: opens that epic's
+   board view (#140). Same shape as .estimate, painted with the epic type
+   accent. */
+.epic-link {
   font-size: max(11px, var(--min-font));
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  color: var(--text-dim);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.child-group-head .count { font-size: max(10px, var(--min-font)); background: var(--bg-hover); border-radius: 8px; padding: 0 6px; }
-
-.child-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--bg-column);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 7px;
-}
-.child-row .num { font-size: max(11px, var(--min-font)); color: var(--text-dim); font-variant-numeric: tabular-nums; }
-.child-row .title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: max(12.5px, var(--min-font));
+  background: var(--type-epic-soft);
+  color: var(--type-epic);
+  border: 1px solid var(--type-epic-soft);
+  border-radius: 9px;
+  padding: 1px 7px;
   cursor: pointer;
+  white-space: nowrap;
 }
-.child-row .title:hover { color: var(--accent); }
-.child-row .badge { font-size: max(10px, var(--min-font)); padding: 1px 5px; }
-.child-row .estimate { font-size: max(10px, var(--min-font)); padding: 0 5px; }
-.child-row select {
-  font-size: max(11px, var(--min-font));
-  border-radius: 5px;
-  border: 1px solid var(--border);
-  background: var(--bg-card);
-  color: var(--text);
-  max-width: 105px;
-}
-.child-row .sub-toggle {
-  border: none; background: none; color: var(--text-dim);
-  cursor: pointer; font-size: max(10px, var(--min-font)); padding: 0 2px;
-}
-.child-row .sub-toggle:hover { color: var(--text); }
-.sub-children { margin: 4px 0 4px 18px; display: flex; flex-direction: column; gap: 5px; }
+.epic-link:hover { border-color: var(--type-epic); color: var(--accent); }
 
 /* ---- drop slot ---------------------------------------------------------- */
 

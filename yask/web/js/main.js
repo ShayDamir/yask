@@ -2,7 +2,7 @@
 
 import api from "./api.js";
 import { DEFAULT_STATE, FIELD_LIMITS } from "./constants.js";
-import { renderBoard, renderEpicBoard, renderSearchResults, renderSidebar, ARCHIVED } from "./render.js";
+import { renderBoard, renderEpicBoard, renderSearchResults, renderSidebar, ARCHIVED, columnTasks } from "./render.js";
 import { initDnd } from "./dnd.js";
 import { openEditorModal, openNewTaskModal, confirmDialog, openTelegramUsersModal } from "./dialogs.js";
 import { initTheme } from "./theme.js";
@@ -196,9 +196,14 @@ function render() {
 
 // -- task lookup --------------------------------------------------------------------
 
-function columnOrder(stateName) {
-  return state.project.tasks
-    .filter((t) => t.state === stateName)
+// Stored order of one ordering scope: tasks in `stateName` under one parent
+// (parentNumber null = root scope), by (sort_order, number) (#140). The
+// backend scopes before/after position references per (state, parent), so
+// drops resolve within the dragged task's own scope only.
+function scopeOrder(stateName, parentNumber) {
+  return walkTasks(state.project.tasks)
+    .filter((t) => t.state === stateName && (t.parent_number ?? null) === parentNumber)
+    .sort((a, b) => a.sort_order - b.sort_order || a.number - b.number)
     .map((t) => t.number);
 }
 
@@ -245,6 +250,14 @@ const actions = {
       refresh();
     }, epicNumber),
   onMove: (task, toState) => doMove(task, toState),
+  // Open the epic board of a task's parent epic from the "Epic #<n>" card
+  // chip (#140). Pure navigation — nothing changed, so no API call; the
+  // top-bar selector is synced so it reflects where we are.
+  onEpicLink: (epicNumber) => {
+    state.selectedEpicNumber = String(epicNumber);
+    $("epic-filter").value = String(epicNumber);
+    render();
+  },
   onArchive: (task) => doArchive(task),
   onRestore: (task) => doRestore(task),
   onDelete: (task) => doDelete(task),
@@ -365,9 +378,37 @@ async function handleDrop(number, intent) {
     return;
   }
 
-  // position intent (before/after/end within a column)
-  const order = columnOrder(intent.state);
-  const newOrder = computeNewOrder(order, number, intent.before, intent.after);
+  // position intent (before/after/end within a column). The backend scopes
+  // ordering per (state, parent), so a position reference from another
+  // scope (root vs. epic) would be rejected (#140): keep the reference only
+  // when it is in the dragged task's own scope, otherwise snap it to the
+  // nearest visible card of that scope on the same side of the drop point;
+  // with none there, drop the position entirely (the task appends to the
+  // end of its own scope in the target state).
+  const myParent = task.parent_number ?? null;
+  const inMyScope = (n, parent) => n != null && (parent ?? null) === myParent;
+  let before = intent.before;
+  let after = intent.after;
+  if (!inMyScope(before, intent.beforeParent) || !inMyScope(after, intent.afterParent)) {
+    const visible = columnTasks(state.project, intent.state, state.filterLabel);
+    if (before != null && !inMyScope(before, intent.beforeParent)) {
+      const idx = visible.findIndex((t) => t.number === before);
+      const above = visible
+        .slice(0, idx === -1 ? 0 : idx)
+        .filter((t) => (t.parent_number ?? null) === myParent);
+      before = above.length ? above[above.length - 1].number : undefined;
+    }
+    if (after != null && !inMyScope(after, intent.afterParent)) {
+      const idx = visible.findIndex((t) => t.number === after);
+      const below = visible
+        .slice(idx === -1 ? 0 : idx + 1)
+        .filter((t) => (t.parent_number ?? null) === myParent);
+      after = below.length ? below[0].number : undefined;
+    }
+  }
+
+  const order = scopeOrder(intent.state, myParent);
+  const newOrder = computeNewOrder(order, number, before, after);
   const sameOrder =
     order.length === newOrder.length &&
     order.every((n, i) => n === newOrder[i]);
@@ -375,10 +416,7 @@ async function handleDrop(number, intent) {
 
   if (task.state === intent.state) {
     try {
-      await api.reorderTask(pid, number, {
-        before: intent.before,
-        after: intent.after,
-      });
+      await api.reorderTask(pid, number, { before, after });
     } catch (err) {
       toastError(err);
       await refresh();
@@ -391,10 +429,7 @@ async function handleDrop(number, intent) {
   if (intent.state === ARCHIVED) {
     await doArchive(task);
   } else {
-    await doMove(task, intent.state, {
-      before: intent.before,
-      after: intent.after,
-    });
+    await doMove(task, intent.state, { before, after });
   }
 }
 

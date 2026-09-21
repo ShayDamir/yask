@@ -1,4 +1,6 @@
-// Board rendering: columns of cards, epics with nested children.
+// Board rendering: columns of cards. Epic children flow into the columns as
+// full cards of their own state; the "Epic #<n>" chip on a card links to
+// that epic's board view (#140).
 
 import { h, clear, fmtEstimate, typeClass, walkTasks } from "./util.js";
 import {
@@ -15,7 +17,6 @@ import {
 // added in Python reaches the UI by regeneration, not by lockstep edits.
 export const STATES = [...WORKFLOW_STATES, BLOCKED_STATE];
 export const ARCHIVED = ARCHIVED_STATE;
-export const ALL_STATES = [...STATES, ARCHIVED];
 
 const HEX_RE = new RegExp(COLOR_HEX_RE);
 
@@ -112,8 +113,8 @@ function labelChipStyle(color) {
   return { "--chip-bg": bg, "--chip-border": border, "--chip-fg": fg };
 }
 
-// The four standard badges shared by board cards and epic child rows:
-// type badge, estimate, prereq flag, attachment flag.
+// The four standard badges on board cards: type badge, estimate, prereq
+// flag, attachment flag.
 function taskBadges(task) {
   return [
     h("span", { class: `badge ${typeClass(task.type)}` }, task.type),
@@ -127,107 +128,36 @@ function hasLabel(task, name) {
   return (task.labels || []).some((l) => l.name === name);
 }
 
-function subtreeHasLabel(task, name) {
-  if (hasLabel(task, name)) return true;
-  return (task.children || []).some((c) => subtreeHasLabel(c, name));
-}
+// -- cards -----------------------------------------------------------------------
 
-// -- nested children of an epic ------------------------------------------------
-
-function renderChildRow(task, actions, filterLabel) {
-  const container = h("div", { class: "child-container" });
-  const row = h("div", { class: "child-row", dataset: { number: task.number } });
-
-  if (task.is_epic) {
-    let open = false;
-    const subWrap = h("div", { class: "sub-children" });
-    const renderSub = () => {
-      clear(subWrap);
-      const kids = filterLabel
-        ? (task.children || []).filter((c) => subtreeHasLabel(c, filterLabel))
-        : task.children || [];
-      for (const c of kids) subWrap.append(renderChildRow(c, actions, filterLabel));
-    };
-    row.append(
-      h("button", {
-        class: "sub-toggle",
-        title: open ? "Collapse" : "Expand",
-        onclick: () => {
-          open = !open;
-          subWrap.hidden = !open;
-          if (open && !subWrap.firstChild) renderSub();
-        },
-      }, open ? "▾" : "▸")
-    );
-    container.append(subWrap);
-    subWrap.hidden = true;
-  }
-
-  row.append(
-    ...[
-      h("span", { class: "num" }, `#${task.number}`),
-      h("span", { class: "title", title: task.title, onclick: () => actions.onEdit(task) }, task.title),
-      labelChips(task),
-      ...taskBadges(task),
-      h(
-        "select",
-        {
-          title: "Move to state",
-          onchange: (e) => {
-            e.target.value = task.state; // reset until the server confirms
-            actions.onMove(task, e.target.value);
-          },
-        },
-        ALL_STATES.map((s) =>
-          h("option", { value: s, selected: s === task.state ? "selected" : null }, s)
-        )
-      ),
-    ].filter(Boolean)
+// "Epic #<n>" chip on a card that belongs to an epic (#140): opens that
+// epic's board view via actions.onEpicLink. First item of the card-meta row,
+// next to the type badge.
+function epicLink(task, actions) {
+  return h(
+    "span",
+    {
+      class: "epic-link",
+      title: `Open epic #${task.parent_number}'s board`,
+      onclick: (e) => {
+        e.stopPropagation(); // a plain card click opens the editor
+        actions.onEpicLink(task.parent_number);
+      },
+    },
+    `Epic #${task.parent_number}`
   );
-
-  container.append(row);
-  return container;
 }
 
-export function renderEpicChildren(task, actions, filterLabel) {
-  const wrap = h("div", { class: "epic-children" });
-  let children = task.children || [];
-  if (filterLabel) children = children.filter((c) => subtreeHasLabel(c, filterLabel));
-  if (!children.length) {
-    wrap.append(
-      h("span", { class: "dim-sm" }, "No tasks in this epic yet.")
-    );
-    return wrap;
-  }
-  const groups = new Map();
-  for (const c of children) {
-    if (!groups.has(c.state)) groups.set(c.state, []);
-    groups.get(c.state).push(c);
-  }
-  for (const s of ALL_STATES) {
-    if (!groups.has(s)) continue;
-    wrap.append(
-      h(
-        "div",
-        { class: "child-group-head" },
-        h("span", {}, s),
-        h("span", { class: "count" }, String(groups.get(s).length))
-      ),
-      ...groups.get(s).map((c) => renderChildRow(c, actions, filterLabel))
-    );
-  }
-  return wrap;
-}
-
-// -- root cards ----------------------------------------------------------------
-
-export function renderCard(task, actions, { expanded, filterLabel, isArchived } = {}) {
+export function renderCard(task, actions, { isArchived, showEpicLink } = {}) {
   const card = h(
     "div",
     {
       class: `card${task.state === "Done" ? " done" : ""}${task.state === BLOCKED_STATE ? " blocked" : ""}${task.is_epic ? " epic" : ""}`,
       draggable: "true",
-      dataset: { number: task.number },
+      // dnd.js reads the card's ordering scope from the dataset: parentNumber
+      // "" is the root scope, otherwise the epic's number (#140 — the
+      // backend scopes before/after references per (state, parent)).
+      dataset: { number: task.number, parentNumber: task.parent_number ?? "" },
       title: task.description || undefined,
       onclick: (e) => {
         if (e.target.closest("select,button,input")) return;
@@ -257,29 +187,30 @@ export function renderCard(task, actions, { expanded, filterLabel, isArchived } 
         task.state === "Done" ? h("span", { class: "done-mark", title: "Done" }, "✓") : null
       ),
       labelChips(task),
-      h("div", { class: "card-meta" }, ...taskBadges(task)),
+      h(
+        "div",
+        { class: "card-meta" },
+        ...(showEpicLink !== false && task.parent_number != null ? [epicLink(task, actions)] : []),
+        ...taskBadges(task)
+      ),
     ].filter(Boolean)
   );
   if (task.description) {
     card.append(h("div", { class: "card-desc" }, task.description));
-  }
-  if (task.is_epic) {
-    const kids = renderEpicChildren(task, actions, filterLabel);
-    if (expanded !== false) card.append(kids);
   }
   return card;
 }
 
 // -- columns / board ---------------------------------------------------------------
 
-function renderColumn(colState, roots, actions, filterLabel, opts = {}) {
+function renderColumn(colState, tasks, actions, opts = {}) {
   const body = h("div", { class: "column-body", dataset: { state: colState } });
-  if (!roots.length) {
+  if (!tasks.length) {
     body.append(
       h("div", { class: "empty-column" }, colState === ARCHIVED ? "Nothing archived." : "Drop tasks here.")
     );
   }
-  for (const t of roots) body.append(renderCard(t, actions, { filterLabel, isArchived: colState === ARCHIVED }));
+  for (const t of tasks) body.append(renderCard(t, actions, { isArchived: colState === ARCHIVED, showEpicLink: opts.showEpicLink }));
   const addBtn =
     colState === DEFAULT_STATE && opts.showAdd !== false
       ? h("button", {
@@ -292,7 +223,7 @@ function renderColumn(colState, roots, actions, filterLabel, opts = {}) {
           },
         }, "+")
       : null;
-  const head = h("div", { class: "column-head" }, h("span", {}, colState), h("span", { class: "count" }, String(roots.length)), addBtn);
+  const head = h("div", { class: "column-head" }, h("span", {}, colState), h("span", { class: "count" }, String(tasks.length)), addBtn);
   return h("div", { class: `column${colState === ARCHIVED ? " archived" : ""}` }, head, body);
 }
 
@@ -308,11 +239,11 @@ function addToEpicBtn(epic, actions) {
   }, `Add task to epic #${epic.number}`);
 }
 
-// Board view of a single Epic's direct subtasks as full kanban cards, instead
-// of the cramped inline rows inside the epic card (#30). When an epic is
-// selected the selector in main.js routes render() here; when not, renderBoard
-// renders the normal project board with nested epics. Epics may be nested, so
-// look the epic up anywhere in the tree (#30).
+// Board view of a single Epic's direct subtasks as full kanban cards (#30).
+// When an epic is selected the selector in main.js routes render() here; when
+// not, renderBoard renders the normal project board, where epic children flow
+// into the columns as ordinary cards (#140). Epics may be nested, so look the
+// epic up anywhere in the tree (#30).
 export function renderEpicBoard(project, epicNumber, actions, { showArchived, filterLabel } = {}) {
   const board = document.getElementById("board");
   clear(board);
@@ -323,7 +254,7 @@ export function renderEpicBoard(project, epicNumber, actions, { showArchived, fi
     return;
   }
   let children = epic.children || [];
-  if (filterLabel) children = children.filter((c) => subtreeHasLabel(c, filterLabel));
+  if (filterLabel) children = children.filter((c) => hasLabel(c, filterLabel));
   if (!children.length) {
     const emptyWrap = h(
       "div",
@@ -351,11 +282,27 @@ export function renderEpicBoard(project, epicNumber, actions, { showArchived, fi
         colState,
         byState.get(colState) || [],
         actions,
-        filterLabel,
-        { showAdd: true, onAdd: () => actions.onAddToEpic(epic.number) }
+        {
+          showAdd: true,
+          onAdd: () => actions.onAddToEpic(epic.number),
+          // The whole view is this epic already, so the "Epic #<n>" chip
+          // would be noise on every card (#140).
+          showEpicLink: false,
+        }
       )
     );
   }
+}
+
+// Tasks that fill a board column: every task in the state — root tasks and
+// epic children alike (#140) — in (sort_order, number) order. Within one
+// epic scope this is exactly the stored order; across scopes, tasks of
+// different epics interleave by rank. The label filter keeps only tasks that
+// carry the label directly (same semantics as search results).
+export function columnTasks(project, stateName, filterLabel) {
+  let tasks = walkTasks(project.tasks).filter((t) => t.state === stateName);
+  if (filterLabel) tasks = tasks.filter((t) => hasLabel(t, filterLabel));
+  return [...tasks].sort((a, b) => a.sort_order - b.sort_order || a.number - b.number);
 }
 
 export function renderBoard(project, actions, opts) {
@@ -365,9 +312,7 @@ export function renderBoard(project, actions, opts) {
   const columns = [...STATES];
   if (opts.showArchived) columns.push(ARCHIVED);
   for (const colState of columns) {
-    let roots = project.tasks.filter((t) => t.state === colState);
-    if (filterLabel) roots = roots.filter((r) => subtreeHasLabel(r, filterLabel));
-    board.append(renderColumn(colState, roots, actions, filterLabel));
+    board.append(renderColumn(colState, columnTasks(project, colState, filterLabel), actions));
   }
 }
 

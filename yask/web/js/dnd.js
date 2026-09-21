@@ -8,7 +8,7 @@ const INTO_EPIC_BOTTOM = 0.7;
 
 export function initDnd(actions) {
   const board = document.getElementById("board");
-  let dragged = null; // number of the dragged root card
+  let dragged = null; // number of the dragged card
   let slot = null; // placeholder element inside a column body
   let intoEpic = null; // number of the epic being targeted for "drop into"
 
@@ -118,11 +118,18 @@ export function initDnd(actions) {
         const next = children[slotIdx + 1];
         // A drop in the gap between two cards is "insert after prev" (or,
         // equivalently, "before next"). Send only ONE of the two so we never
-        // violate the backend's before/after contract (see #25).
+        // violate the backend's before/after contract (see #25). The
+        // reference card's ordering scope (dataset.parentNumber: "" = root,
+        // else the epic's number) travels with it so main.js can resolve
+        // cross-scope drops (#140).
         if (prev && prev.classList.contains("card")) {
           intent.after = Number(prev.dataset.number);
+          intent.afterParent =
+            prev.dataset.parentNumber === "" ? null : Number(prev.dataset.parentNumber);
         } else if (next && next.classList.contains("card")) {
           intent.before = Number(next.dataset.number);
+          intent.beforeParent =
+            next.dataset.parentNumber === "" ? null : Number(next.dataset.parentNumber);
         }
       }
     }
