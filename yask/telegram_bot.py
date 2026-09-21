@@ -28,9 +28,11 @@ authenticated bot answers
 ``/projects`` (the project list with per-state task
 counts, with one inline button per project — the list is sent as a rich
 message), ``/tasks`` (the tasks in the
-active states — Todo, Planning, In progress and Review — grouped by
-project and state, with one inline button per task — the list is sent as
-a rich message),
+active states — Todo, Planning, In progress and Review — listed in
+dispatch order (the order ``get_next_task`` would dispatch them: the next
+dispatch first, an unmet prerequisite ahead of the task that waits on it),
+grouped by project and state run, with one inline button per task — the
+list is sent as a rich message),
 ``/task <project> <number|title>`` (one task's details — state, estimate,
 description, prerequisites, attachments and recent history — the task
 found by number or by case-insensitive title; the detail view is sent
@@ -780,20 +782,25 @@ def _resolve_project(
 
 
 def _task_sections(tasks: list[dict]) -> list[tuple[str, list[dict]]]:
-    """The non-empty state groups of one project's active tasks.
+    """The state runs of one project's active tasks, in dispatch order.
 
-    ``(state, tasks)`` pairs in canonical state order (:data:`db.
-    IN_PROGRESS_STATES`, empty states skipped); within a state the tasks
-    keep their ``sort_order`` (the ``list_in_progress`` order). The single
-    ordered structure the ``/tasks`` text lines and the inline-keyboard
-    rows are both derived from, so button order can never diverge from
-    reading order.
+    The input is the ``list_in_progress`` order — the order successive
+    ``get_next_task`` calls would dispatch the tasks, so the first task is
+    the next dispatch — cut into runs of consecutive same-state tasks:
+    ``(state, tasks)`` pairs in list order. With no cross-state
+    prerequisites the runs appear in reversed workflow order (Review, In
+    progress, Planning, Todo); when a lower-state task is an unmet
+    prerequisite it is dispatched earlier, so its run legitimately appears
+    first. The single ordered structure the ``/tasks`` text lines and the
+    inline-keyboard rows are both derived from, so button order can never
+    diverge from reading order.
     """
-    sections = []
-    for state in db.IN_PROGRESS_STATES:
-        in_state = [t for t in tasks if t["state"] == state]
-        if in_state:
-            sections.append((state, in_state))
+    sections: list[tuple[str, list[dict]]] = []
+    for t in tasks:
+        if sections and sections[-1][0] == t["state"]:
+            sections[-1][1].append(t)
+        else:
+            sections.append((t["state"], [t]))
     return sections
 
 
@@ -899,9 +906,13 @@ def tasks_view(
     """Format the ``/tasks [project]`` reply.
 
     Without an argument, lists every project (in name order, the same order
-    as ``/projects``) that has at least one task in an active state, grouped
-    by state. With an argument, resolves the project (case-insensitive name
-    or integer id) and lists only its active tasks. An empty board — or a
+    as ``/projects``) that has at least one task in an active state; with
+    an argument, resolves the project (case-insensitive name or integer id)
+    and lists only its active tasks. A project's active tasks come in
+    dispatch order (the ``list_in_progress`` order — the order
+    ``get_next_task`` would dispatch them: the next dispatch first, an
+    unmet prerequisite ahead of the task that waits on it) and are grouped
+    into same-state runs (:func:`_task_sections`). An empty board — or a
     resolved project with no active tasks — shows ``(none)`` under the
     header; an unresolvable argument yields a not-found reply pointing at
     ``/projects``.
@@ -915,7 +926,7 @@ def tasks_view(
     is a :class:`RichReply`: the board as markdown (blocks joined by one
     blank line — an H1 ``# Tasks in progress`` header, then one block per
     project with ``**<id>. <name>**`` as the block's first line and, per
-    non-empty state in canonical order, a ``**<state>:**`` line immediately
+    same-state run in dispatch order, a ``**<state>:**`` line immediately
     followed by one ``- #<n> <title>`` item per task), sent through the
     rich → HTML → plain fallback chain with the keyboard threaded. Without
     one the reply is the plain :class:`KeyboardReply` — the

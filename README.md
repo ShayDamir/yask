@@ -114,8 +114,10 @@ from `TELEGRAM_BOT_TOKEN` (get one from @BotFather) and answers `/start`,
 `/help`, `/projects` (the list of projects with their per-state task
 counts, sent as a rich message),
 `/tasks [project]` (the tasks in the active states — Todo, Planning,
-In progress and Review — grouped by project and state, sent as a rich
-message), `/task
+In progress and Review — listed in dispatch order (the order
+`get_next_task` would dispatch them: the next dispatch first, an unmet
+prerequisite ahead of the task that waits on it), grouped by project and
+state, sent as a rich message), `/task
 <project> <number|title>` (one task's details — state, estimate,
 description, prerequisites, attachments and recent history — the task
 found by number or by title, sent as a rich message), `/backlog

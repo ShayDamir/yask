@@ -332,11 +332,13 @@ def test_list_in_progress_states_and_isolation(store):
     store.move_task(beta, other["number"], "Todo", confirm=True)
 
     out = store.list_in_progress(alpha)
+    # dispatch order (the order get_next_task would dispatch them): Review
+    # first, then the lower states
     assert out == [
-        {"number": todo["number"], "title": "todo", "state": "Todo"},
-        {"number": planning["number"], "title": "planning", "state": "Planning"},
-        {"number": working["number"], "title": "working", "state": "In progress"},
         {"number": review["number"], "title": "review", "state": "Review"},
+        {"number": working["number"], "title": "working", "state": "In progress"},
+        {"number": planning["number"], "title": "planning", "state": "Planning"},
+        {"number": todo["number"], "title": "todo", "state": "Todo"},
     ]
     # the excluded states never appear
     for t in out:
@@ -362,14 +364,163 @@ def test_list_in_progress_ordering(store, project):
     store.move_task(pid, e["number"], "Review", confirm=True)
 
     out = store.list_in_progress(pid)
-    # states in workflow order; within Todo, b (reordered first) precedes a
+    # dispatch order (Review, In progress, Planning, Todo); within Todo,
+    # b (reordered first) precedes a
     assert [(t["state"], t["title"]) for t in out] == [
+        ("Review", "e"),
+        ("In progress", "d"),
+        ("Planning", "c"),
         ("Todo", "b"),
         ("Todo", "a"),
-        ("Planning", "c"),
-        ("In progress", "d"),
-        ("Review", "e"),
     ]
+
+
+def test_list_in_progress_unmet_prerequisite_ahead_of_dependent(store, project):
+    # A Review task whose unmet prerequisite sits in a lower state is
+    # dispatched only once that prerequisite is Done, so the prerequisite
+    # is listed first. (The link is set after the moves: moving the Review
+    # task would otherwise pull its Todo prerequisite along to Review.)
+    pid = project["id"]
+    review = store.create_task(pid, "review")
+    store.move_task(pid, review["number"], "Review", confirm=True)
+    todo = store.create_task(pid, "todo prereq")
+    store.move_task(pid, todo["number"], "Todo", confirm=True)
+    store.set_prerequisites(pid, review["number"], [todo["number"]])
+
+    out = store.list_in_progress(pid)
+    assert [(t["number"], t["state"]) for t in out] == [
+        (todo["number"], "Todo"),
+        (review["number"], "Review"),
+    ]
+
+
+def test_list_in_progress_chained_prerequisites(store, project):
+    # A Review -> In progress -> Todo chain: each link is followed, so the
+    # list reads from the bottom of the chain up.
+    pid = project["id"]
+    review = store.create_task(pid, "review")
+    store.move_task(pid, review["number"], "Review", confirm=True)
+    working = store.create_task(pid, "working")
+    store.move_task(pid, working["number"], "In progress", confirm=True)
+    todo = store.create_task(pid, "todo")
+    store.move_task(pid, todo["number"], "Todo", confirm=True)
+    store.set_prerequisites(pid, working["number"], [todo["number"]])
+    store.set_prerequisites(pid, review["number"], [working["number"]])
+
+    out = store.list_in_progress(pid)
+    assert [(t["number"], t["state"]) for t in out] == [
+        (todo["number"], "Todo"),
+        (working["number"], "In progress"),
+        (review["number"], "Review"),
+    ]
+
+
+def test_list_in_progress_invisible_prerequisite_not_listed(store):
+    # A prerequisite outside the active list (Backlog, Blocked) is never
+    # listed; the candidate that waits on it is, and leads the list.
+    alpha = store.create_project("alpha")["id"]
+    backlog = store.create_task(alpha, "backlog prereq")
+    review = store.create_task(alpha, "review")
+    store.move_task(alpha, review["number"], "Review", confirm=True)
+    store.set_prerequisites(alpha, review["number"], [backlog["number"]])
+    out = store.list_in_progress(alpha)
+    assert [(t["number"], t["state"]) for t in out] == [
+        (review["number"], "Review"),
+    ]
+
+    beta = store.create_project("beta")["id"]
+    blocked = store.create_task(beta, "blocked prereq")
+    store.move_task(beta, blocked["number"], "Blocked")
+    todo = store.create_task(beta, "todo")
+    store.move_task(beta, todo["number"], "Todo", confirm=True)
+    store.set_prerequisites(beta, todo["number"], [blocked["number"]])
+    out = store.list_in_progress(beta)
+    assert [(t["number"], t["state"]) for t in out] == [
+        (todo["number"], "Todo"),
+    ]
+
+
+def test_list_in_progress_invisible_prereq_chain_lists_unblocked_first(store, project):
+    # A Review -> In progress -> Todo chain whose Todo task has a Backlog
+    # prerequisite: the real loop dispatches the invisible task first, and
+    # the first visible dispatch is the Todo task the chain leads to —
+    # ahead of both its dependent (In progress) and the Review candidate.
+    pid = project["id"]
+    review = store.create_task(pid, "review")
+    store.move_task(pid, review["number"], "Review", confirm=True)
+    working = store.create_task(pid, "working")
+    store.move_task(pid, working["number"], "In progress", confirm=True)
+    todo = store.create_task(pid, "todo")
+    store.move_task(pid, todo["number"], "Todo", confirm=True)
+    backlog = store.create_task(pid, "backlog prereq")
+    store.set_prerequisites(pid, todo["number"], [backlog["number"]])
+    store.set_prerequisites(pid, working["number"], [todo["number"]])
+    store.set_prerequisites(pid, review["number"], [working["number"]])
+
+    out = store.list_in_progress(pid)
+    assert [(t["number"], t["state"]) for t in out] == [
+        (todo["number"], "Todo"),
+        (working["number"], "In progress"),
+        (review["number"], "Review"),
+    ]
+
+
+def test_list_in_progress_actionable_before_invisible_chain(store, project):
+    # An earlier fully-actionable candidate in the same state precedes a
+    # later candidate whose chain reaches an invisible (Backlog)
+    # prerequisite — the scan continues past the invisible chain instead
+    # of stopping at it.
+    pid = project["id"]
+    first = store.create_task(pid, "first")
+    store.move_task(pid, first["number"], "Todo", confirm=True)
+    second = store.create_task(pid, "second")
+    store.move_task(pid, second["number"], "Todo", confirm=True)
+    backlog = store.create_task(pid, "backlog prereq")
+    store.set_prerequisites(pid, second["number"], [backlog["number"]])
+
+    out = store.list_in_progress(pid)
+    assert [(t["number"], t["title"]) for t in out] == [
+        (first["number"], "first"),
+        (second["number"], "second"),
+    ]
+
+
+def test_list_in_progress_first_task_is_next_dispatch(store):
+    # Invariant: the first listed task is the task get_next_task would
+    # dispatch next.
+    # No prerequisites: the top-priority active task.
+    pid = store.create_project("plain")["id"]
+    todo = store.create_task(pid, "todo")
+    store.move_task(pid, todo["number"], "Todo", confirm=True)
+    review = store.create_task(pid, "review")
+    store.move_task(pid, review["number"], "Review", confirm=True)
+    out = store.list_in_progress(pid)
+    assert out[0]["number"] == store.get_next_task(pid)["number"]
+    assert out[0]["number"] == review["number"]
+
+    # A visible prerequisite: get_next_task surfaces the unmet Todo
+    # prerequisite of the Review candidate; the list starts with it too.
+    pid = store.create_project("visible")["id"]
+    todo = store.create_task(pid, "todo")
+    store.move_task(pid, todo["number"], "Todo", confirm=True)
+    review = store.create_task(pid, "review")
+    store.move_task(pid, review["number"], "Review", confirm=True)
+    store.set_prerequisites(pid, review["number"], [todo["number"]])
+    out = store.list_in_progress(pid)
+    assert out[0]["number"] == store.get_next_task(pid)["number"]
+    assert out[0]["number"] == todo["number"]
+
+    # An invisible prerequisite: get_next_task returns the Backlog task
+    # itself (outside the active list); the list starts at the candidate
+    # that waits on it.
+    pid = store.create_project("invisible")["id"]
+    backlog = store.create_task(pid, "backlog")
+    review = store.create_task(pid, "review")
+    store.move_task(pid, review["number"], "Review", confirm=True)
+    store.set_prerequisites(pid, review["number"], [backlog["number"]])
+    out = store.list_in_progress(pid)
+    assert store.get_next_task(pid)["number"] == backlog["number"]
+    assert out[0]["number"] == review["number"]
 
 
 def test_list_in_progress_unknown_project(store):

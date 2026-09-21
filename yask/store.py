@@ -421,6 +421,14 @@ def _image_dimensions(content_type: str, data: bytes) -> tuple[int, int] | None:
     return None
 
 
+# The dispatch scan order (highest first): the states ``get_next_task``
+# walks when picking the next actionable task. A task's position in the
+# dispatch order is not a fixed sort key — it depends on which
+# prerequisites got worked before it — so the order is simulated, not
+# sorted (see ``Store._dispatch_order``).
+_DISPATCH_PRIORITY = ("Review", "In progress", "Planning", "Todo")
+
+
 class Store:
     def __init__(self, conn: sqlite3.Connection, source: str = "web"):
         if source not in ("web", "mcp", "telegram"):
@@ -615,29 +623,33 @@ class Store:
         return out
 
     def list_in_progress(self, project_id: int) -> list[dict]:
-        """The project's tasks in the active pipeline states (the bot's ``/tasks`` view).
+        """The project's active pipeline tasks, in dispatch order (the bot's ``/tasks`` view).
 
         Returns lean ``{"number", "title", "state"}`` dicts for every task whose
         state is in :data:`db.IN_PROGRESS_STATES` (``Todo``, ``Planning``,
         ``In progress``, ``Review``) — Backlog, Done, Blocked and Archived
-        tasks are excluded. Ordered by workflow state, and within a state by
-        column order (``sort_order``). Raises ``NotFound`` for an unknown
-        project id.
+        tasks are excluded. The order is the one successive
+        :meth:`get_next_task` calls would dispatch them in (the simulation
+        in :meth:`_dispatch_order` reuses its exact scan and
+        prerequisite-follow logic), so the first task is the one
+        ``get_next_task`` would dispatch next: Review candidates come
+        first, and an unmet prerequisite is listed ahead of the task that
+        waits on it. When a candidate's prerequisite chain reaches a task
+        that is not in the active list (a Backlog or Blocked prerequisite),
+        that invisible task is treated as worked first and the scan
+        continues, so the list starts at the first active task it
+        unblocks. Raises ``NotFound`` for an unknown project id.
         """
         self._get_project(project_id)
         placeholders, state_params = _in_clause(db.IN_PROGRESS_STATES)
+        # Full rows: the simulation resolves candidates through
+        # ``_follow_prereqs``, which serializes the row it reaches.
         rows = self.conn.execute(
-            "SELECT number, title, state, sort_order, id FROM tasks "
+            "SELECT * FROM tasks "
             f"WHERE project_id = ? AND state IN ({placeholders})",
             [project_id, *state_params],
         ).fetchall()
-        rows = sorted(
-            rows, key=lambda r: (db.STATE_RANK[r["state"]], r["sort_order"], r["id"])
-        )
-        return [
-            {"number": r["number"], "title": r["title"], "state": r["state"]}
-            for r in rows
-        ]
+        return self._dispatch_order(rows)
 
     def list_backlog(self, project_id: int) -> list[dict]:
         """The project's tasks in the Backlog state (the bot's ``/backlog`` view).
@@ -1126,8 +1138,7 @@ class Store:
         skipped implicitly by only scanning the listed forward states.
         """
         self._get_project(project_id)
-        priority_states = ["Review", "In progress", "Planning", "Todo"]
-        for state in priority_states:
+        for state in _DISPATCH_PRIORITY:
             rows = self.conn.execute(
                 "SELECT * FROM tasks WHERE project_id = ? AND state = ? "
                 "ORDER BY sort_order, id",
@@ -1139,14 +1150,22 @@ class Store:
                     return result
         return None
 
-    def _follow_prereqs(self, row: sqlite3.Row, _seen: set[int] | None = None) -> dict | None:
+    def _follow_prereqs(
+        self,
+        row: sqlite3.Row,
+        _seen: set[int] | None = None,
+        satisfied: frozenset[int] | set[int] = frozenset(),
+    ) -> dict | None:
         """Resolve the actionable task reached from `row`, following prerequisites.
 
-        If `row` has prerequisites whose state is not Done, follow the first
-        unmet one (by task number) recursively. Returns the serialized task
-        once a candidate has no unmet prerequisites, or None if the chain
-        dead-ends. ``_seen`` guards against prerequisite cycles (structurally
-        impossible once set, kept as a cheap safety net).
+        If `row` has prerequisites whose state is not Done — and whose id is
+        not in ``satisfied``, a set of task ids the caller treats as already
+        worked (the dispatch-order simulation passes in the tasks it has
+        already ordered, so an ordered prerequisite no longer blocks) —
+        follow the first unmet one (by task number) recursively. Returns the
+        serialized task once a candidate has no unmet prerequisites, or None
+        if the chain dead-ends. ``_seen`` guards against prerequisite cycles
+        (structurally impossible once set, kept as a cheap safety net).
         """
         if _seen is None:
             _seen = set()
@@ -1159,10 +1178,90 @@ class Store:
             "WHERE pr.task_id = ? ORDER BY p2.number",
             (row["id"],),
         ).fetchall()
-        unmet = [p for p in prereqs if p["state"] != "Done"]
+        unmet = [
+            p for p in prereqs if p["state"] != "Done" and p["id"] not in satisfied
+        ]
         if unmet:
-            return self._follow_prereqs(unmet[0], _seen)
+            return self._follow_prereqs(unmet[0], _seen, satisfied)
         return self._serialize_task(row)
+
+    def _dispatch_order(self, rows: list[sqlite3.Row]) -> list[dict]:
+        """The active-state rows in dispatch order — the order successive
+        ``get_next_task`` calls would dispatch them.
+
+        Simulates the pick loop ``get_next_task`` implements, reusing its
+        exact scan and prerequisite-follow logic so the two can never
+        diverge: each round scans the states in :data:`_DISPATCH_PRIORITY`
+        order, candidates within a state in (sort_order, id) order, and
+        resolves each candidate by following its first unmet prerequisite.
+        The ids in ``satisfied`` (the rows already ordered, plus the
+        invisible prerequisites the loop would have worked in the mean
+        time) count as Done. A resolved task that is one of the input rows
+        is picked; when a chain instead ends at a task outside the active
+        list (a Backlog or Blocked prerequisite) that invisible task is
+        treated as worked first and the scan restarts from the top — the
+        real loop dispatches it (invisibly to this list) before anything
+        the chain leads to, so the next visible dispatch is what the fresh
+        scan picks. The picked row is then marked satisfied and the rounds
+        repeat until every row is ordered. With an empty satisfied set the
+        first round reproduces ``get_next_task``'s answer exactly, so the
+        first row is the next dispatch. A full scan that resolves nothing
+        falls back to the first remaining candidate in scan order so the
+        list stays total (defensive only — prerequisite cycles are rejected
+        by ``set_prerequisites``, the only way a follow could dead-end).
+        """
+        by_id = {r["id"]: r for r in rows}
+        per_state = {
+            state: sorted(
+                (r for r in rows if r["state"] == state),
+                key=lambda r: (r["sort_order"], r["id"]),
+            )
+            for state in _DISPATCH_PRIORITY
+        }
+        remaining = set(by_id)
+        satisfied: set[int] = set()
+        ordered: list[sqlite3.Row] = []
+        while remaining:
+            picked: int | None = None
+            while picked is None:
+                progressed = False
+                for state in _DISPATCH_PRIORITY:
+                    for candidate in per_state[state]:
+                        if candidate["id"] not in remaining:
+                            continue
+                        resolved = self._follow_prereqs(candidate, satisfied=satisfied)
+                        if resolved is None:
+                            continue  # cycle — unreachable (see docstring)
+                        rid = resolved["id"]
+                        if rid in remaining:
+                            picked = rid
+                            break
+                        if rid not in satisfied:
+                            # invisible (Backlog/Blocked) end of the chain:
+                            # the real loop dispatches it before anything
+                            # this chain leads to
+                            satisfied.add(rid)
+                            progressed = True
+                            break
+                    if picked is not None or progressed:
+                        break
+                if picked is None and not progressed:
+                    # defensive fallback: no candidate resolved (would
+                    # require a prerequisite cycle) — keep the list total
+                    for state in _DISPATCH_PRIORITY:
+                        for candidate in per_state[state]:
+                            if candidate["id"] in remaining:
+                                picked = candidate["id"]
+                                break
+                        if picked is not None:
+                            break
+            ordered.append(by_id[picked])
+            remaining.discard(picked)
+            satisfied.add(picked)
+        return [
+            {"number": r["number"], "title": r["title"], "state": r["state"]}
+            for r in ordered
+        ]
 
     # -- updating ------------------------------------------------------------
 

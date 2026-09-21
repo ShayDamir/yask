@@ -1533,19 +1533,21 @@ def test_tasks_populated_board_exact(store):
     assert script.sent == []
     sent = script.sent_rich[0]
     assert sent["chat_id"] == 7
-    # exact markdown: name order, state grouping/order, id prefixes, and
-    # the excluded states absent
+    # exact markdown: name order, dispatch-order state runs (Review, In
+    # progress, Planning, Todo — the order get_next_task would dispatch
+    # them, no cross-state prerequisites here), id prefixes, and the
+    # excluded states absent
     assert sent["rich_message"]["markdown"] == (
         "# Tasks in progress\n"
         f"\n**{alpha}. alpha**\n"
-        "**Todo:**\n"
-        "- #2 todo 1\n"
-        "**Planning:**\n"
-        "- #3 planning 1\n"
-        "**In progress:**\n"
-        "- #4 working\n"
         "**Review:**\n"
         "- #5 review 1\n"
+        "**In progress:**\n"
+        "- #4 working\n"
+        "**Planning:**\n"
+        "- #3 planning 1\n"
+        "**Todo:**\n"
+        "- #2 todo 1\n"
         f"\n**{zeta}. zeta**\n"
         "**In progress:**\n"
         "- #1 z working"
@@ -1554,10 +1556,10 @@ def test_tasks_populated_board_exact(store):
     # then the Main-menu row (payload h)
     assert sent["reply_markup"] == {
         "inline_keyboard": [
-            [{"text": "#2 todo 1", "callback_data": f"t:{alpha}:2"}],
-            [{"text": "#3 planning 1", "callback_data": f"t:{alpha}:3"}],
-            [{"text": "#4 working", "callback_data": f"t:{alpha}:4"}],
             [{"text": "#5 review 1", "callback_data": f"t:{alpha}:5"}],
+            [{"text": "#4 working", "callback_data": f"t:{alpha}:4"}],
+            [{"text": "#3 planning 1", "callback_data": f"t:{alpha}:3"}],
+            [{"text": "#2 todo 1", "callback_data": f"t:{alpha}:2"}],
             [{"text": "#1 z working", "callback_data": f"t:{zeta}:1"}],
             [{"text": "Main menu", "callback_data": "h"}],
         ]
@@ -1565,6 +1567,57 @@ def test_tasks_populated_board_exact(store):
     # every payload is well under the Bot API's 64-byte callback_data limit
     for row in sent["reply_markup"]["inline_keyboard"]:
         assert len(row[0]["callback_data"].encode("utf-8")) < 64
+
+
+def test_tasks_cross_state_prerequisite_dispatch_order(store):
+    """A Review task whose unmet prerequisite sits in Todo: dispatch order
+    puts the Todo run ahead of the Review run — in both reply forms, with
+    the keyboard rows in reading order."""
+    pid = store.create_project("alpha")["id"]
+    review = store.create_task(pid, "review 1")
+    store.move_task(pid, review["number"], "Review", confirm=True)   # #1
+    todo = store.create_task(pid, "todo 1")
+    store.move_task(pid, todo["number"], "Todo", confirm=True)       # #2
+    store.set_prerequisites(pid, review["number"], [todo["number"]])
+
+    # rich form (a chat_id is present)
+    reply = telegram_bot.tasks_view(store, str(pid), 7)
+    assert isinstance(reply, telegram_bot.RichReply)
+    assert reply.markdown == (
+        "# Tasks in progress\n"
+        f"\n**{pid}. alpha**\n"
+        "**Todo:**\n"
+        "- #2 todo 1\n"
+        "**Review:**\n"
+        "- #1 review 1"
+    )
+    # keyboard rows match reading order, then the Main-menu row
+    assert reply.reply_markup == {
+        "inline_keyboard": [
+            [{"text": "#2 todo 1", "callback_data": f"t:{pid}:2"}],
+            [{"text": "#1 review 1", "callback_data": f"t:{pid}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
+
+    # plain form (no chat_id): the same order in the indented lines
+    reply = telegram_bot.tasks_view(store, str(pid))
+    assert isinstance(reply, telegram_bot.KeyboardReply)
+    assert reply.text == (
+        "Tasks in progress:\n"
+        f"{pid}. alpha\n"
+        "  Todo:\n"
+        "    #2 todo 1\n"
+        "  Review:\n"
+        "    #1 review 1"
+    )
+    assert reply.reply_markup == {
+        "inline_keyboard": [
+            [{"text": "#2 todo 1", "callback_data": f"t:{pid}:2"}],
+            [{"text": "#1 review 1", "callback_data": f"t:{pid}:1"}],
+            [{"text": "Main menu", "callback_data": "h"}],
+        ]
+    }
 
 
 def test_tasks_filter_by_id_and_name(store):
