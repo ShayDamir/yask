@@ -379,32 +379,46 @@ async function handleDrop(number, intent) {
   }
 
   // position intent (before/after/end within a column). The backend scopes
-  // ordering per (state, parent), so a position reference from another
-  // scope (root vs. epic) would be rejected (#140): keep the reference only
-  // when it is in the dragged task's own scope, otherwise snap it to the
-  // nearest visible card of that scope on the same side of the drop point;
-  // with none there, drop the position entirely (the task appends to the
-  // end of its own scope in the target state).
+  // ordering per (state, parent), so a position reference from another scope
+  // (root vs. epic) would be rejected (#140) (#142).
+  //
+  // An in-scope reference is already exact. An out-of-scope one needs mapping:
+  // dnd names the visual gap by exactly ONE reference card (just above it for
+  // `before`, just below it for `after`), and since a scope's stored order is a
+  // subsequence of the column's visible order (both are (sort_order, number)
+  // sorted), every gap lands in exactly one slot of the dragged task's own
+  // scope: the slot right before the first in-scope card below the gap. Send
+  // that single `before` reference — "after the last in-scope card above the
+  // gap" names the same slot, and with no in-scope card below the gap the slot
+  // is the end of the scope, which is what sending no reference at all does.
+  // Never send both (the backend rejects that, #25).
   const myParent = task.parent_number ?? null;
   const inMyScope = (n, parent) => n != null && (parent ?? null) === myParent;
   let before = intent.before;
   let after = intent.after;
-  if (!inMyScope(before, intent.beforeParent) || !inMyScope(after, intent.afterParent)) {
+  const outOfScope =
+    (before != null && !inMyScope(before, intent.beforeParent)) ||
+    (after != null && !inMyScope(after, intent.afterParent));
+  if (outOfScope) {
+    const ref = before ?? after;
     const visible = columnTasks(state.project, intent.state, state.filterLabel);
-    if (before != null && !inMyScope(before, intent.beforeParent)) {
-      const idx = visible.findIndex((t) => t.number === before);
-      const above = visible
-        .slice(0, idx === -1 ? 0 : idx)
-        .filter((t) => (t.parent_number ?? null) === myParent);
-      before = above.length ? above[above.length - 1].number : undefined;
-    }
-    if (after != null && !inMyScope(after, intent.afterParent)) {
-      const idx = visible.findIndex((t) => t.number === after);
-      const below = visible
-        .slice(idx === -1 ? 0 : idx + 1)
-        .filter((t) => (t.parent_number ?? null) === myParent);
-      after = below.length ? below[0].number : undefined;
-    }
+    const idx = visible.findIndex((t) => t.number === ref);
+    // The gap is above `before` (the search starts at that card) or below
+    // `after` (it starts at the next one). idx === -1 cannot happen (the
+    // reference is a card rendered from this very column); clamp to the top
+    // of the scope rather than to a wrong neighbour.
+    let start = before != null ? idx : idx + 1;
+    if (start < 0) start = 0;
+    const below = visible
+      .slice(start)
+      .filter((t) => (t.parent_number ?? null) === myParent);
+    before = below.length ? below[0].number : undefined;
+    after = undefined;
+    // The first in-scope card below the gap is the task itself, so the gap is
+    // its own slot and its scope order cannot change. Same reasoning as the
+    // sameOrder guard below, and unreachable when the state changes (the task
+    // is then not among the target column's cards).
+    if (before === number && task.state === intent.state) return;
   }
 
   const order = scopeOrder(intent.state, myParent);
