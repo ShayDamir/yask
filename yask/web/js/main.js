@@ -2,8 +2,9 @@
 
 import api from "./api.js";
 import { DEFAULT_STATE, FIELD_LIMITS } from "./constants.js";
-import { renderBoard, renderEpicBoard, renderSearchResults, renderSidebar, ARCHIVED, columnTasks } from "./render.js";
+import { renderBoard, renderEpicBoard, renderSearchResults, renderSidebar, ARCHIVED } from "./render.js";
 import { initDnd } from "./dnd.js";
+import { planDropPosition } from "./ordering.js";
 import { openEditorModal, openNewTaskModal, confirmDialog, openTelegramUsersModal } from "./dialogs.js";
 import { initTheme } from "./theme.js";
 import { initFontSize } from "./fontsize.js";
@@ -196,33 +197,6 @@ function render() {
 
 // -- task lookup --------------------------------------------------------------------
 
-// Stored order of one ordering scope: tasks in `stateName` under one parent
-// (parentNumber null = root scope), by (sort_order, number) (#140). The
-// backend scopes before/after position references per (state, parent), so
-// drops resolve within the dragged task's own scope only.
-function scopeOrder(stateName, parentNumber) {
-  return walkTasks(state.project.tasks)
-    .filter((t) => t.state === stateName && (t.parent_number ?? null) === parentNumber)
-    .sort((a, b) => a.sort_order - b.sort_order || a.number - b.number)
-    .map((t) => t.number);
-}
-
-function computeNewOrder(order, moved, before, after) {
-  const rest = order.filter((n) => n !== moved);
-  let idx = rest.length;
-  if (before !== undefined) {
-    idx = Math.max(0, rest.indexOf(before));
-    rest.splice(idx, 0, moved);
-  } else if (after !== undefined) {
-    idx = rest.indexOf(after);
-    idx = idx === -1 ? rest.length : idx + 1;
-    rest.splice(idx, 0, moved);
-  } else {
-    rest.push(moved);
-  }
-  return rest;
-}
-
 // -- actions -------------------------------------------------------------------------
 
 const actions = {
@@ -378,55 +352,18 @@ async function handleDrop(number, intent) {
     return;
   }
 
-  // position intent (before/after/end within a column). The backend scopes
-  // ordering per (state, parent), so a position reference from another scope
-  // (root vs. epic) would be rejected (#140) (#142).
-  //
-  // An in-scope reference is already exact. An out-of-scope one needs mapping:
-  // dnd names the visual gap by exactly ONE reference card (just above it for
-  // `before`, just below it for `after`), and since a scope's stored order is a
-  // subsequence of the column's visible order (both are (sort_order, number)
-  // sorted), every gap lands in exactly one slot of the dragged task's own
-  // scope: the slot right before the first in-scope card below the gap. Send
-  // that single `before` reference — "after the last in-scope card above the
-  // gap" names the same slot, and with no in-scope card below the gap the slot
-  // is the end of the scope, which is what sending no reference at all does.
-  // Never send both (the backend rejects that, #25).
-  const myParent = task.parent_number ?? null;
-  const inMyScope = (n, parent) => n != null && (parent ?? null) === myParent;
-  let before = intent.before;
-  let after = intent.after;
-  const outOfScope =
-    (before != null && !inMyScope(before, intent.beforeParent)) ||
-    (after != null && !inMyScope(after, intent.afterParent));
-  if (outOfScope) {
-    const ref = before ?? after;
-    const visible = columnTasks(state.project, intent.state, state.filterLabel);
-    const idx = visible.findIndex((t) => t.number === ref);
-    // The gap is above `before` (the search starts at that card) or below
-    // `after` (it starts at the next one). idx === -1 cannot happen (the
-    // reference is a card rendered from this very column); clamp to the top
-    // of the scope rather than to a wrong neighbour.
-    let start = before != null ? idx : idx + 1;
-    if (start < 0) start = 0;
-    const below = visible
-      .slice(start)
-      .filter((t) => (t.parent_number ?? null) === myParent);
-    before = below.length ? below[0].number : undefined;
-    after = undefined;
-    // The first in-scope card below the gap is the task itself, so the gap is
-    // its own slot and its scope order cannot change. Same reasoning as the
-    // sameOrder guard below, and unreachable when the state changes (the task
-    // is then not among the target column's cards).
-    if (before === number && task.state === intent.state) return;
-  }
-
-  const order = scopeOrder(intent.state, myParent);
-  const newOrder = computeNewOrder(order, number, before, after);
-  const sameOrder =
-    order.length === newOrder.length &&
-    order.every((n, i) => n === newOrder[i]);
-  if (sameOrder && task.state === intent.state) return; // no-op drop
+  // Position intent (before/after/end within a column). The reference may come
+  // from another ordering scope (root vs. epic); planDropPosition maps it into
+  // the dragged task's own (state, parent) scope and decides whether the drop
+  // is a no-op at all — see ordering.js for the invariants it upholds.
+  const plan = planDropPosition({
+    task,
+    intent,
+    project: state.project,
+    filterLabel: state.filterLabel,
+  });
+  if (plan.skip) return;
+  const { before, after } = plan;
 
   if (task.state === intent.state) {
     try {

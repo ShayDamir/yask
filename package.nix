@@ -33,8 +33,13 @@ pkgs.python3Packages.buildPythonApplication {
     pytest
   ];
 
-  checkInputs = lib.optionals doCheck [ pytest ];
-  checkPhase = lib.optionalString doCheck "python -m pytest tests -q";
+  # The JS test harness needs node, but only to check the pure web-UI helpers
+  # (node:test, no npm dependencies). It never reaches the packaged output.
+  checkInputs = lib.optionals doCheck [ pytest pkgs.nodejs ];
+  checkPhase = lib.optionalString doCheck ''
+    python -m pytest tests -q
+    ${pkgs.nodejs}/bin/node --test tests/js/*.test.js
+  '';
 
   meta = {
     description = "Yet Another Simple Kanban board (yask)";

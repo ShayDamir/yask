@@ -2,6 +2,7 @@
 // and drop a card onto an epic card to move it into that epic.
 
 import { h } from "./util.js";
+import { computePositionIntentFromChildren } from "./dnd-intent.js";
 
 const INTO_EPIC_TOP = 0.3;
 const INTO_EPIC_BOTTOM = 0.7;
@@ -101,37 +102,28 @@ export function initDnd(actions) {
     if (colBody && intoEpic !== null) {
       intent = { type: "into-epic", epicNumber: intoEpic };
     } else if (colBody) {
-      intent = {
-        type: "position",
-        state: colBody.dataset.state,
-        before: undefined,
-        after: undefined,
-      };
       const children = [...colBody.children].filter(
         (el) =>
           (el.classList.contains("card") && !el.classList.contains("dragging")) ||
           el.classList.contains("drop-slot")
-      );
-      const slotIdx = children.indexOf(slot);
-      if (slotIdx >= 0) {
-        const prev = children[slotIdx - 1];
-        const next = children[slotIdx + 1];
-        // A drop in the gap between two cards is "insert after prev" (or,
-        // equivalently, "before next"). Send only ONE of the two so we never
-        // violate the backend's before/after contract (see #25). The
-        // reference card's ordering scope (dataset.parentNumber: "" = root,
-        // else the epic's number) travels with it so main.js can resolve
-        // cross-scope drops (#140).
-        if (prev && prev.classList.contains("card")) {
-          intent.after = Number(prev.dataset.number);
-          intent.afterParent =
-            prev.dataset.parentNumber === "" ? null : Number(prev.dataset.parentNumber);
-        } else if (next && next.classList.contains("card")) {
-          intent.before = Number(next.dataset.number);
-          intent.beforeParent =
-            next.dataset.parentNumber === "" ? null : Number(next.dataset.parentNumber);
-        }
-      }
+      ).map((el) => ({
+        isCard: el.classList.contains("card"),
+        isSlot: el.classList.contains("drop-slot"),
+        number: el.dataset.number,
+        parentNumber: el.dataset.parentNumber,
+      }));
+      const computed = computePositionIntentFromChildren(children) || {};
+      intent = {
+        type: "position",
+        state: colBody.dataset.state,
+        before: computed.before,
+        after: computed.after,
+        // Both parents always ride along with the intent: they scope the
+        // reference card, which main.js needs to resolve cross-scope drops
+        // (#140). They stay undefined when no reference was named.
+        beforeParent: computed.beforeParent,
+        afterParent: computed.afterParent,
+      };
     }
     cleanup();
     if (intent) actions.onDrop(number, intent);

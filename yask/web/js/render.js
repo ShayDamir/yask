@@ -3,6 +3,7 @@
 // that epic's board view (#140).
 
 import { h, clear, fmtEstimate, typeClass, walkTasks } from "./util.js";
+import { columnTasks } from "./ordering.js";
 import {
   WORKFLOW_STATES,
   BLOCKED_STATE,
@@ -292,17 +293,6 @@ export function renderEpicBoard(project, epicNumber, actions, { showArchived, fi
       )
     );
   }
-}
-
-// Tasks that fill a board column: every task in the state — root tasks and
-// epic children alike (#140) — in (sort_order, number) order. Within one
-// epic scope this is exactly the stored order; across scopes, tasks of
-// different epics interleave by rank. The label filter keeps only tasks that
-// carry the label directly (same semantics as search results).
-export function columnTasks(project, stateName, filterLabel) {
-  let tasks = walkTasks(project.tasks).filter((t) => t.state === stateName);
-  if (filterLabel) tasks = tasks.filter((t) => hasLabel(t, filterLabel));
-  return [...tasks].sort((a, b) => a.sort_order - b.sort_order || a.number - b.number);
 }
 
 export function renderBoard(project, actions, opts) {

@@ -8,7 +8,8 @@ The project name is **`yask`**. All `yask_*` tools and agent dispatches use this
 
 The **MVP is implemented**: `yask/` (Python package: `store.py` domain logic,
 `api.py` REST + static hosting, `web/` vanilla-JS UI, `mcp_server.py`,
-`cli.py`), `tests/` (pytest), flake packaging. `README.md` is the
+`cli.py`), `tests/` (pytest) and `tests/js/` (`node:test` for the web-UI
+helpers), flake packaging. `README.md` is the
 authoritative product spec; treat it as truth and flag gaps with the user
 rather than inventing rules.
 
@@ -19,8 +20,9 @@ Always work inside the nix dev environment (no system Python deps):
 ```
 nix develop                                # shell with Python + deps + pytest
 nix develop -c bash -c 'python3 -m pytest tests -q'   # run the test suite
+nix shell nixpkgs#nodejs -c node --test            # JS tests for the web-UI helpers (run from the repo root; node --test only takes globs here, not directories)
 nix build                                  # build the package
-nix flake check                            # build + run tests hermetically
+nix flake check                            # build + run both test suites hermetically
 nix develop -c yask serve                  # web UI on http://127.0.0.1:4304
 nix develop -c yask mcp                    # MCP server on stdio
 nix develop -c yask telegram               # Telegram bot (needs $TELEGRAM_BOT_TOKEN)
@@ -30,8 +32,10 @@ The yask MCP server (`yask_*` tools) is how every agent talks to yask.
 
 Environment quirks:
 
-- No **node**; syntax-check JS with
-  `nix shell nixpkgs#nodejs -c node --check <file>`.
+- No **node** in the dev shell; run it through
+  `nix shell nixpkgs#nodejs -c node …` — `--check <file>` to syntax-check JS,
+  `--test` to run the web-UI helper tests in `tests/js/` (`node:test`, no npm
+  dependencies; also run by `nix flake check`).
 - New untracked files are **silently excluded from nix builds** (`src =
   lib.cleanSource ./.` reads the git tree). After creating files, run
   `git add -N <files>` so `nix build` / `nix flake check` include them.
