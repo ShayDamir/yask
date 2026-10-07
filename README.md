@@ -48,11 +48,21 @@ Everything is provided by the flake (nixpkgs 26.05). Enter the dev environment
 nix develop
 ```
 
-Run the test suite (538 tests covering the domain rules above):
+Run the pytest suite (it covers the domain rules above):
 
 ```
 python3 -m pytest tests -q
 ```
+
+Run the JS suite for the pure web-UI helpers (`node:test`, no npm
+dependencies), from the repo root — the pinned node's `--test` takes the
+root/glob form (`tests/js/*.test.js`), not a directory argument:
+
+```
+nix shell nixpkgs#nodejs -c node --test
+```
+
+`nix flake check` (below) runs both suites hermetically.
 
 Full build + tests, hermetically:
 
@@ -211,5 +221,9 @@ place but inert: hidden from the subscription list, never notified.
 - `yask/mcp_server.py` — MCP tool surface
 - `yask/telegram_bot.py` — Telegram bot process (Bot API client, poll loop, command dispatch)
 - `yask/cli.py` — `yask serve` / `yask mcp` / `yask telegram`
-- `tests/` — pytest suite
-- `flake.nix` / `package.nix` — packaging and dev environment
+- `tests/` — pytest suite (domain rules)
+- `tests/js/` — `node:test` suite for the pure web-UI helpers
+  (`yask/web/js/ordering.js`, `dnd-intent.js`); run from the repo root with
+  `nix shell nixpkgs#nodejs -c node --test`
+- `flake.nix` / `package.nix` — packaging and dev environment (`nix flake
+  check` runs both test suites)
