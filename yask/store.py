@@ -622,13 +622,16 @@ class Store:
             out.append({"id": p["id"], "name": p["name"], "states": entry_states})
         return out
 
-    def list_in_progress(self, project_id: int) -> list[dict]:
+    def list_in_progress(self, project_id: int, type: str | None = None) -> list[dict]:
         """The project's active pipeline tasks, in dispatch order (the bot's ``/tasks`` view).
 
-        Returns lean ``{"number", "title", "state"}`` dicts for every task whose
-        state is in :data:`db.IN_PROGRESS_STATES` (``Todo``, ``Planning``,
+        Returns lean ``{"number", "title", "state", "type"}`` dicts for every task
+        whose state is in :data:`db.IN_PROGRESS_STATES` (``Todo``, ``Planning``,
         ``In progress``, ``Review``) — Backlog, Done, Blocked and Archived
-        tasks are excluded. The order is the one successive
+        tasks are excluded. ``type`` (case-insensitive, e.g. ``"Bug"``)
+        restricts the list to that task type; an empty type raises
+        ``ValidationError``, as does a type that does not exist. The order is
+        the one successive
         :meth:`get_next_task` calls would dispatch them in (the simulation
         in :meth:`_dispatch_order` reuses its exact scan and
         prerequisite-follow logic), so the first task is the one
@@ -638,17 +641,26 @@ class Store:
         that is not in the active list (a Backlog or Blocked prerequisite),
         that invisible task is treated as worked first and the scan
         continues, so the list starts at the first active task it
-        unblocks. Raises ``NotFound`` for an unknown project id.
+        unblocks. With a ``type`` filter, prerequisites of the other types are
+        invisible to the list exactly as Backlog/Blocked ones are. Raises
+        ``NotFound`` for an unknown project id.
         """
         self._get_project(project_id)
         placeholders, state_params = _in_clause(db.IN_PROGRESS_STATES)
+        sql = "SELECT * FROM tasks WHERE project_id = ? AND state IN (" + placeholders + ")"
+        args: list[Any] = [project_id, *state_params]
+        if type is not None:
+            type = (type or "").strip()
+            if not type:
+                raise ValidationError("type must not be empty")
+            ttype = self._type_by_name(type)
+            if ttype is None:
+                raise ValidationError(f"unknown task type '{type}'")
+            sql += " AND type_id = (SELECT id FROM task_types WHERE name = ? COLLATE NOCASE)"
+            args.append(type)
         # Full rows: the simulation resolves candidates through
         # ``_follow_prereqs``, which serializes the row it reaches.
-        rows = self.conn.execute(
-            "SELECT * FROM tasks "
-            f"WHERE project_id = ? AND state IN ({placeholders})",
-            [project_id, *state_params],
-        ).fetchall()
+        rows = self.conn.execute(sql, args).fetchall()
         return self._dispatch_order(rows)
 
     def list_backlog(self, project_id: int) -> list[dict]:
@@ -1209,6 +1221,10 @@ class Store:
         falls back to the first remaining candidate in scan order so the
         list stays total (defensive only — prerequisite cycles are rejected
         by ``set_prerequisites``, the only way a follow could dead-end).
+
+        Projects the ordered rows into the lean ``{"number", "title", "state",
+        "type"}`` shape its views render; the type names are batch-loaded in
+        one query from the rows' ``type_id``.
         """
         by_id = {r["id"]: r for r in rows}
         per_state = {
@@ -1258,8 +1274,21 @@ class Store:
             ordered.append(by_id[picked])
             remaining.discard(picked)
             satisfied.add(picked)
+        type_ph, type_params = _in_clause({r["type_id"] for r in rows})
+        type_names = {
+            t["id"]: t["name"]
+            for t in self.conn.execute(
+                f"SELECT id, name FROM task_types WHERE id IN ({type_ph})",
+                type_params,
+            ).fetchall()
+        }
         return [
-            {"number": r["number"], "title": r["title"], "state": r["state"]}
+            {
+                "number": r["number"],
+                "title": r["title"],
+                "state": r["state"],
+                "type": type_names[r["type_id"]],
+            }
             for r in ordered
         ]
 

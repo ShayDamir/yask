@@ -372,6 +372,24 @@ def build_server(store: Store) -> FastMCP:
     @mcp.tool()
     @_wrap
     @_project_arg(store)
+    def list_actionable_tasks(project_id: int, type: str | None = None):
+        """List the project's actionable tasks (Todo/Planning/In progress/Review) in
+        dispatch order — the order successive get_next_task calls would dispatch them,
+        so the first row is the next dispatch. Backlog, Done, Blocked and Archived
+        tasks are excluded. Optional type (e.g. "Bug", case-insensitive) restricts the
+        list to that task type; unknown types are rejected. Returns
+        {"number","title","state","type"} dicts.
+
+        No return annotation on purpose: a list-typed annotation makes FastMCP
+        validate the result against an output schema, and the readable
+        ``{"ok": False, "error": ...}`` domain-error payload fails that
+        validation as a ToolError (same reason ``list_tasks`` has none).
+        """
+        return store.list_in_progress(project_id, type)
+
+    @mcp.tool()
+    @_wrap
+    @_project_arg(store)
     def add_attachment(
         project_id: int,
         number: int,

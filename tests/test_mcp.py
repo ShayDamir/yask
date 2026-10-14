@@ -346,6 +346,7 @@ def test_delete_attachment(store, project):
 PROJECT_SCOPED = (
     "get_project",
     "list_tasks",
+    "list_actionable_tasks",
     "get_task",
     "get_next_task",
     "create_task",
@@ -638,3 +639,122 @@ def test_get_task_is_registered(store, project):
 
     names_list = asyncio.run(names())
     assert "get_task" in names_list
+
+
+# --- list_actionable_tasks tests ---
+
+
+def _raw(store, name, **args):
+    """call_tool's content blocks, tolerating an empty (no-content) reply."""
+    server = build_server(store)
+    blocks = asyncio.run(server.call_tool(name, args))
+    if isinstance(blocks, tuple):
+        blocks = blocks[0]
+    return [c for c in blocks if isinstance(c, TextContent)]
+
+
+def _rows(store, name, **args):
+    return [json.loads(c.text) for c in _raw(store, name, **args)]
+
+
+def test_list_actionable_tasks_is_registered(store, project):
+    server = build_server(store)
+
+    async def names():
+        return sorted(t.name for t in await server.list_tools())
+
+    assert "list_actionable_tasks" in asyncio.run(names())
+
+
+def test_list_actionable_tasks_lists_active_states_in_dispatch_order(store, project):
+    pid = project["id"]
+    todo = store.create_task(pid, "todo", "Bug")
+    store.move_task(pid, todo["number"], "Todo", confirm=True)
+    review = store.create_task(pid, "review", "Bug")
+    store.move_task(pid, review["number"], "Review", confirm=True)
+    backlog = store.create_task(pid, "backlog bug", "Bug")  # never actionable
+    done = store.create_task(pid, "done bug", "Bug")
+    store.move_task(pid, done["number"], "Done", confirm=True)
+
+    rows = _rows(store, "list_actionable_tasks", project=project["name"])
+    assert [(r["number"], r["state"], r["type"]) for r in rows] == [
+        (review["number"], "Review", "Bug"),
+        (todo["number"], "Todo", "Bug"),
+    ]
+    assert backlog["number"] not in [r["number"] for r in rows]
+    assert done["number"] not in [r["number"] for r in rows]
+    # the first row is the task get_next_task would dispatch next
+    assert rows[0]["number"] == store.get_next_task(pid)["number"]
+
+
+def test_list_actionable_tasks_filters_by_type(store, project):
+    pid = project["id"]
+    bug = store.create_task(pid, "a bug", "Bug")
+    store.move_task(pid, bug["number"], "In progress", confirm=True)
+    story = store.create_task(pid, "a story", "Story")
+    store.move_task(pid, story["number"], "Review", confirm=True)
+    task = store.create_task(pid, "a task", "Task")
+    store.move_task(pid, task["number"], "Planning", confirm=True)
+
+    assert _rows(store, "list_actionable_tasks", project=project["name"], type="Bug") == [
+        {"number": bug["number"], "title": "a bug", "state": "In progress", "type": "Bug"}
+    ]
+    # case-insensitive, like every other type reference
+    assert _rows(store, "list_actionable_tasks", project="DEMO", type="bug") == [
+        {"number": bug["number"], "title": "a bug", "state": "In progress", "type": "Bug"}
+    ]
+    # no type → every actionable task, dispatch order (Review > In progress >
+    # Planning > Todo)
+    assert [(r["title"], r["type"]) for r in _rows(store, "list_actionable_tasks", project="demo")] == [
+        ("a story", "Story"),
+        ("a bug", "Bug"),
+        ("a task", "Task"),
+    ]
+
+
+def test_list_actionable_tasks_type_filter_keeps_prereq_order(store, project):
+    pid = project["id"]
+    prereq = store.create_task(pid, "bug prereq", "Bug")
+    store.move_task(pid, prereq["number"], "Todo", confirm=True)
+    review = store.create_task(pid, "bug review", "Bug")
+    store.move_task(pid, review["number"], "Review", confirm=True)
+    store.set_prerequisites(pid, review["number"], [prereq["number"]])
+
+    rows = _rows(store, "list_actionable_tasks", project=project["name"], type="Bug")
+    assert [r["number"] for r in rows] == [prereq["number"], review["number"]]
+
+
+def test_list_actionable_tasks_unknown_project(store, project):
+    data = _rows(store, "list_actionable_tasks", project="nope")
+    assert data == [{"ok": False, "error": "project 'nope' not found"}]
+
+
+def test_list_actionable_tasks_unknown_type(store, project):
+    store.create_task(project["id"], "t")
+    data = _rows(store, "list_actionable_tasks", project=project["name"], type="Nope")
+    assert data[0]["ok"] is False
+    assert "unknown task type" in data[0]["error"]
+
+
+def test_list_actionable_tasks_empty_project(store, project):
+    # no actionable tasks: an empty reply, not an error payload
+    assert _rows(store, "list_actionable_tasks", project=project["name"]) == []
+
+
+def test_list_actionable_tasks_schema_type_is_optional_nullable(store, project):
+    server = build_server(store)
+
+    async def schema():
+        for t in await server.list_tools():
+            if t.name == "list_actionable_tasks":
+                return t.inputSchema
+
+    schema = asyncio.run(schema())
+    props = schema["properties"]
+    union = props["type"]["anyOf"]
+    assert {"type": "string"} in union and {"type": "null"} in union
+    assert "type" not in schema.get("required", [])
+    # a list-typed return annotation would break the error payload (see #13)
+    tools = asyncio.run(server.list_tools())
+    tool = next(t for t in tools if t.name == "list_actionable_tasks")
+    assert tool.outputSchema is None

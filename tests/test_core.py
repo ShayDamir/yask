@@ -335,10 +335,10 @@ def test_list_in_progress_states_and_isolation(store):
     # dispatch order (the order get_next_task would dispatch them): Review
     # first, then the lower states
     assert out == [
-        {"number": review["number"], "title": "review", "state": "Review"},
-        {"number": working["number"], "title": "working", "state": "In progress"},
-        {"number": planning["number"], "title": "planning", "state": "Planning"},
-        {"number": todo["number"], "title": "todo", "state": "Todo"},
+        {"number": review["number"], "title": "review", "state": "Review", "type": "Task"},
+        {"number": working["number"], "title": "working", "state": "In progress", "type": "Task"},
+        {"number": planning["number"], "title": "planning", "state": "Planning", "type": "Task"},
+        {"number": todo["number"], "title": "todo", "state": "Todo", "type": "Task"},
     ]
     # the excluded states never appear
     for t in out:
@@ -526,6 +526,161 @@ def test_list_in_progress_first_task_is_next_dispatch(store):
 def test_list_in_progress_unknown_project(store):
     with pytest.raises(NotFound):
         store.list_in_progress(999)
+
+
+def _seed_mixed_types(store, pid):
+    """Active tasks of several types plus inactive Bugs; returns a name → task map."""
+    named = {}
+    named["bug review"] = store.create_task(pid, "bug review", "Bug")
+    store.move_task(pid, named["bug review"]["number"], "Review", confirm=True)
+    named["bug todo"] = store.create_task(pid, "bug todo", "Bug")
+    store.move_task(pid, named["bug todo"]["number"], "Todo", confirm=True)
+    named["story planning"] = store.create_task(pid, "story planning", "Story")
+    store.move_task(pid, named["story planning"]["number"], "Planning", confirm=True)
+    named["task in progress"] = store.create_task(pid, "task in progress", "Task")
+    store.move_task(pid, named["task in progress"]["number"], "In progress", confirm=True)
+    # Bug tasks outside the active set: never in a filtered list
+    named["bug backlog"] = store.create_task(pid, "bug backlog", "Bug")
+    named["bug done"] = store.create_task(pid, "bug done", "Bug")
+    store.move_task(pid, named["bug done"]["number"], "Done", confirm=True)
+    named["bug blocked"] = store.create_task(pid, "bug blocked", "Bug")
+    store.move_task(pid, named["bug blocked"]["number"], "Blocked")
+    named["bug archived"] = store.create_task(pid, "bug archived", "Bug")
+    store.archive_task(pid, named["bug archived"]["number"], confirm=True)
+    return named
+
+
+def test_list_in_progress_type_filter(store, project):
+    pid = project["id"]
+    named = _seed_mixed_types(store, pid)
+
+    out = store.list_in_progress(pid, "Bug")
+    # only the active Bug rows, in dispatch order (Review first)
+    assert out == [
+        {
+            "number": named["bug review"]["number"],
+            "title": "bug review",
+            "state": "Review",
+            "type": "Bug",
+        },
+        {
+            "number": named["bug todo"]["number"],
+            "title": "bug todo",
+            "state": "Todo",
+            "type": "Bug",
+        },
+    ]
+    for t in out:
+        assert t["state"] not in ("Backlog", "Done", "Blocked", "Archived")
+    assert all(set(t) == {"number", "title", "state", "type"} for t in out)
+
+
+def test_list_in_progress_type_filter_is_case_insensitive_and_stripped(store, project):
+    pid = project["id"]
+    _seed_mixed_types(store, pid)
+    expected = store.list_in_progress(pid, "Bug")
+    assert store.list_in_progress(pid, "bug") == expected
+    assert store.list_in_progress(pid, "BUG") == expected
+    assert store.list_in_progress(pid, "  bug  ") == expected
+
+
+def test_list_in_progress_type_filter_none_returns_every_type(store, project):
+    pid = project["id"]
+    _seed_mixed_types(store, pid)
+    # regression: the unfiltered view is unchanged (same rows, same order)
+    assert [(t["title"], t["type"]) for t in store.list_in_progress(pid)] == [
+        ("bug review", "Bug"),
+        ("task in progress", "Task"),
+        ("story planning", "Story"),
+        ("bug todo", "Bug"),
+    ]
+    assert store.list_in_progress(pid) == store.list_in_progress(pid, None)
+
+
+def test_list_in_progress_type_filter_rejects_unknown_and_empty(store, project):
+    pid = project["id"]
+    _seed_mixed_types(store, pid)
+    with pytest.raises(ValidationError):
+        store.list_in_progress(pid, "Nope")
+    with pytest.raises(ValidationError):
+        store.list_in_progress(pid, "")
+    with pytest.raises(ValidationError):
+        store.list_in_progress(pid, "   ")
+    # validation happens before any rows are read
+    with pytest.raises(ValidationError):
+        store.list_in_progress(pid, "nope")
+
+
+def test_list_in_progress_type_filter_keeps_dispatch_order(store, project):
+    # A Review Bug whose unmet Bug prerequisite sits in Todo: the filtered
+    # list still reads prerequisite-first.
+    pid = project["id"]
+    review = store.create_task(pid, "bug review", "Bug")
+    store.move_task(pid, review["number"], "Review", confirm=True)
+    todo = store.create_task(pid, "bug prereq", "Bug")
+    store.move_task(pid, todo["number"], "Todo", confirm=True)
+    store.set_prerequisites(pid, review["number"], [todo["number"]])
+
+    out = store.list_in_progress(pid, "Bug")
+    assert [(t["number"], t["state"]) for t in out] == [
+        (todo["number"], "Todo"),
+        (review["number"], "Review"),
+    ]
+    assert out[0]["number"] == store.get_next_task(pid)["number"]
+
+
+def test_list_in_progress_type_filter_treats_other_types_as_invisible(store, project):
+    # A Bug candidate whose only prerequisite is a Task in Todo: the Task is
+    # filtered out, so the candidate leads the list exactly as it does when
+    # the prerequisite is outside the active set (Backlog/Blocked).
+    pid = project["id"]
+    prereq = store.create_task(pid, "task prereq", "Task")
+    store.move_task(pid, prereq["number"], "Todo", confirm=True)
+    bug = store.create_task(pid, "bug review", "Bug")
+    store.move_task(pid, bug["number"], "Review", confirm=True)
+    store.set_prerequisites(pid, bug["number"], [prereq["number"]])
+
+    out = store.list_in_progress(pid, "Bug")
+    assert [(t["number"], t["title"]) for t in out] == [(bug["number"], "bug review")]
+    assert store.list_in_progress(pid, "Task") == [
+        {"number": prereq["number"], "title": "task prereq", "state": "Todo", "type": "Task"}
+    ]
+
+
+def test_list_in_progress_type_filter_isolates_projects(store):
+    alpha = store.create_project("alpha")["id"]
+    beta = store.create_project("beta")["id"]
+    a_bug = store.create_task(alpha, "alpha bug", "Bug")
+    store.move_task(alpha, a_bug["number"], "In progress", confirm=True)
+    b_bug = store.create_task(beta, "beta bug", "Bug")
+    store.move_task(beta, b_bug["number"], "Todo", confirm=True)
+
+    assert [t["title"] for t in store.list_in_progress(alpha, "Bug")] == ["alpha bug"]
+    assert [t["title"] for t in store.list_in_progress(beta, "Bug")] == ["beta bug"]
+    assert store.list_in_progress(alpha, "Story") == []
+
+
+def test_list_in_progress_type_filter_epics(store, project):
+    # Epics are actionable and filterable like any other type (they carry no
+    # estimate, and their subtasks are separate rows).
+    pid = project["id"]
+    epic = store.create_task(pid, "epic", "Epic")
+    store.move_task(pid, epic["number"], "Todo", confirm=True)
+    child = store.create_task(pid, "child story", "Story", parent_number=epic["number"])
+    store.move_task(pid, child["number"], "In progress", confirm=True)
+
+    assert [t["title"] for t in store.list_in_progress(pid, "Epic")] == ["epic"]
+    assert store.list_in_progress(pid, "Epic")[0]["type"] == "Epic"
+    assert [t["title"] for t in store.list_in_progress(pid, "Story")] == ["child story"]
+
+
+def test_list_in_progress_items_carry_type(store, project):
+    pid = project["id"]
+    story = store.create_task(pid, "story", "Story")
+    store.move_task(pid, story["number"], "Planning", confirm=True)
+    assert store.list_in_progress(pid) == [
+        {"number": story["number"], "title": "story", "state": "Planning", "type": "Story"}
+    ]
 
 
 def test_list_backlog_empty(store, project):
